@@ -1,0 +1,50 @@
+[b][size=5]Callisto SSS — Callisto BRDF & SSS kernel[/size][/b]
+[b]Linux / Steam Play (Proton) only · v1.0.0[/b]
+
+Vanilla Cyberpunk's path tracer shades skin with a plain Lambert diffuse (albedo/π) plus GGX specular — [i]no skin-specific lobe at all[/i]. That's a big part of why faces can look dry, matte and gravelly, especially under frontal lighting.
+
+This mod makes two surgical, composable changes:
+
+[b]1. Callisto BRDF injection (the main event)[/b]
+A small Vulkan layer hot-swaps the path tracer's ray-generation shader at load time with a patched version that adds the Callisto [b]c1[/b] terms (from [i]"The Character Rendering Art of 'The Callisto Protocol'"[/i], SIGGRAPH 2023):
+[list]
+[*][b]Diffuse Fresnel[/b] — soft, fleshy response at grazing angles instead of the flat Lambert falloff
+[*][b]Retroreflection[/b] — the subtle front-lit glow that makes skin look alive
+[/list]
+The patch is [b]skin-gated[/b]: it only touches pixels the engine itself classifies as skin (the exact test the game's own SSS pass uses). Every other material renders bit-identically to vanilla.
+
+[b]2. Callisto-reshaped SSS blur kernel[/b]
+A RED4ext plugin replaces the engine's runtime-generated subsurface diffusion kernel with a reshaped profile (wider red-channel bleed, softened center). Toggleable in-game via the CET overlay.
+
+Ships pre-tuned to tasteful defaults — no configuration required.
+
+[b][size=4]Requirements[/size][/b]
+[list]
+[*]Cyberpunk 2077 on [b]Linux via Steam Play/Proton[/b] (tested on NVIDIA / vkd3d-proton)
+[*][url=https://www.nexusmods.com/cyberpunk2077/mods/2380]RED4ext[/url]
+[*](optional, for the in-game SSS kernel toggle) [url=https://www.nexusmods.com/cyberpunk2077/mods/107]Cyber Engine Tweaks[/url] + [url=https://www.nexusmods.com/cyberpunk2077/mods/3518]nativeSettings[/url]
+[/list]
+
+[b][size=4]Install[/size][/b]
+[list=1]
+[*]Extract the archive anywhere
+[*]Run [b]./install.sh[/b] — it finds the game, installs everything, clears the shader caches
+[*]Paste the launch-options line it prints into Steam → Properties → Launch Options
+[*]Play (first boot recompiles shaders once)
+[/list]
+Manual install steps, verification, vanilla A/B control and uninstall are documented in the included README. [b]./uninstall.sh[/b] removes everything cleanly.
+
+[b][size=4]FAQ[/size][/b]
+[b]Windows?[/b] No. The BRDF patch relies on Proton translating shaders to SPIR-V (where a Vulkan layer can substitute them); on native Windows the mechanism doesn't exist.
+[b]Without Path Tracing?[/b] The BRDF patch is PT-only; the SSS kernel applies in all modes.
+[b]Performance?[/b] Effectively free — two shaders substituted at load, one small texture patched at boot.
+[b]Conflicts?[/b] No game files are modified; composes with other mods.
+[b]Game updates?[/b] If CDPR recompiles the PT shaders the layer passes through (vanilla look, no crash) until the mod updates.
+
+[b][size=4]Credits[/size][/b]
+[list]
+[*]Jorge Jimenez, Glauco Longhi, Miguel Petersen, et al. — the SIGGRAPH 2023 Callisto character-rendering talk this implements
+[*]RED4ext.SDK (MIT), vkd3d-proton / dxil-spirv, Cyber Engine Tweaks, nativeSettings, SPIRV-Tools
+[/list]
+
+MIT license. Source and full reverse-engineering notes available — see the included README.
