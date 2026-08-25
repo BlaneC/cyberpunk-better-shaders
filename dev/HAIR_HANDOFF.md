@@ -209,3 +209,101 @@ edits first, hair edits second; both only append ids and rewrite distinct
 uses — verify no site overlap: skin triples are the SAME triples, gates
 differ, so wrap's multiply and c1's multiply chain on the same values — order
 independent, both OpSelect-gated on disjoint classes; fine).
+
+---
+
+# IMPLEMENTATION STATUS (branch `hair-brdf`)
+
+Ideas 2 and 3 are implemented in `dev/patch_skin_brdf.py`. Idea 1 (dual lobe)
+is not. **Nothing is shippable until hair's class value N is identified** —
+every hair tier requires `--hair-class N` and refuses to run without it.
+
+## Step zero: find N (must be done in-game)
+
+```
+python3 dev/patch_skin_brdf.py dev/disasm/spv_0170.spvasm \
+  dev/disasm/spv_0171.spvasm --tier smoke --hair-class N --outdir ../swaps
+# then regen_and_clear.sh, launch, look at hair
+```
+`--tier smoke --hair-class N` gates the red tint on class N instead of skin.
+Cycle N over 2..8, 13, 14 (and anything else plausible — the gbuffer class
+field and the OpSwitch case numbering are not proven to share an id space).
+Hair turns red at the right N. Record it here and in `HAIR_CLASS`.
+
+Caveat: smoke tints the diffuse triples only. If a candidate shows nothing but
+you suspect it, check with `--tier hair2 --hair-class N --set k_sheen=3.0`,
+which blows out the specular instead.
+
+## Tiers
+
+| tier | does |
+|---|---|
+| `hair2` | roughness reshape (2a) + gated sheen (2b) |
+| `hair3` | diffuse wrap (3) |
+| `hair23` | both |
+| `--with-tier1` | additionally applies the shipped skin c1, combined into one multiply per triple |
+
+Ship command once N is known:
+```
+python3 dev/patch_skin_brdf.py dev/disasm/spv_0170.spvasm \
+  dev/disasm/spv_0171.spvasm --tier hair23 --hair-class N --with-tier1 \
+  --outdir ../swaps
+```
+`--with-tier1` matters: without it the hair swap **replaces** the skin patch
+and you lose the shipped skin look.
+
+## What was built
+
+- `find_class_shift` — returns the `gbuf.y>>5` value plus the line of the skin
+  IEqual; the hair gate is a new `OpIEqual` inserted directly after it, so it
+  inherits that block's dominance over every eval site.
+- `Module.uconst` — find-or-create `OpConstant %uint N`.
+- `replace_all_uses` — used for the roughness reshape so the sampling branch
+  and the eval read the same reshaped alpha (MIS stays consistent).
+- `find_ggx_sites` — anchors on the pi in the GGX D denominator, then walks to
+  Vis*D, the outputs, and the Schlick pow5 (found via its spherical-gaussian
+  constants -6.98316002 / 5.55472994).
+- `emit_c1_factor` — extracted from `build_tier1` so hair and skin factors can
+  be multiplied into one per-triple multiply instead of fighting over the same
+  single FMul use. **Verified: tier1 output is byte-identical after this
+  refactor** (sha256 921f95fc… / 84b17a86…).
+- `build_diffuse` — combines whichever factors are enabled.
+
+## Corrections to the plan above, found while implementing
+
+1. **Spec sites are not always 3-channel.** spv_0170 expands Fresnel per
+   channel; spv_0171 has scalar sites (`pow5 * Vis*D`, one output). Requiring
+   a 3-FMul trio found 0 sites in spv_0171. The finder now takes however many
+   FMuls consume Vis*D.
+2. **Sheen is applied to the outputs, not to F.** Since out = F*vd, adding
+   `sheen*vd` to the output equals adding `sheen` to F, and clamping the
+   result to `vd` is exactly the F<=1 clamp (vd is what F=1 yields). This works
+   for both site shapes, where the F-id route did not.
+3. **The sheen splice is OpSelect-gated**, not left to `k_sheen=0`. The clamp
+   to vd is only a no-op where out <= vd; that holds for F*vd with F<=1 but is
+   not guaranteed for every generically-matched site, so gating makes every
+   non-hair pixel bit-exact by construction.
+4. **Alpha is per-copy, not global.** spv_0170 has three alpha sources
+   (%5655, %5721, %5344), each feeding two spec sites; spv_0171 likewise
+   (%6403, %6469, %5937). The reshape runs once per distinct source.
+5. Section 2a's uncertainty about `%5649` is resolved: it occurs exactly twice
+   (def + square), so reshaping at the alpha (`%5655`-equivalent) covers the
+   whole spec path.
+6. Some GGX D sites have no Schlick pow5 nearby (3 in spv_0170, 2 in
+   spv_0171) and are skipped for sheen; they still get the roughness reshape.
+   Reported as `skipped_no_pow5`.
+
+## Verification done
+
+- `spirv-val` clean on both modules for `hair2`, `hair3`, `hair23`,
+  `hair23 --with-tier1`, `--vanilla`, and `smoke --hair-class` for N in
+  {2,3,4,13}.
+- tier1 byte-identical to its pre-refactor baseline.
+
+## Verification still owed (needs the game)
+
+- Identity: `--vanilla` should look pixel-identical to unpatched.
+- The real A/B once N is known; watch for fireflies on backlit hair and lower
+  `r_max` / `w_wrap` if they appear.
+- Env triples are NOT wrapped (only the three primary/NEE triples), per the
+  fallback in section 3. Revisit if hair still reads flat in bounce light.

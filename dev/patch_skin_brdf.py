@@ -49,8 +49,19 @@ KNOBS = {
     # c1 params (BRDF_HANDOFF Tier-1 suggested start; tints white)
     "rho_f": 1.35, "n_f": 0.75, "m_f": 0.75,
     "rho_r": 1.25, "n_r": 0.75, "m_r": 0.75,
+    # hair (HAIR_HANDOFF.md); identity at s_h=1, a_min=0, k_sheen=0, w_wrap=0
+    "s_h": 0.55,      # roughness scale: <1 sharpens the highlight
+    "a_min": 0.04,    # floor so hair never goes mirror-sharp
+    "k_sheen": 0.15,  # grazing sheen added to F
+    "w_wrap": 0.4,    # diffuse wrap width
+    "r_max": 4.0,     # wrap ratio clamp (firefly guard)
 }
-VANILLA = dict(KNOBS, tint=(1.0, 1.0, 1.0), rho_f=1.0, rho_r=1.0)
+VANILLA = dict(KNOBS, tint=(1.0, 1.0, 1.0), rho_f=1.0, rho_r=1.0,
+               s_h=1.0, a_min=0.0, k_sheen=0.0, w_wrap=0.0)
+
+# gbuffer material class for hair -- NOT yet identified; see HAIR_HANDOFF.md
+# section 1 for the discovery procedure. Skin is 1.
+HAIR_CLASS = None
 
 PI_CONST = "0.318309873"   # float32(1/pi) as printed by spirv-dis
 EPS = 1e-5                 # pow base clamp (matches module's 9.99999975en06)
@@ -112,6 +123,15 @@ class Module:
     def new_id(self):
         i = self.next_id; self.next_id += 1
         return f"%{i}"
+
+    def uconst(self, n):
+        """Find or create an `OpConstant %uint n`; returns (id, decl_or_None)."""
+        pat = re.compile(r'\s*(%\w+)\s*=\s*OpConstant %uint ' + str(int(n)) + r'\s*$')
+        for ln in self.lines:
+            m = pat.match(ln)
+            if m: return m.group(1), None
+        nid = f"%uint_{int(n)}"
+        return nid, f"    {nid} = OpConstant %uint {int(n)}"
 
     def const(self, value):
         v = f32(value)
@@ -254,6 +274,254 @@ def find_nv(mod, site_line):
         return comps[1], comps[0]
     die(f"{mod.name}: cannot tell N from V at site @{site_line+1}")
 
+# ------------------------------------------------------------- hair support
+def find_class_shift(mod):
+    """The `gbuf.y >> 5` material-class value, plus the line of the skin
+    IEqual that consumes it.
+
+    Same structural walk as find_skin_gate, but returns the shifted uint so a
+    gate for any class value can be built from it. Inserting the new IEqual
+    directly after the existing one inherits its dominance, which is what lets
+    the hair gate reach every eval site the skin gate already reaches.
+    """
+    for i, ln in enumerate(mod.lines):
+        m = re.match(r'\s*(%\d+)\s*=\s*OpIEqual %bool (%\d+) %uint_1\s*$', ln)
+        if not m: continue
+        _, sh = mod.find_def(m.group(2))
+        if not sh: continue
+        ms = re.match(r'OpShiftRightLogical %uint (%\d+) %uint_5', sh)
+        if not ms: continue
+        _, ex = mod.find_def(ms.group(1))
+        if not ex: continue
+        me = re.match(r'OpCompositeExtract %uint (%\d+) 1', ex)
+        if not me: continue
+        _, fe = mod.find_def(me.group(1))
+        if fe and fe.startswith('OpImageFetch %v4uint'):
+            return m.group(2), i
+    die(f"{mod.name}: material-class shift (gbuf.y>>5) not found")
+
+
+def find_ggx_sites(mod):
+    """Locate every GGX specular eval by the pi in its denominator.
+
+    Anchor chain: D = OpFDiv(a2, OpFMul(x, pi)); a2 = OpFMul(alpha, alpha);
+    then the Vis*D product, then the three consecutive per-channel FMuls that
+    produce F*D*Vis, then the Schlick pow5 shared by the three Fresnel FAdds.
+    Sites whose structure does not match completely are skipped rather than
+    guessed at.
+    """
+    pi = None
+    for ln in mod.lines:
+        m = re.match(r'\s*(%\w+)\s*=\s*OpConstant %float 3.14159274\b', ln)
+        if m: pi = m.group(1); break
+    if not pi: die(f"{mod.name}: pi constant not found")
+
+    sites = []
+    for i, ln in enumerate(mod.lines):
+        m = re.match(r'\s*(%\d+)\s*=\s*OpFDiv %float (%\d+) (%\d+)\s*$', ln)
+        if not m: continue
+        d_id, a2_id, den = m.groups()
+        _, dn = mod.find_def(den)
+        if not dn or not re.match(r'OpFMul %float %\d+ ' + re.escape(pi) + r'\s*$', dn):
+            continue
+        _, a2d = mod.find_def(a2_id)
+        am = re.match(r'OpFMul %float (%\d+) (%\d+)\s*$', a2d or '')
+        if not am or am.group(1) != am.group(2):
+            continue
+        alpha = am.group(1)
+        a_line, _ = mod.find_def(alpha)
+        # Vis*D: the unique FMul consuming D
+        vd = None
+        vpat = re.compile(r'^\s*(%\d+)\s*=\s*OpFMul %float (%\d+) (%\d+)\s*$')
+        for j in range(i + 1, min(i + 80, len(mod.lines))):
+            vm = vpat.match(mod.lines[j])
+            if vm and d_id in (vm.group(2), vm.group(3)):
+                vd = vm.group(1); break
+        if not vd: continue
+        # Outputs are every FMul consuming vd. spv_0170 expands Fresnel per
+        # channel (three of them); spv_0171 has scalar sites with a single
+        # output, so the count must not be assumed.
+        outs = []
+        for j in range(i + 1, min(i + 160, len(mod.lines))):
+            vm = vpat.match(mod.lines[j])
+            if vm and vm.group(1) != vd and vd in (vm.group(2), vm.group(3)):
+                outs.append(vm.group(1))
+        if not outs: continue
+        # Schlick pow5 via the spherical-gaussian fit:
+        #   Exp2( (-6.98316002 - VoH*5.55472994) * VoH )
+        pow5 = None
+        for j in range(max(0, i - 60), min(i + 160, len(mod.lines))):
+            em = re.match(r'\s*(%\d+)\s*=\s*OpExtInst %float %\w+ Exp2 (%\d+)\s*$',
+                          mod.lines[j])
+            if not em: continue
+            _, q = mod.find_def(em.group(2))
+            qm = re.match(r'OpFMul %float (%\d+) (%\d+)\s*$', q or '')
+            if not qm: continue
+            for r in qm.groups():
+                _, rd = mod.find_def(r)
+                if rd and re.match(r'OpFSub %float %float_n6_98316002 %\d+', rd):
+                    pow5 = em.group(1); break
+            if pow5: break
+        sites.append(dict(line=i, d=d_id, a2=a2_id, alpha=alpha,
+                          alpha_line=a_line, vd=vd, outs=outs, pow5=pow5))
+    return sites
+
+
+def replace_all_uses(mod, old, new, after_line):
+    """Rewrite every reference to %old below its definition to %new.
+
+    Used for the roughness reshape, where the point is that BOTH the eval and
+    the importance-sampling branch read the reshaped value -- if only the eval
+    changed, sampling and evaluation would disagree and MIS would be biased.
+    """
+    tok = re.compile(r'(?<![%\w])' + re.escape(old) + r'(?![\w])')
+    isdef = re.compile(r'^\s*' + re.escape(old) + r'\s*=')
+    n = 0
+    for j in range(after_line + 1, len(mod.lines)):
+        if isdef.match(mod.lines[j]): continue
+        ln2, k = tok.subn(new, mod.lines[j])
+        if k:
+            mod.lines[j] = ln2
+            n += k
+    return n
+
+
+def build_hair_spec(mod, sites, gate, knobs):
+    """Idea 2: roughness reshape at the common alpha + gated sheen on F."""
+    consts, edits = [], []
+    def C(v):
+        nid, c = mod.const(v)
+        if c: consts.append(c)
+        return nid
+    one, zero = C(1.0), C(0.0)
+    s_h, a_min, k_sh = C(knobs["s_h"]), C(knobs["a_min"]), C(knobs["k_sheen"])
+    gl = mod.glsl
+    rep = {"alphas": [], "sheen_sites": 0, "skipped_no_pow5": 0}
+
+    # --- 2a: one reshape per distinct alpha source, all uses rewritten
+    for alpha in sorted({s['alpha'] for s in sites},
+                        key=lambda a: mod.find_def(a)[0]):
+        aline, _ = mod.find_def(alpha)
+        I = mod.new_id
+        sc, cl, sel = I(), I(), I()
+        # Replace first, then insert: the new block must keep referring to the
+        # original alpha, so it is written after the rewrite has happened.
+        replace_all_uses(mod, alpha, sel, aline)
+        # apply_edits inserts at pos+1, so pos=aline puts the block directly
+        # after alpha's definition -- it reads alpha, so it cannot precede it.
+        edits.append((aline, [
+            f"        {sc} = OpFMul %float {alpha} {s_h}",
+            f"        {cl} = OpExtInst %float {gl} NClamp {sc} {a_min} {one}",
+            f"        {sel} = OpSelect %float {gate} {cl} {alpha}",
+        ]))
+        rep["alphas"].append({"alpha": alpha, "line": aline + 1, "sel": sel})
+
+    # --- 2b: sheen added to the Fresnel term, per site.
+    # Each output is F*vd, so adding sheen to F is the same as adding
+    # sheen*vd to the output; clamping the result to vd is exactly the F<=1
+    # clamp, since vd is what F=1 would produce. Working on outputs instead of
+    # on F ids keeps this valid for both the per-channel and the scalar sites.
+    for s in sites:
+        if not s['pow5']:
+            rep["skipped_no_pow5"] += 1
+            continue
+        I = mod.new_id
+        sh, sel, add = I(), I(), I()
+        ins = [
+            f"        {sh} = OpFMul %float {s['pow5']} {k_sh}",
+            f"        {sel} = OpSelect %float {gate} {sh} {zero}",
+            f"        {add} = OpFMul %float {sel} {s['vd']}",
+        ]
+        last_out = max(mod.find_def(o)[0] for o in s['outs'])
+        for o in s['outs']:
+            a, b, c = I(), I(), I()
+            ins.append(f"        {a} = OpFAdd %float {o} {add}")
+            ins.append(f"        {b} = OpExtInst %float {gl} NMin {a} {s['vd']}")
+            # Select on the gate rather than relying on add==0: the clamp to vd
+            # is only a no-op where out <= vd, which holds for F*vd with F<=1
+            # but is not guaranteed for every site this matches generically.
+            # Gating makes every non-hair pixel bit-exact by construction.
+            ins.append(f"        {c} = OpSelect %float {gate} {b} {o}")
+            replace_all_uses(mod, o, c, last_out)
+        edits.append((last_out, ins))
+        rep["sheen_sites"] += 1
+        rep["out_counts"] = rep.get("out_counts", []) + [len(s['outs'])]
+    return consts, edits, rep
+
+
+def emit_wrap_factor(mod, t, gate, K, C):
+    """Idea 3: energy-normalized diffuse wrap, as a ratio.
+
+    NoL is already folded into the site's light weight, so the factor spliced
+    here is wrap/NoL rather than wrap itself -- multiplying by the wrap term
+    directly would apply the cosine twice.
+
+        wrap  = sat((NoL + w) / (1 + w)) / (1 + w)
+        ratio = min(wrap / max(NoL, 1e-3), r_max)
+
+    At w=0 this is NoL/max(NoL,1e-3) = 1 for NoL >= 1e-3; below that the
+    diffuse term is ~0 anyway, so w=0 is a visual identity (not bit-exact).
+    """
+    one, zero = C(1.0), C(0.0)
+    w = K["w_wrap"]
+    wk, inv = C(w), C(1.0 / (1.0 + w))
+    e3, rmax = C(1e-3), C(K["r_max"])
+    gl = mod.glsl
+    r_ch = t['chan'].index(0)
+    nol = trace_nol(mod, t['line'], t['ids'][r_ch])
+    I = mod.new_id
+    s1, s2, s3, s4, s5, s6, s7, g = [I() for _ in range(8)]
+    ins = [
+        f"        {s1} = OpFAdd %float {nol} {wk}",
+        f"        {s2} = OpFMul %float {s1} {inv}",
+        f"        {s3} = OpExtInst %float {gl} NClamp {s2} {zero} {one}",
+        f"        {s4} = OpFMul %float {s3} {inv}",
+        f"        {s5} = OpExtInst %float {gl} NMax {nol} {e3}",
+        f"        {s6} = OpFDiv %float {s4} {s5}",
+        f"        {s7} = OpExtInst %float {gl} NMin {s6} {rmax}",
+        f"        {g} = OpSelect %float {gate} {s7} {one}",
+    ]
+    return ins, g
+
+
+def build_diffuse(mod, prim, skin_gate, hair_gate, knobs, do_c1, do_wrap):
+    """Multiply each primary triple by the product of every enabled factor.
+
+    Skin c1 and hair wrap target the same three values, so they are combined
+    into one multiply per channel here. Their gates are disjoint material
+    classes and each factor is 1.0 when its gate is false, so the product is
+    correct regardless of order.
+    """
+    consts, edits, report = [], [], []
+    def C(v):
+        nid, c = mod.const(v)
+        if c: consts.append(c)
+        return nid
+    for t in prim:
+        ins, factors, info = [], [], {"line": t['line'] + 1}
+        if do_c1:
+            i1, g1, meta = emit_c1_factor(mod, t, skin_gate, knobs, C)
+            ins += i1; factors.append(g1); info["c1"] = meta["nol"]
+        if do_wrap:
+            i2, g2 = emit_wrap_factor(mod, t, hair_gate, knobs, C)
+            ins += i2; factors.append(g2); info["wrap"] = g2
+        f = factors[0]
+        for extra in factors[1:]:
+            n = mod.new_id()
+            ins.append(f"        {n} = OpFMul %float {f} {extra}")
+            f = n
+        newids = []
+        for vid in t['ids']:
+            n = mod.new_id()
+            ins.append(f"        {n} = OpFMul %float {vid} {f}")
+            newids.append(n)
+        edits.append((t['line'] + 2, ins))
+        for vid, n in zip(t['ids'], newids):
+            replace_single_use(mod, vid, n, t['line'], 'diffuse')
+        report.append(info)
+    return consts, edits, report
+
+
 def replace_single_use(mod, old, new, after_line, context):
     """rewrite the unique `= OpFMul` use of %old after after_line to %new."""
     pat = re.compile(r'(= OpFMul %float %\w+ )' + re.escape(old) + r'\s*$')
@@ -297,81 +565,90 @@ def build_smoke(mod, triples, gate, knobs):
             replace_single_use(mod, vid, n, t['line'], 'smoke')
     return consts, edits
 
+def emit_c1_factor(mod, t, gate, K, C):
+    """Tier-1 c1 for one triple. Returns (instructions, factor_id, info).
+
+    Factored out of build_tier1 so hair tiers can multiply their own gated
+    factor into the same triple without two passes fighting over the same
+    single FMul use. Emits identical instructions to the original inline
+    version -- tier1 output must stay byte-identical.
+    """
+    one, zero, eps = C(1.0), C(0.0), C(EPS)
+    # r(x)=2(1-x); exponent = 5*r = 10*(1-x)
+    e_ef = C(10.0 * (1.0 - K["n_f"]))
+    e_tf = C(10.0 * (1.0 - K["m_f"]))
+    e_er = C(10.0 * (1.0 - K["n_r"]))
+    e_tr = C(10.0 * (1.0 - K["m_r"]))
+    rf, rr = C(K["rho_f"]), C(K["rho_r"])
+    gl = mod.glsl
+    r_ch = t['chan'].index(0)            # position of the r-channel value
+    nol = trace_nol(mod, t['line'], t['ids'][r_ch])
+    n_ids, v_ids = find_nv(mod, t['line'])
+    I = mod.new_id
+    nv0, nv1, nv2, nv3, nv4, nov = I(), I(), I(), I(), I(), I()
+    onl, onv, b1, b2, b3, b4 = I(), I(), I(), I(), I(), I()
+    l1, l2, l3, l4 = I(), I(), I(), I()
+    x1, x2, x3, x4 = I(), I(), I(), I()
+    p1, p2, p3, p4 = I(), I(), I(), I()
+    af, ar, df, dr, tf, tr, cf, cr, c1, g = [I() for _ in range(10)]
+    ins = [
+        f"        {nv0} = OpFMul %float {n_ids[0]} {v_ids[0]}",
+        f"        {nv1} = OpFMul %float {n_ids[1]} {v_ids[1]}",
+        f"        {nv2} = OpFMul %float {n_ids[2]} {v_ids[2]}",
+        f"        {nv3} = OpFAdd %float {nv0} {nv1}",
+        f"        {nv4} = OpFAdd %float {nv3} {nv2}",
+        f"        {nov} = OpExtInst %float {gl} NClamp {nv4} {zero} {one}",
+        f"        {onl} = OpFSub %float {one} {nol}",
+        f"        {onv} = OpFSub %float {one} {nov}",
+        f"        {b1} = OpExtInst %float {gl} NMax {onl} {eps}",
+        f"        {b2} = OpExtInst %float {gl} NMax {onv} {eps}",
+        f"        {b3} = OpExtInst %float {gl} NMax {nol} {eps}",
+        f"        {b4} = OpExtInst %float {gl} NMax {nov} {eps}",
+        f"        {l1} = OpExtInst %float {gl} Log2 {b1}",
+        f"        {l2} = OpExtInst %float {gl} Log2 {b2}",
+        f"        {l3} = OpExtInst %float {gl} Log2 {b3}",
+        f"        {l4} = OpExtInst %float {gl} Log2 {b4}",
+        f"        {x1} = OpFMul %float {l1} {e_ef}",
+        f"        {x2} = OpFMul %float {l2} {e_tf}",
+        f"        {x3} = OpExtInst %float {gl} Exp2 {x1}",
+        f"        {x4} = OpExtInst %float {gl} Exp2 {x2}",
+        f"        {af} = OpFMul %float {x3} {x4}",
+        f"        {p1} = OpFMul %float {l4} {e_er}",
+        f"        {p2} = OpFMul %float {l3} {e_tr}",
+        f"        {p3} = OpExtInst %float {gl} Exp2 {p1}",
+        f"        {p4} = OpExtInst %float {gl} Exp2 {p2}",
+        f"        {ar} = OpFMul %float {p3} {p4}",
+        f"        {df} = OpFSub %float {rf} {one}",
+        f"        {dr} = OpFSub %float {rr} {one}",
+        f"        {tf} = OpFMul %float {df} {af}",
+        f"        {tr} = OpFMul %float {dr} {ar}",
+        f"        {cf} = OpFAdd %float {one} {tf}",
+        f"        {cr} = OpFAdd %float {one} {tr}",
+        f"        {c1} = OpFMul %float {cf} {cr}",
+        f"        {g} = OpSelect %float {gate} {c1} {one}",
+    ]
+    return ins, g, dict(line=t['line'] + 1, nol=nol, n=n_ids, v=v_ids,
+                        ids=t['ids'])
+
+
 def build_tier1(mod, prim, gate, knobs):
     consts, edits = [], []
     def C(v):
         nid, c = mod.const(v)
         if c: consts.append(c)
         return nid
-    one  = C(1.0)
-    zero = C(0.0)
-    eps  = C(EPS)
-    # r(x)=2(1-x); exponent = 5*r = 10*(1-x)
-    e_ef = C(10.0 * (1.0 - knobs["n_f"]))
-    e_tf = C(10.0 * (1.0 - knobs["m_f"]))
-    e_er = C(10.0 * (1.0 - knobs["n_r"]))
-    e_tr = C(10.0 * (1.0 - knobs["m_r"]))
-    rf   = C(knobs["rho_f"])
-    rr   = C(knobs["rho_r"])
-    gl   = mod.glsl
     report = []
     for t in prim:
-        r_ch = t['chan'].index(0)            # position of the r-channel value
-        nol = trace_nol(mod, t['line'], t['ids'][r_ch])
-        n_ids, v_ids = find_nv(mod, t['line'])
-        I = lambda: mod.new_id()
-        nv0, nv1, nv2, nv3, nv4, nov = I(), I(), I(), I(), I(), I()
-        onl, onv, b1, b2, b3, b4 = I(), I(), I(), I(), I(), I()
-        l1, l2, l3, l4 = I(), I(), I(), I()
-        x1, x2, x3, x4 = I(), I(), I(), I()
-        p1, p2, p3, p4 = I(), I(), I(), I()
-        af, ar, df, dr, tf, tr, cf, cr, c1, g = [I() for _ in range(10)]
-        ins = [
-            f"        {nv0} = OpFMul %float {n_ids[0]} {v_ids[0]}",
-            f"        {nv1} = OpFMul %float {n_ids[1]} {v_ids[1]}",
-            f"        {nv2} = OpFMul %float {n_ids[2]} {v_ids[2]}",
-            f"        {nv3} = OpFAdd %float {nv0} {nv1}",
-            f"        {nv4} = OpFAdd %float {nv3} {nv2}",
-            f"        {nov} = OpExtInst %float {gl} NClamp {nv4} {zero} {one}",
-            f"        {onl} = OpFSub %float {one} {nol}",
-            f"        {onv} = OpFSub %float {one} {nov}",
-            f"        {b1} = OpExtInst %float {gl} NMax {onl} {eps}",
-            f"        {b2} = OpExtInst %float {gl} NMax {onv} {eps}",
-            f"        {b3} = OpExtInst %float {gl} NMax {nol} {eps}",
-            f"        {b4} = OpExtInst %float {gl} NMax {nov} {eps}",
-            f"        {l1} = OpExtInst %float {gl} Log2 {b1}",
-            f"        {l2} = OpExtInst %float {gl} Log2 {b2}",
-            f"        {l3} = OpExtInst %float {gl} Log2 {b3}",
-            f"        {l4} = OpExtInst %float {gl} Log2 {b4}",
-            f"        {x1} = OpFMul %float {l1} {e_ef}",
-            f"        {x2} = OpFMul %float {l2} {e_tf}",
-            f"        {x3} = OpExtInst %float {gl} Exp2 {x1}",
-            f"        {x4} = OpExtInst %float {gl} Exp2 {x2}",
-            f"        {af} = OpFMul %float {x3} {x4}",
-            f"        {p1} = OpFMul %float {l4} {e_er}",
-            f"        {p2} = OpFMul %float {l3} {e_tr}",
-            f"        {p3} = OpExtInst %float {gl} Exp2 {p1}",
-            f"        {p4} = OpExtInst %float {gl} Exp2 {p2}",
-            f"        {ar} = OpFMul %float {p3} {p4}",
-            f"        {df} = OpFSub %float {rf} {one}",
-            f"        {dr} = OpFSub %float {rr} {one}",
-            f"        {tf} = OpFMul %float {df} {af}",
-            f"        {tr} = OpFMul %float {dr} {ar}",
-            f"        {cf} = OpFAdd %float {one} {tf}",
-            f"        {cr} = OpFAdd %float {one} {tr}",
-            f"        {c1} = OpFMul %float {cf} {cr}",
-            f"        {g} = OpSelect %float {gate} {c1} {one}",
-        ]
+        ins, g, info = emit_c1_factor(mod, t, gate, knobs, C)
         newids = []
         for vid in t['ids']:
-            n = I()
+            n = mod.new_id()
             ins.append(f"        {n} = OpFMul %float {vid} {g}")
             newids.append(n)
         edits.append((t['line'] + 2, ins))
         for vid, n in zip(t['ids'], newids):
             replace_single_use(mod, vid, n, t['line'], 'tier1')
-        report.append(dict(line=t['line'] + 1, nol=nol,
-                           n=n_ids, v=v_ids, ids=t['ids']))
+        report.append(info)
     return consts, edits, report
 
 def apply_edits(mod, consts, edits):
@@ -397,7 +674,11 @@ def roundtrip_check(spvasm, target_env):
     if v.returncode != 0:
         die(f"spirv-val failed on UNPATCHED {spvasm}:\n{v.stderr}")
 
-def process(path, outdir, tier, knobs, target_env, do_rt=True):
+HAIR_TIERS = ('hair2', 'hair3', 'hair23')
+
+
+def process(path, outdir, tier, knobs, target_env, do_rt=True,
+            hair_class=None, with_tier1=False):
     mod = Module(path)
     if not mod.dxil: die(f"{mod.name}: no dxil hash in OpString")
     if do_rt: roundtrip_check(path, target_env)
@@ -410,11 +691,54 @@ def process(path, outdir, tier, knobs, target_env, do_rt=True):
                triples=len(triples), primary=len(prim), env=len(env),
                albedo={c: albedo[c] for c in sorted(albedo)})
     if tier == 'smoke':
-        consts, edits = build_smoke(mod, triples, gate, knobs)
+        # With --hair-class N the tint is gated on class N instead of skin.
+        # This is the class-discovery loop: cycle N until hair turns red.
+        consts, edits = [], []
+        sgate = gate
+        if hair_class is not None:
+            shift, ieq_line = find_class_shift(mod)
+            uid, udecl = mod.uconst(hair_class)
+            sgate = mod.new_id()
+            if udecl: consts.append(udecl)
+            edits.append((ieq_line,
+                          [f"        {sgate} = OpIEqual %bool {shift} {uid}"]))
+            rep.update(smoke_class=hair_class, smoke_gate=sgate)
+        c, e = build_smoke(mod, triples, sgate, knobs)
+        consts += c; edits += e
         rep['tint'] = knobs['tint']
     elif tier == '1':
         consts, edits, rep['sites'] = build_tier1(mod, prim, gate, knobs)
         rep['params'] = {k: knobs[k] for k in ('rho_f','n_f','m_f','rho_r','n_r','m_r')}
+    elif tier in HAIR_TIERS:
+        if hair_class is None:
+            die("hair tiers need --hair-class N (the gbuffer material class "
+                "for hair). It is not yet identified -- see "
+                "dev/HAIR_HANDOFF.md section 1 for how to find it.")
+        shift, ieq_line = find_class_shift(mod)
+        uid, udecl = mod.uconst(hair_class)
+        hgate = mod.new_id()
+        consts, edits = ([udecl] if udecl else []), []
+        # Placed directly after the skin IEqual so it inherits that block's
+        # dominance over every eval site.
+        edits.append((ieq_line, [f"        {hgate} = OpIEqual %bool {shift} {uid}"]))
+        rep.update(hair_class=hair_class, hair_gate=hgate, shift=shift,
+                   with_tier1=with_tier1)
+        if tier in ('hair2', 'hair23'):
+            sites = find_ggx_sites(mod)
+            if not sites: die(f"{mod.name}: no GGX specular sites found")
+            c2, e2, rep['spec'] = build_hair_spec(mod, sites, hgate, knobs)
+            consts += c2; edits += e2
+            rep['spec']['sites_found'] = len(sites)
+        do_wrap = tier in ('hair3', 'hair23')
+        if do_wrap or with_tier1:
+            c3, e3, rep['diffuse'] = build_diffuse(
+                mod, prim, gate, hgate, knobs, with_tier1, do_wrap)
+            consts += c3; edits += e3
+        rep['params'] = {k: knobs[k] for k in
+                         ('s_h', 'a_min', 'k_sheen', 'w_wrap', 'r_max')}
+        if with_tier1:
+            rep['params'].update({k: knobs[k] for k in
+                                  ('rho_f','n_f','m_f','rho_r','n_r','m_r')})
     else:
         die(f"unknown tier {tier}")
     apply_edits(mod, consts, edits)
@@ -440,7 +764,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('modules', nargs='+', help='input .spvasm files')
-    ap.add_argument('--tier', choices=['smoke', '1'], default='smoke')
+    ap.add_argument('--tier', choices=['smoke', '1'] + list(HAIR_TIERS),
+                    default='smoke')
+    ap.add_argument('--hair-class', type=int, default=None, metavar='N',
+                    help='gbuffer material class for hair (required by hair '
+                         'tiers; skin is 1). Cycle candidates with --tier '
+                         'smoke to identify it.')
+    ap.add_argument('--with-tier1', action='store_true',
+                    help='also apply the skin c1 splice, combined into the '
+                         'same per-triple multiply (use to keep the shipped '
+                         'skin look while adding hair)')
     ap.add_argument('--vanilla', action='store_true',
                     help='force all params to defaults (bit-identical regression)')
     ap.add_argument('--outdir', required=True)
@@ -463,7 +796,9 @@ def main():
     reports = []
     for p in a.modules:
         reports.append(process(p, a.outdir, a.tier, knobs, a.target_env,
-                               do_rt=not a.no_roundtrip_check))
+                               do_rt=not a.no_roundtrip_check,
+                               hair_class=a.hair_class,
+                               with_tier1=a.with_tier1))
     print(json.dumps(reports, indent=1))
 
 if __name__ == '__main__':
