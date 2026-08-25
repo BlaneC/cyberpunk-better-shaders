@@ -504,17 +504,26 @@ means anything — fix that before drawing any conclusion about hair.
 
 ## Procedure
 
-1. **Remove `regen_and_clear.sh` from the Steam launch options.** It rebuilds
-   the tier-1 skin swaps on every launch and would overwrite the hunt set.
-   Keep the `VK_ADD_LAYER_PATH=... %command%` part.
-2. `./dev/hunt_hair_class.sh`
+1. **Launch options need no change.** Verified against this install: the
+   launch line runs `sync_settings.sh`, which only syncs the SSS-kernel
+   disable flag and never rebuilds swaps. The layer is installed *implicitly*
+   from `~/.local/share/vulkan/implicit_layer.d/`, so there is no
+   `VK_ADD_LAYER_PATH` to preserve. (The warning about `regen_and_clear.sh`
+   applies only if you add it to the launch line yourself.)
+2. `: > ~/callisto_swap.jsonl && ./dev/hunt_hair_class.sh`
+   The first run backs up the installed swaps to
+   `~/.local/lib/callisto/swaps.prehunt`; `--restore` puts them back.
 3. Launch. First load after a cache clear is slow — that is expected, not a
    hang.
 4. Find a character with visible hair in reasonably bright light. Third-person
    (a mirror, a vehicle camera, photo mode) beats first-person V.
-5. Check skin is red. Then read hair's colour off the table.
-6. Record the number in `HAIR_CLASS` in `dev/patch_skin_brdf.py` and in this
-   file, then `./dev/hunt_hair_class.sh --off` and restore the launch option.
+5. Confirm the swap actually took: `grep -c '"swap":"HIT"' ~/callisto_swap.jsonl`
+   must read **2** (one per raygen module). Zero means the shaders came from
+   cache or the layer did not load, and nothing on screen means anything yet.
+   The log appends across runs — truncate it before each launch.
+6. Check skin is red (the control). Then read hair's colour off the table.
+7. Record the number in `HAIR_CLASS` in `dev/patch_skin_brdf.py` and in this
+   file, then `./dev/hunt_hair_class.sh --restore` to put the skin build back.
 
 ## If hair stays untinted
 
