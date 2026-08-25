@@ -92,6 +92,13 @@ Ships pre-tuned to tasteful defaults — no configuration required.
 - Vanilla control run: prefix the launch options with
   `CALLISTO_LAYER_DISABLE=1` (or remove the swaps) — useful for A/B shots.
 
+Two different off switches exist, and they are not interchangeable:
+
+| Variable | Effect |
+| --- | --- |
+| `CALLISTO_LAYER_DISABLE=1` | The Vulkan loader skips the layer entirely. Nothing is swapped and nothing is logged — this is the true vanilla control. |
+| `CALLISTO_SWAP_DISABLE=1` | The layer still loads and still logs every shader module, but swaps nothing. Use this when you want the log (to confirm the game's shader hashes) without changing the image. |
+
 ## Uninstall
 
 Run `./uninstall.sh` (same machine; it also clears the caches so vanilla

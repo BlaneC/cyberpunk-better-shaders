@@ -119,6 +119,9 @@ LAST STEP -- set the Steam launch options for Cyberpunk 2077 to:
 (Right-click the game -> Properties -> Launch Options.)
 
 Vanilla control run:  prefix the line with CALLISTO_LAYER_DISABLE=1
+                      (loader skips the layer: no swap, no log)
+Log without swapping: prefix the line with CALLISTO_SWAP_DISABLE=1
+                      (layer loads and logs modules, but changes nothing)
 Verify the layer:     vulkaninfo --summary | grep -i callisto
 In-game proof:        grep HIT \$HOME/callisto_swap.jsonl
 EOF

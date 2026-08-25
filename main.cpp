@@ -64,8 +64,14 @@ static void STDMETHODCALLTYPE HookedCopyTextureRegion(ID3D12GraphicsCommandList*
                 (hp.Type == D3D12_HEAP_TYPE_UPLOAD ||
                  (hp.Type == D3D12_HEAP_TYPE_CUSTOM &&
                   hp.CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE));
-            if (!uploadHeap)
+            // Once per process: a per-frame copy matching these dimensions
+            // would otherwise grow the log without bound.
+            static bool loggedSkip = false;
+            if (!uploadHeap && !loggedSkip)
+            {
+                loggedSkip = true;
                 Log("32x8 RGBA32F copy from non-upload heap — skipped");
+            }
             const auto& fp = src->PlacedFootprint;
             UINT pitch = fp.Footprint.RowPitch; // >= 512 (32 px * 16 B)
             D3D12_RANGE none{0, 0};
@@ -114,7 +120,14 @@ static bool InstallHook()
         void** vtbl = *(void***)list;
         const int SLOT = 16; // ID3D12GraphicsCommandList::CopyTextureRegion
         DWORD old;
-        if (VirtualProtect(&vtbl[SLOT], sizeof(void*), PAGE_READWRITE, &old))
+        // Guard against a second copy of the plugin patching the same shared
+        // vtable: capturing our own hook as g_origCopy makes it self-recursive.
+        if (vtbl[SLOT] == (void*)&HookedCopyTextureRegion)
+        {
+            Log("hook already installed — skipping");
+            ok = true;
+        }
+        else if (VirtualProtect(&vtbl[SLOT], sizeof(void*), PAGE_READWRITE, &old))
         {
             g_origCopy = (CopyTextureRegion_t)vtbl[SLOT];
             vtbl[SLOT] = (void*)&HookedCopyTextureRegion;
@@ -146,10 +159,15 @@ static bool LoadKernel(HMODULE mod)
     wcscpy(s + 1, L"kernel.bin");
     FILE* f = _wfopen(path, L"rb");
     if (!f) { Log("ERROR: kernel.bin not found next to plugin dll"); return false; }
-    bool ok = fread(g_kernel, 1, sizeof(g_kernel), f) == sizeof(g_kernel);
+    // Read one byte past the expected size so an oversized file is rejected
+    // rather than silently truncated to the first 4096 bytes.
+    unsigned char buf[sizeof(g_kernel) + 1];
+    size_t n = fread(buf, 1, sizeof(buf), f);
     fclose(f);
-    if (!ok) Log("ERROR: kernel.bin is not 4096 bytes");
-    return ok;
+    bool ok = n == sizeof(g_kernel);
+    if (!ok) { Log("ERROR: kernel.bin is not exactly 4096 bytes"); return false; }
+    memcpy(g_kernel, buf, sizeof(g_kernel));
+    return true;
 }
 
 static HMODULE g_self = nullptr;

@@ -1,0 +1,11 @@
+{
+    "file_format_version": "1.0.0",
+    "layer": {
+        "name": "VK_LAYER_NGFXPROBE_probe",
+        "type": "GLOBAL",
+        "library_path": "/home/blane/Documents/NVIDIA Nsight Graphics/GraphicsCaptures/analysis/probe/VkLayer_ngfxprobe.so",
+        "api_version": "1.3.280",
+        "implementation_version": "1",
+        "description": "ngfx replay probe logger (read-only, JSONL)"
+    }
+}

@@ -222,27 +222,90 @@ static uint32_t *load_swap(const char *name, size_t *out_size) {
 /* ------------------------------------------------------------------ */
 /* dispatch tables                                                     */
 /* ------------------------------------------------------------------ */
+/* Entries are keyed by the loader dispatch key -- the first pointer-sized
+ * word of a dispatchable handle -- not by the handle value. The loader hands
+ * different trampoline handles to different layers for the same object, but
+ * the dispatch key is stable for the object's lifetime, so this is what
+ * layers are expected to key on. */
+#define MAX_OBJ 16
+typedef void *DispatchKey;
+static DispatchKey disp_key(void *h) { return h ? *(void **)h : NULL; }
+
 typedef struct {
-    VkInstance inst;
+    DispatchKey key;
     PFN_vkGetInstanceProcAddr gipa;
     PFN_vkCreateDevice CreateDevice;
     PFN_vkDestroyInstance DestroyInstance;
 } InstData;
 typedef struct {
-    VkDevice dev;
+    DispatchKey key;
     PFN_vkGetDeviceProcAddr gdpa;
     PFN_vkDestroyDevice DestroyDevice;
     PFN_vkCreateShaderModule CreateShaderModule;
 } DevData;
 
-static InstData g_inst[4]; static int g_ninst;
-static DevData g_dev[4];   static int g_ndev;
+static InstData g_inst[MAX_OBJ]; static int g_ninst;
+static DevData g_dev[MAX_OBJ];   static int g_ndev;
+static pthread_mutex_t g_tbl_mu = PTHREAD_MUTEX_INITIALIZER;
 
+/* Lookups return a pointer into the table. Entries are only ever removed in
+ * vkDestroy{Device,Instance}, which the app may not call concurrently with
+ * use of the same object, so the returned pointer is safe to use unlocked. */
 static InstData *find_inst(VkInstance i) {
-    for (int k = 0; k < g_ninst; k++) if (g_inst[k].inst == i) return &g_inst[k];
-    return NULL;
+    DispatchKey k = disp_key(i);
+    InstData *r = NULL;
+    pthread_mutex_lock(&g_tbl_mu);
+    for (int n = 0; n < g_ninst; n++) if (g_inst[n].key == k) { r = &g_inst[n]; break; }
+    pthread_mutex_unlock(&g_tbl_mu);
+    return r;
 }
-static DevData *dev_from_handle(void *h) { (void)h; return g_ndev ? &g_dev[g_ndev - 1] : NULL; }
+static DevData *find_dev(VkDevice d) {
+    DispatchKey k = disp_key(d);
+    DevData *r = NULL;
+    pthread_mutex_lock(&g_tbl_mu);
+    for (int n = 0; n < g_ndev; n++) if (g_dev[n].key == k) { r = &g_dev[n]; break; }
+    pthread_mutex_unlock(&g_tbl_mu);
+    return r;
+}
+
+/* returns NULL if the table is full (logged by the caller) */
+static InstData *add_inst(VkInstance i) {
+    InstData *d = NULL;
+    pthread_mutex_lock(&g_tbl_mu);
+    if (g_ninst < MAX_OBJ) {
+        d = &g_inst[g_ninst++];
+        memset(d, 0, sizeof *d);
+        d->key = disp_key(i);
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+    return d;
+}
+static DevData *add_dev(VkDevice v) {
+    DevData *d = NULL;
+    pthread_mutex_lock(&g_tbl_mu);
+    if (g_ndev < MAX_OBJ) {
+        d = &g_dev[g_ndev++];
+        memset(d, 0, sizeof *d);
+        d->key = disp_key(v);
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+    return d;
+}
+
+static void del_inst(VkInstance i) {
+    DispatchKey k = disp_key(i);
+    pthread_mutex_lock(&g_tbl_mu);
+    for (int n = 0; n < g_ninst; n++)
+        if (g_inst[n].key == k) { g_inst[n] = g_inst[--g_ninst]; break; }
+    pthread_mutex_unlock(&g_tbl_mu);
+}
+static void del_dev(VkDevice v) {
+    DispatchKey k = disp_key(v);
+    pthread_mutex_lock(&g_tbl_mu);
+    for (int n = 0; n < g_ndev; n++)
+        if (g_dev[n].key == k) { g_dev[n] = g_dev[--g_ndev]; break; }
+    pthread_mutex_unlock(&g_tbl_mu);
+}
 
 /* ------------------------------------------------------------------ */
 /* instance / device creation (loader chain advance)                   */
@@ -263,9 +326,11 @@ static VkResult VKAPI_CALL xCreateInstance(const VkInstanceCreateInfo *ci,
     ((VkLayerInstanceCreateInfo *)lc)->u.pLayerInfo = save.u.pLayerInfo;
     if (r != VK_SUCCESS) return r;
 
-    InstData *d = &g_inst[g_ninst < 4 ? g_ninst++ : 3];
-    memset(d, 0, sizeof *d);
-    d->inst = *pInst;
+    InstData *d = add_inst(*pInst);
+    if (!d) {
+        LOGF("\"ev\":\"table_full\",\"what\":\"instance\",\"max\":%d}", MAX_OBJ);
+        return r;                       /* untracked: gipa falls through */
+    }
     d->gipa = next_gipa;
     d->CreateDevice = (PFN_vkCreateDevice)next_gipa(*pInst, "vkCreateDevice");
     d->DestroyInstance = (PFN_vkDestroyInstance)next_gipa(*pInst, "vkDestroyInstance");
@@ -282,18 +347,26 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
     if (!lc) return VK_ERROR_INITIALIZATION_FAILED;
     PFN_vkGetInstanceProcAddr next_gipa = lc->u.pLayerInfo->pfnNextGetInstanceProcAddr;
     PFN_vkGetDeviceProcAddr next_gdpa = lc->u.pLayerInfo->pfnNextGetDeviceProcAddr;
-    InstData *id = g_ninst ? &g_inst[g_ninst - 1] : NULL;
+    /* A VkPhysicalDevice shares its parent instance's dispatch key, so this
+     * finds the right instance even with several live. */
+    InstData *id = find_inst((VkInstance)phys);
     PFN_vkCreateDevice next_create = id ? id->CreateDevice : NULL;
     if (!next_create) next_create = (PFN_vkCreateDevice)
-        next_gipa(g_ninst ? g_inst[g_ninst - 1].inst : VK_NULL_HANDLE, "vkCreateDevice");
+        next_gipa(VK_NULL_HANDLE, "vkCreateDevice");
+    if (!next_create) return VK_ERROR_INITIALIZATION_FAILED;
+    VkLayerDeviceCreateInfo save = *lc;
     ((VkLayerDeviceCreateInfo *)lc)->u.pLayerInfo = lc->u.pLayerInfo->pNext;
     VkResult r = next_create(phys, ci, ac, pDev);
+    ((VkLayerDeviceCreateInfo *)lc)->u.pLayerInfo = save.u.pLayerInfo;
     if (r != VK_SUCCESS) return r;
 
     VkDevice dev = *pDev;
-    DevData *d = &g_dev[g_ndev < 4 ? g_ndev++ : 3];
-    memset(d, 0, sizeof *d);
-    d->dev = dev; d->gdpa = next_gdpa;
+    DevData *d = add_dev(dev);
+    if (!d) {
+        LOGF("\"ev\":\"table_full\",\"what\":\"device\",\"max\":%d}", MAX_OBJ);
+        return r;                       /* untracked: gdpa falls through */
+    }
+    d->gdpa = next_gdpa;
     d->DestroyDevice = (PFN_vkDestroyDevice)d->gdpa(dev, "vkDestroyDevice");
     d->CreateShaderModule = (PFN_vkCreateShaderModule)d->gdpa(dev, "vkCreateShaderModule");
     LOGF("\"ev\":\"vkCreateDevice\",\"dev\":\"%p\"}", (void *)dev);
@@ -306,8 +379,21 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
 static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
         const VkShaderModuleCreateInfo *ci, const VkAllocationCallbacks *ac,
         VkShaderModule *pMod) {
-    DevData *d = dev_from_handle(dev);
-    if (!d || !d->CreateShaderModule) return VK_ERROR_UNKNOWN;
+    /* An untracked device must degrade to passthrough, never to a hard
+     * failure: a tracking gap would otherwise break the application. */
+    DevData *d = find_dev(dev);
+    PFN_vkCreateShaderModule next = d ? d->CreateShaderModule : NULL;
+    if (!next) {
+        static int warned;
+        if (!__sync_fetch_and_add(&warned, 1))
+            LOGF("\"ev\":\"untracked_device\",\"dev\":\"%p\"}", (void *)dev);
+        for (int k = 0; k < g_ninst && !next; k++)
+            if (g_inst[k].gipa)
+                next = (PFN_vkCreateShaderModule)
+                    g_inst[k].gipa(VK_NULL_HANDLE, "vkCreateShaderModule");
+        if (!next) return VK_ERROR_INITIALIZATION_FAILED;
+        return next(dev, ci, ac, pMod);
+    }
 
     char id[96] = {0}, dxil[17] = {0};
     int has_id = scan_dxil_id(ci->pCode, ci->codeSize, id, dxil);
@@ -318,7 +404,7 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
         if (!g_quiet)
             LOGF("\"ev\":\"module\",\"size\":%zu,\"id\":\"%s\",\"sha256\":\"%s\",\"swap\":\"disabled\"}",
                  ci->codeSize, has_id ? id : "", sha);
-        return d->CreateShaderModule(dev, ci, ac, pMod);
+        return next(dev, ci, ac, pMod);
     }
 
     uint32_t *code = NULL; size_t size = 0;
@@ -333,12 +419,12 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
         if (!g_quiet)
             LOGF("\"ev\":\"module\",\"size\":%zu,\"id\":\"%s\",\"sha256\":\"%s\",\"swap\":\"none\"}",
                  ci->codeSize, has_id ? id : "", sha);
-        return d->CreateShaderModule(dev, ci, ac, pMod);
+        return next(dev, ci, ac, pMod);
     }
 
     VkShaderModuleCreateInfo sub = *ci;
     sub.pCode = code; sub.codeSize = size;
-    VkResult r = d->CreateShaderModule(dev, &sub, ac, pMod);
+    VkResult r = next(dev, &sub, ac, pMod);
     LOGF("\"ev\":\"module\",\"size\":%zu,\"id\":\"%s\",\"sha256\":\"%s\",\"swap\":\"%s\",\"result\":%d}",
          ci->codeSize, has_id ? id : "", sha,
          r == VK_SUCCESS ? "HIT" : "hit_failed", (int)r);
@@ -347,13 +433,19 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
 }
 
 static void VKAPI_CALL xDestroyDevice(VkDevice dev, const VkAllocationCallbacks *ac) {
-    DevData *d = dev_from_handle(dev);
-    if (d && d->DestroyDevice) d->DestroyDevice(dev, ac);
+    DevData *d = find_dev(dev);
+    PFN_vkDestroyDevice next = d ? d->DestroyDevice : NULL;
+    del_dev(dev);                       /* drop before the handle dies */
+    if (next) next(dev, ac);
 }
 static void VKAPI_CALL xDestroyInstance(VkInstance inst, const VkAllocationCallbacks *ac) {
     InstData *d = find_inst(inst);
-    if (d && d->DestroyInstance) d->DestroyInstance(inst, ac);
-    if (g_log && g_log != stderr) { fclose(g_log); g_log = NULL; }
+    PFN_vkDestroyInstance next = d ? d->DestroyInstance : NULL;
+    del_inst(inst);
+    if (next) next(inst, ac);
+    pthread_mutex_lock(&g_mu);
+    if (!g_ninst && g_log && g_log != stderr) { fclose(g_log); g_log = NULL; }
+    pthread_mutex_unlock(&g_mu);
 }
 
 /* ------------------------------------------------------------------ */
@@ -374,7 +466,7 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
         VkDevice dev, const char *name) {
     for (size_t i = 0; i < sizeof kDevHooks / sizeof kDevHooks[0]; i++)
         if (!strcmp(kDevHooks[i].name, name)) return (PFN_vkVoidFunction)kDevHooks[i].fn;
-    DevData *d = dev_from_handle(dev);
+    DevData *d = find_dev(dev);
     if (d && d->gdpa) return d->gdpa(dev, name);
     return NULL;
 }
@@ -389,16 +481,18 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     if (!strcmp(name, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)vkGetDeviceProcAddr;
     InstData *d = find_inst(inst);
     if (d && d->gipa) return d->gipa(inst, name);
+    /* Best effort for pre-instance calls (inst == VK_NULL_HANDLE), where
+     * there is no entry to find: any live instance's chain will do. */
     if (g_ninst && g_inst[0].gipa) return g_inst[0].gipa(inst, name);
     return NULL;
 }
 
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
         const char *pLayerName, uint32_t *pCount, VkExtensionProperties *pProps) {
-    (void)pProps;
-    if (pLayerName && !strcmp(pLayerName, "VK_LAYER_CALLISTO_spvswap")) {
-        *pCount = 0; return VK_SUCCESS;
-    }
+    (void)pLayerName; (void)pProps;
+    /* This layer exposes no extensions. *pCount must be written on every
+     * path -- leaving it untouched has the caller read uninitialized memory. */
+    if (pCount) *pCount = 0;
     return VK_SUCCESS;
 }
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(
