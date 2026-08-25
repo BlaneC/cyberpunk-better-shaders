@@ -390,6 +390,76 @@ def replace_all_uses(mod, old, new, after_line):
     return n
 
 
+# ------------------------------------------------------- class hunt
+# One build tints every candidate material class a different colour, so a
+# single launch identifies hair by eye instead of one relaunch per candidate.
+# Class 1 (skin) is included as a control: if skin does not come out red the
+# harness itself is broken, and no conclusion about hair is trustworthy.
+HUNT_PALETTE = {
+    1:  ("red",     (3.0, 0.15, 0.15)),   # control -- skin, known
+    2:  ("green",   (0.15, 3.0, 0.15)),
+    3:  ("blue",    (0.15, 0.15, 3.0)),
+    4:  ("yellow",  (3.0, 3.0, 0.15)),
+    5:  ("magenta", (3.0, 0.15, 3.0)),
+    6:  ("cyan",    (0.15, 3.0, 3.0)),
+    7:  ("orange",  (3.0, 1.0, 0.15)),
+    8:  ("violet",  (1.5, 0.15, 3.0)),
+    13: ("azure",   (0.15, 1.5, 3.0)),
+    14: ("lime",    (1.5, 3.0, 0.15)),
+}
+HUNT_DEFAULT = (1, 2, 3, 4, 5, 6, 7, 8, 13, 14)
+
+
+def build_hairhunt(mod, prim, shift, classes, knobs):
+    """Tint each candidate class its palette colour at the diffuse triples.
+
+    Emits one OpIEqual per candidate next to the skin gate (inheriting its
+    dominance), then a chain of OpSelects per channel that resolves to the
+    matching class's tint, or 1.0 when nothing matches.
+    """
+    consts, edits = [], []
+    def C(v):
+        nid, c = mod.const(v)
+        if c: consts.append(c)
+        return nid
+    one = C(1.0)
+    _, ieq_line = find_class_shift(mod)
+
+    gates, legend = [], []
+    ginst = []
+    for n in classes:
+        if n not in HUNT_PALETTE:
+            die(f"class {n} has no palette entry; extend HUNT_PALETTE")
+        name, rgb = HUNT_PALETTE[n]
+        uid, udecl = mod.uconst(n)
+        if udecl: consts.append(udecl)
+        g = mod.new_id()
+        ginst.append(f"        {g} = OpIEqual %bool {shift} {uid}")
+        gates.append((g, [C(x) for x in rgb]))
+        legend.append({"class": n, "colour": name, "tint": list(rgb)})
+    edits.append((ieq_line, ginst))
+
+    for t in prim:
+        ins, newids = [], []
+        # per-channel select chain, shared across the three components
+        chan_val = {}
+        for ch in range(3):
+            cur = one
+            for g, rgb in gates:
+                nid = mod.new_id()
+                ins.append(f"        {nid} = OpSelect %float {g} {rgb[ch]} {cur}")
+                cur = nid
+            chan_val[ch] = cur
+        for k, vid in enumerate(t['ids']):
+            n = mod.new_id()
+            ins.append(f"        {n} = OpFMul %float {vid} {chan_val[t['chan'][k]]}")
+            newids.append(n)
+        edits.append((t['line'] + 2, ins))
+        for vid, n in zip(t['ids'], newids):
+            replace_single_use(mod, vid, n, t['line'], 'hairhunt')
+    return consts, edits, {"legend": legend, "triples": len(prim)}
+
+
 # ---------------------------------------------- structure-tensor tangent
 def find_normal_gbuffer(mod):
     """Locate the screen-space normal G-buffer fetch and everything needed to
@@ -1004,7 +1074,7 @@ HAIR_TIERS = ('hair2', 'hair3', 'hair23', 'hairdbg', 'hairaniso')
 
 
 def process(path, outdir, tier, knobs, target_env, do_rt=True,
-            hair_class=None, with_tier1=False):
+            hair_class=None, with_tier1=False, hunt_classes=None):
     mod = Module(path)
     if not mod.dxil: die(f"{mod.name}: no dxil hash in OpString")
     if do_rt: roundtrip_check(path, target_env)
@@ -1035,6 +1105,10 @@ def process(path, outdir, tier, knobs, target_env, do_rt=True,
     elif tier == '1':
         consts, edits, rep['sites'] = build_tier1(mod, prim, gate, knobs)
         rep['params'] = {k: knobs[k] for k in ('rho_f','n_f','m_f','rho_r','n_r','m_r')}
+    elif tier == 'hairhunt':
+        shift, _ = find_class_shift(mod)
+        consts, edits, rep['hunt'] = build_hairhunt(
+            mod, prim, shift, hunt_classes or HUNT_DEFAULT, knobs)
     elif tier in HAIR_TIERS:
         if hair_class is None:
             die("hair tiers need --hair-class N (the gbuffer material class "
@@ -1099,8 +1173,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('modules', nargs='+', help='input .spvasm files')
-    ap.add_argument('--tier', choices=['smoke', '1'] + list(HAIR_TIERS),
+    ap.add_argument('--tier',
+                    choices=['smoke', '1', 'hairhunt'] + list(HAIR_TIERS),
                     default='smoke')
+    ap.add_argument('--classes', default=None,
+                    help='hairhunt: comma-separated candidate classes '
+                         '(default %s). Class 1 is skin and acts as the '
+                         'control.' % ','.join(map(str, HUNT_DEFAULT)))
     ap.add_argument('--hair-class', type=int, default=None, metavar='N',
                     help='gbuffer material class for hair (required by hair '
                          'tiers; skin is 1). Cycle candidates with --tier '
@@ -1128,12 +1207,16 @@ def main():
             knobs[k] = float(v)
         else:
             die(f"unknown knob {k}")
+    hunt = None
+    if a.classes:
+        hunt = [int(x) for x in a.classes.split(',') if x.strip()]
     reports = []
     for p in a.modules:
         reports.append(process(p, a.outdir, a.tier, knobs, a.target_env,
                                do_rt=not a.no_roundtrip_check,
                                hair_class=a.hair_class,
-                               with_tier1=a.with_tier1))
+                               with_tier1=a.with_tier1,
+                               hunt_classes=hunt))
     print(json.dumps(reports, indent=1))
 
 if __name__ == '__main__':

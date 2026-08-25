@@ -475,3 +475,70 @@ bounce hits reuse the primary pixel's tangent; possible space mismatch
 between G-buffer normals and payload-derived H (if grossly wrong in-game,
 this is the first suspect); 180° eigenvector ambiguity is harmless for the
 symmetric sin^p lobe.
+
+---
+
+# HOW TO FIND N — the class hunt (supersedes section 1's one-at-a-time loop)
+
+Cycling one candidate per launch means ~9 launches, each with a full shader
+recompile. Instead `--tier hairhunt` tints **every** candidate class a
+different colour in one build, so a single launch names hair by its colour.
+
+```
+./dev/hunt_hair_class.sh            # all candidates
+./dev/hunt_hair_class.sh 2,3,4      # a subset
+./dev/hunt_hair_class.sh --off      # remove swaps, back to vanilla
+```
+
+| class | colour | | class | colour |
+|---|---|---|---|---|
+| 1 | red **(skin — control)** | | 6 | cyan |
+| 2 | green | | 7 | orange |
+| 3 | blue | | 8 | violet |
+| 4 | yellow | | 13 | azure |
+| 5 | magenta | | 14 | lime |
+
+**Class 1 is the control.** Skin is known to be class 1, so skin must come out
+red. If it does not, the swap did not take effect and nothing else on screen
+means anything — fix that before drawing any conclusion about hair.
+
+## Procedure
+
+1. **Remove `regen_and_clear.sh` from the Steam launch options.** It rebuilds
+   the tier-1 skin swaps on every launch and would overwrite the hunt set.
+   Keep the `VK_ADD_LAYER_PATH=... %command%` part.
+2. `./dev/hunt_hair_class.sh`
+3. Launch. First load after a cache clear is slow — that is expected, not a
+   hang.
+4. Find a character with visible hair in reasonably bright light. Third-person
+   (a mirror, a vehicle camera, photo mode) beats first-person V.
+5. Check skin is red. Then read hair's colour off the table.
+6. Record the number in `HAIR_CLASS` in `dev/patch_skin_brdf.py` and in this
+   file, then `./dev/hunt_hair_class.sh --off` and restore the launch option.
+
+## If hair stays untinted
+
+It is not in the candidate list. The class field is bits[9:5] of gbuf.y, so
+it spans 0–31; the defaults only cover the values that appear as OpSwitch
+cases. Extend `HUNT_PALETTE` with more entries and sweep the rest:
+`./dev/hunt_hair_class.sh 9,10,11,12,15,16` (10 colours per pass max).
+
+Two other possibilities worth ruling out before widening the sweep:
+- **Hair may share skin's class** (class 1) — some engines classify hair as a
+  skin variant distinguished by a flag rather than a class. If hair turns red
+  alongside skin, that is the answer, and gating hair separately would need
+  one of the unknown material flags (0x200/0x2000, BRDF_HANDOFF) instead.
+- **Hair may not be path-traced at all** in your setup (some hair renders in
+  the raster path). If hair is untinted in every sweep but skin is red, check
+  whether the hair mod forces an alpha/forward path.
+
+## Once N is known
+
+```
+./dev/hunt_hair_class.sh --off
+python3 dev/patch_skin_brdf.py dev/disasm/spv_0170.spvasm \
+  dev/disasm/spv_0171.spvasm --tier hairdbg --hair-class N --outdir swaps
+```
+`hairdbg` answers the next question: red hair = no strand signal in the
+normals, so anisotropy is dead for this mod; green = build `hairaniso`.
+Then ship with `--tier hair23 --hair-class N --with-tier1`.
