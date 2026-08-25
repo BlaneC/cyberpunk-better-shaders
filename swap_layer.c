@@ -21,6 +21,8 @@
  *   CALLISTO_LOG            log path (default: stderr)
  *   CALLISTO_SWAP_DISABLE=1 pure passthrough (modules still logged)
  *   CALLISTO_SWAP_QUIET=1   log swap hits/errors only, not every module
+ *   CALLISTO_DUMP_DIR       dump incoming SPIR-V of every module here
+ *   CALLISTO_DUMP_MATCH     only dump ids containing this substring
  *
  * Build:
  *   gcc -shared -fPIC -O2 -o libVkLayer_callisto_spvswap.so swap_layer.c -ldl -lpthread
@@ -50,6 +52,7 @@ static FILE *g_log;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_seq;
 static int g_quiet, g_disabled;
+static const char *g_dump_dir;   /* CALLISTO_DUMP_DIR */
 
 /* The constructor can run before the sandbox has finished setting up the
  * process's filesystem view (under pressure-vessel the game's log fopen fails
@@ -63,6 +66,7 @@ static void log_open(void) {
     g_logpath = getenv("CALLISTO_LOG");
     g_quiet = getenv("CALLISTO_SWAP_QUIET") && !strcmp(getenv("CALLISTO_SWAP_QUIET"), "1");
     g_disabled = getenv("CALLISTO_SWAP_DISABLE") && !strcmp(getenv("CALLISTO_SWAP_DISABLE"), "1");
+    g_dump_dir = getenv("CALLISTO_DUMP_DIR");
 }
 
 /* call with g_mu held */
@@ -399,6 +403,32 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
     int has_id = scan_dxil_id(ci->pCode, ci->codeSize, id, dxil);
     char sha[65];
     sha256(ci->pCode, ci->codeSize, sha);
+
+    /* CALLISTO_DUMP_DIR: write the INCOMING SPIR-V for every module whose id
+     * contains CALLISTO_DUMP_MATCH (default: all). The live game builds many
+     * more shader permutations than any single capture contains -- e.g. 12
+     * distinct rgs_reference_main libraries -- so patching only the two from
+     * the capture silently misses whichever one is actually dispatched.
+     * This is how the rest get their SPIR-V for the patcher. */
+    if (g_dump_dir) {
+        const char *want = getenv("CALLISTO_DUMP_MATCH");
+        if (!want || (has_id && strstr(id, want))) {
+            char path[1024];
+            snprintf(path, sizeof path, "%s/%s.spv", g_dump_dir,
+                     has_id ? id : sha);
+            /* Same module is created repeatedly; first write wins. */
+            if (access(path, F_OK) != 0) {
+                FILE *df = fopen(path, "wb");
+                if (df) {
+                    fwrite(ci->pCode, 1, ci->codeSize, df);
+                    fclose(df);
+                    LOGF("\"ev\":\"dump\",\"id\":\"%s\",\"sha256\":\"%s\","
+                         "\"size\":%zu,\"path\":\"%s\"}",
+                         has_id ? id : "", sha, ci->codeSize, path);
+                }
+            }
+        }
+    }
 
     if (g_disabled) {
         if (!g_quiet)
