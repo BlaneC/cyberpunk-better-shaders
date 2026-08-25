@@ -356,3 +356,82 @@ isotropic dual lobe (section 4a) remains the only Marschner-flavoured option
 reachable from the raygen alone: it can fake the R + TRT split (sharp white
 highlight + wide colored one) but cannot shift either lobe along the strand,
 which is the part that most sells real hair.
+
+---
+
+# CORRECTION: a tangent can be ESTIMATED, though none is stored
+
+The section above is correct that no *geometric* tangent reaches the path
+tracer, and that the payload has no room for one. But "no tangent is stored"
+is not the same as "no tangent is obtainable". Two further facts change the
+conclusion:
+
+1. **A screen-space normal G-buffer is readable.** SRV slot
+   `registers[1] + 2`, fetched at `%201` (line 1465), decoded as `(rgb - 0.5)`
+   normalized into `%217/%218/%219` (lines 1470-1479). This is a full-screen
+   normal buffer, fetchable at any pixel coordinate, not just the current one.
+2. **Pixel coordinates are live across the entire shader.** `%140` (line 1407)
+   and `%132` (line 1402) are still in use at line 14649, so they dominate
+   every eval site. Neighbour fetches can be spliced anywhere.
+
+Note the raygen uses `OpTraceRayKHR` (6 calls), not ray queries, so it never
+sees geometry directly — this estimate is the only route from the raygen.
+
+## The method: structure tensor of the normal field
+
+For a cylindrical fibre the surface normal rotates quickly as you move
+*across* the strand and barely changes as you move *along* it. So the
+direction of least normal variation is the projected strand direction.
+
+```
+for the 3x3 (or 5x5) neighbourhood of the pixel:
+    N(x,y)  = normalize(fetch(normalGBuf, (x,y)).rgb - 0.5)
+    gx      = dN/dx   (Sobel or central difference, per component)
+    gy      = dN/dy
+    J      += [[gx.gx, gx.gy], [gx.gy, gy.gy]]      # 2x2, summed
+minor eigenvector of J  = strand direction in screen space (2D)
+```
+2x2 eigenvector is closed form — no iteration:
+```
+a=J00, b=J01, d=J11
+t   = 0.5*(a+d);  r = sqrt(max((a-d)^2*0.25 + b*b, 0))
+l1  = t + r      # major (across strand)
+l2  = t - r      # minor (along strand)
+dir = normalize( b != 0 ? (l2 - d, b) : (1, 0) )     # minor eigenvector
+aniso = (l1 - l2) / max(l1 + l2, eps)   # confidence in [0,1]
+```
+Then lift the 2D screen direction to a world tangent: unproject with the view
+basis and orthogonalize against the shading normal,
+`T = normalize(dirWorld - N * dot(N, dirWorld))`.
+
+With T in hand, Kajiya-Kay or a *shifted* dual lobe becomes possible — the
+lobe shift along the strand is the part idea 4a cannot fake and the part that
+most makes hair read as hair.
+
+## Honest limitations — read before investing
+
+- **Primary hit only.** The pixel coordinate identifies the primary pixel. At
+  bounce hits it refers to the wrong surface, so the tangent would be wrong
+  there. Either restrict anisotropy to primary-hit shading or accept that
+  hair-to-hair bounces reuse the primary strand direction.
+- **Depends on the hair having directional normals.** Cards with a strand-flow
+  normal map work well; a *stylized* mod with smooth or flat hair normals
+  yields a degenerate tensor and no usable direction. This is the single
+  biggest risk here and it is exactly what this user has. Test the `aniso`
+  confidence value before building on it.
+- **Falls apart at ~1 pixel per strand** — the normal field becomes aliased
+  noise. Needs the `aniso` fallback to the isotropic lobe.
+- **180-degree ambiguity**: eigenvectors are unsigned. Tolerable for symmetric
+  lobes, mildly wrong for the opposite-signed R and TRT shifts.
+- **Cost**: 4-9 extra texture fetches plus a closed-form 2x2 solve per shading
+  site.
+- This yields an estimated *direction*, not fibre geometry. Enough for
+  Kajiya-Kay and shifted lobes; still not enough for true Marschner TT, which
+  needs actual fibre depth and transmission.
+
+## Suggested order
+
+Cheap diagnostic first: splice a debug swap that writes `aniso` (the tensor
+confidence) to the output for hair pixels. If it is near zero on this user's
+hair, the whole avenue is dead for their mod and idea 4a is the ceiling. If it
+is strong, build the shifted dual lobe on top.
