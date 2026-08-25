@@ -410,6 +410,35 @@ HUNT_PALETTE = {
 HUNT_DEFAULT = (1, 2, 3, 4, 5, 6, 7, 8, 13, 14)
 
 
+def build_forcetint(mod, triples, knobs):
+    """Unconditional tint at EVERY triple -- no gate, no class test.
+
+    Bisects a null result: if the screen does not change with this loaded,
+    the raygen is not executing (path tracing off, or a different raygen in
+    use) and no gated result can ever be trusted. If it does change, the
+    shader runs and the problem is the gate or the class value.
+
+    Also tints the env triples, which the class hunt leaves alone, so a scene
+    lit mainly by the env path still shows it.
+    """
+    consts, edits = [], []
+    def C(v):
+        nid, c = mod.const(v)
+        if c: consts.append(c)
+        return nid
+    tint = [C(x) for x in knobs["tint"]]
+    for t in triples:
+        ins, newids = [], []
+        for k, vid in enumerate(t['ids']):
+            n = mod.new_id()
+            ins.append(f"        {n} = OpFMul %float {vid} {tint[t['chan'][k]]}")
+            newids.append(n)
+        edits.append((t['line'] + 2, ins))
+        for vid, n in zip(t['ids'], newids):
+            replace_single_use(mod, vid, n, t['line'], 'forcetint')
+    return consts, edits, {"triples": len(triples), "tint": list(knobs["tint"])}
+
+
 def build_hairhunt(mod, prim, shift, classes, knobs):
     """Tint each candidate class its palette colour at the diffuse triples.
 
@@ -1105,6 +1134,8 @@ def process(path, outdir, tier, knobs, target_env, do_rt=True,
     elif tier == '1':
         consts, edits, rep['sites'] = build_tier1(mod, prim, gate, knobs)
         rep['params'] = {k: knobs[k] for k in ('rho_f','n_f','m_f','rho_r','n_r','m_r')}
+    elif tier == 'forcetint':
+        consts, edits, rep['force'] = build_forcetint(mod, triples, knobs)
     elif tier == 'hairhunt':
         shift, _ = find_class_shift(mod)
         consts, edits, rep['hunt'] = build_hairhunt(
@@ -1174,7 +1205,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('modules', nargs='+', help='input .spvasm files')
     ap.add_argument('--tier',
-                    choices=['smoke', '1', 'hairhunt'] + list(HAIR_TIERS),
+                    choices=['smoke', '1', 'hairhunt', 'forcetint']
+                            + list(HAIR_TIERS),
                     default='smoke')
     ap.add_argument('--classes', default=None,
                     help='hairhunt: comma-separated candidate classes '

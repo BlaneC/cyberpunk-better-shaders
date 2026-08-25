@@ -78,8 +78,12 @@ fi
 
 backup_once
 
-ARGS=(--tier hairhunt)
-[[ -n "${1:-}" ]] && ARGS+=(--classes "$1")
+if [[ "${1:-}" == "--forcetint" ]]; then
+    ARGS=(--tier forcetint --set tint_r=6.0 --set tint_g=0.05 --set tint_b=0.05)
+else
+    ARGS=(--tier hairhunt)
+    [[ -n "${1:-}" ]] && ARGS+=(--classes "$1")
+fi
 
 python3 "$MOD_DIR/dev/patch_skin_brdf.py" \
     "$MOD_DIR/dev/disasm/spv_0170.spvasm" \
@@ -87,14 +91,20 @@ python3 "$MOD_DIR/dev/patch_skin_brdf.py" \
     "${ARGS[@]}" --outdir "$SWAPS" > "$SWAPS/hunt_report.json"
 
 echo
-echo "=== colour legend ==="
 python3 - "$SWAPS/hunt_report.json" <<'PY'
 import json, sys
 rep = json.load(open(sys.argv[1]))
-for e in rep[0]["hunt"]["legend"]:
-    note = "  <- skin, CONTROL: must light up or the test is invalid" \
-           if e["class"] == 1 else ""
-    print(f"  class {e['class']:>2} = {e['colour']}{note}")
+if "hunt" in rep[0]:
+    print("=== colour legend ===")
+    for e in rep[0]["hunt"]["legend"]:
+        note = ("  <- skin, CONTROL: must light up or the test is invalid"
+                if e["class"] == 1 else "")
+        print(f"  class {e['class']:>2} = {e['colour']}{note}")
+else:
+    print("=== FORCE TINT (ungated, all 6 triples) ===")
+    print("  everything the path tracer shades -> red")
+    print("  RED        = raygen runs; the CLASS GATE is the problem")
+    print("  NO CHANGE  = this raygen is not executing (path tracing off?)")
 PY
 echo
 install_swaps
