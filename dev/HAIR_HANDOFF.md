@@ -435,3 +435,43 @@ Cheap diagnostic first: splice a debug swap that writes `aniso` (the tensor
 confidence) to the output for hair pixels. If it is near zero on this user's
 hair, the whole avenue is dead for their mod and idea 4a is the ceiling. If it
 is strong, build the shifted dual lobe on top.
+
+---
+
+# IMPLEMENTED: structure-tensor tangent estimation (tiers `hairdbg`, `hairaniso`)
+
+Both tiers pass spirv-val on both modules; both still require `--hair-class N`.
+
+- `hairdbg` — the go/no-go diagnostic. At the 3 primary diffuse triples it
+  computes the tensor confidence from 4 neighbour fetches of the normal
+  G-buffer and tints hair diffuse: **red = no strand signal, green = strong**.
+  Run this FIRST once N is known; if hair stays red, `hairaniso` is dead for
+  this hair mod and section 4a is the ceiling.
+- `hairaniso` — Kajiya-Kay-flavoured modulation at every GGX site:
+  `factor = 1 + m_aniso*aniso*(sin(T,H)^p_aniso - 1)`, tangent from
+  `T = normalize(cross(Nc, w))`. Confidence-scaled, so degenerate pixels stay
+  at exactly 1; `m_aniso=0` (and `--vanilla`) is the identity.
+
+Implementation notes:
+- `find_normal_gbuffer` anchors on the ImageFetch whose components go through
+  the (x-0.5) decode — SRV registers[1]+2 in both modules — and reads the
+  descriptor chain + pixel-coord ids off the found instructions.
+- Pixel coords are NOT entry-block values (block %12262/%13141); their
+  dominance over all splice points is proven mechanically by spirv-val
+  passing, not assumed.
+- **Eigenvector degeneracy found by numerical test**: the single row form
+  `(l1-d, b)` is a zero vector when the major axis is coordinate-aligned
+  (b=0, d>a) — a synthetic-fibre test showed a 90° tangent error at strand
+  angle 0. Fixed by computing both row forms and picking the longer,
+  branchlessly with OpSelect. After the fix: exact recovery (0.00° error,
+  aniso=1.0) at all tested angles, and aniso=0 for flat normals.
+- N/H at each GGX site come from the NoH chain (den = NoH²(a2-1)+1 → dot →
+  the two v3 constructs; H is the one built nearest the site). 0 sites
+  skipped in either module.
+- Cost: 4 fetches per diffuse triple (dbg), 5 per GGX site (aniso).
+
+Open caveats (unchanged from the analysis): primary-hit coordinates only —
+bounce hits reuse the primary pixel's tangent; possible space mismatch
+between G-buffer normals and payload-derived H (if grossly wrong in-game,
+this is the first suspect); 180° eigenvector ambiguity is harmless for the
+symmetric sin^p lobe.

@@ -55,9 +55,13 @@ KNOBS = {
     "k_sheen": 0.15,  # grazing sheen added to F
     "w_wrap": 0.4,    # diffuse wrap width
     "r_max": 4.0,     # wrap ratio clamp (firefly guard)
+    # structure-tensor tangent (HAIR_HANDOFF "tangent can be ESTIMATED")
+    "kd_dbg": 4.0,    # hairdbg tint gain (red=low confidence, green=high)
+    "m_aniso": 0.7,   # anisotropic spec strength; 0 = identity
+    "p_aniso": 16.0,  # Kajiya-style exponent on sin(T,H)
 }
 VANILLA = dict(KNOBS, tint=(1.0, 1.0, 1.0), rho_f=1.0, rho_r=1.0,
-               s_h=1.0, a_min=0.0, k_sheen=0.0, w_wrap=0.0)
+               s_h=1.0, a_min=0.0, k_sheen=0.0, w_wrap=0.0, m_aniso=0.0)
 
 # gbuffer material class for hair -- NOT yet identified; see HAIR_HANDOFF.md
 # section 1 for the discovery procedure. Skin is 1.
@@ -386,6 +390,328 @@ def replace_all_uses(mod, old, new, after_line):
     return n
 
 
+# ---------------------------------------------- structure-tensor tangent
+def find_normal_gbuffer(mod):
+    """Locate the screen-space normal G-buffer fetch and everything needed to
+    re-emit fetches of it at arbitrary coordinates.
+
+    Anchor: the ImageFetch %v4float whose components go through the
+    (x - 0.5) octahedral-free decode (three FAdd %float_n0_5) -- that is the
+    normal buffer (SRV registers[1]+2). The descriptor chain and the pixel
+    coordinate ids are read off the found instructions so nothing is
+    hardcoded per module.
+    """
+    for i, ln in enumerate(mod.lines):
+        m = re.match(r'\s*(%\d+)\s*=\s*OpImageFetch %v4float (%\d+) (%\d+)'
+                     r' Lod (%\w+)\s*$', ln)
+        if not m: continue
+        fid, img, coord, lod = m.groups()
+        exts = set()
+        for j in range(i + 1, min(i + 8, len(mod.lines))):
+            mm = re.match(r'\s*(%\d+)\s*=\s*OpCompositeExtract %float '
+                          + re.escape(fid) + r' \d\s*$', mod.lines[j])
+            if mm: exts.add(mm.group(1))
+        hits = 0
+        for j in range(i + 1, min(i + 16, len(mod.lines))):
+            mm = re.match(r'\s*%\d+\s*=\s*OpFAdd %float (%\d+) %float_n0_5\s*$',
+                          mod.lines[j])
+            if mm and mm.group(1) in exts: hits += 1
+        if hits < 3: continue
+        _, imgd = mod.find_def(img)
+        mi = re.match(r'OpLoad (%\w+) (%\d+)', imgd or '')
+        if not mi: continue
+        imgty, ac = mi.groups()
+        _, acd = mod.find_def(ac)
+        ma = re.match(r'OpAccessChain (%\w+) (%\d+) (%\d+)', acd or '')
+        if not ma: continue
+        ptrty, arr, slot = ma.groups()
+        _, sd = mod.find_def(slot)
+        ms = re.match(r'OpIAdd %uint (%\d+) (%\w+)', sd or '')
+        if not ms: continue
+        _, bd = mod.find_def(ms.group(1))
+        mb = re.match(r'OpLoad %uint (%\d+)', bd or '')
+        if not mb: continue
+        _, pcd = mod.find_def(mb.group(1))
+        mp = re.match(r'OpAccessChain (%\w+) (%\w+) (%\w+)', pcd or '')
+        if not mp: continue
+        _, cd = mod.find_def(coord)
+        mc = re.match(r'OpCompositeConstruct %v2uint (%\d+) (%\d+)', cd or '')
+        if not mc: continue
+        return dict(imgty=imgty, ptrty=ptrty, arr=arr, off=ms.group(2),
+                    pcty=mp.group(1), regs=mp.group(2), idx=mp.group(3),
+                    lod=lod, x=mc.group(1), y=mc.group(2), line=i)
+    die(f"{mod.name}: normal G-buffer fetch (rgb-0.5 decode) not found")
+
+
+def emit_nfetch(mod, ctx, xid, yid, ins):
+    """Fetch the normal buffer at (xid, yid); returns the 3 decoded
+    (value - 0.5) component ids. Deliberately not normalized: the tensor is a
+    ratio and normalization cancels; T is normalized at the end."""
+    I = mod.new_id
+    a, b, c, d, e, cc, f = [I() for _ in range(7)]
+    ins += [
+        f"        {a} = OpAccessChain {ctx['pcty']} {ctx['regs']} {ctx['idx']}",
+        f"        {b} = OpLoad %uint {a}",
+        f"        {c} = OpIAdd %uint {b} {ctx['off']}",
+        f"        {d} = OpAccessChain {ctx['ptrty']} {ctx['arr']} {c}",
+        f"        {e} = OpLoad {ctx['imgty']} {d}",
+        f"        {cc} = OpCompositeConstruct %v2uint {xid} {yid}",
+        f"        {f} = OpImageFetch %v4float {e} {cc} Lod {ctx['lod']}",
+    ]
+    out = []
+    for ch in range(3):
+        g, h = I(), I()
+        ins.append(f"        {g} = OpCompositeExtract %float {f} {ch}")
+        ins.append(f"        {h} = OpFAdd %float {g} %float_n0_5")
+        out.append(h)
+    return out
+
+
+def emit_aniso(mod, ctx, C, want_tangent):
+    """Structure tensor of the normal field at the current pixel.
+
+    Normals rotate fast across a fibre and stay near-constant along it, so
+    the minor eigenvector of J = sum(grad N grad N^T) over the neighbourhood
+    is the projected strand direction, and (l1-l2)/(l1+l2) measures how
+    fibre-like the neighbourhood is. Central differences, closed-form 2x2
+    eigen -- no loops, no branches, safe to splice anywhere the coordinate
+    ids dominate.
+
+    Returns (instructions, {aniso, T?}). T = normalize(cross(Nc, w)) where w
+    is the world-space direction of maximal normal change (gx,gy combined by
+    the major eigenvector), i.e. across the strand; crossing with the centre
+    normal turns it into the along-strand direction.
+    """
+    I = mod.new_id
+    ins = []
+    gl = mod.glsl
+    x, y = ctx['x'], ctx['y']
+    xp, xm, yp, ym = [I() for _ in range(4)]
+    ins += [
+        f"        {xp} = OpIAdd %uint {x} %uint_1",
+        f"        {xm} = OpISub %uint {x} %uint_1",
+        f"        {yp} = OpIAdd %uint {y} %uint_1",
+        f"        {ym} = OpISub %uint {y} %uint_1",
+    ]
+    nxp = emit_nfetch(mod, ctx, xp, y, ins)
+    nxm = emit_nfetch(mod, ctx, xm, y, ins)
+    nyp = emit_nfetch(mod, ctx, x, yp, ins)
+    nym = emit_nfetch(mod, ctx, x, ym, ins)
+    gx, gy = [], []
+    for ch in range(3):
+        g1, g2 = I(), I()
+        ins.append(f"        {g1} = OpFSub %float {nxp[ch]} {nxm[ch]}")
+        ins.append(f"        {g2} = OpFSub %float {nyp[ch]} {nym[ch]}")
+        gx.append(g1); gy.append(g2)
+
+    def dot3(u, v):
+        t1, t2, t3, s1, s2 = [I() for _ in range(5)]
+        ins.extend([
+            f"        {t1} = OpFMul %float {u[0]} {v[0]}",
+            f"        {t2} = OpFMul %float {u[1]} {v[1]}",
+            f"        {t3} = OpFMul %float {u[2]} {v[2]}",
+            f"        {s1} = OpFAdd %float {t1} {t2}",
+            f"        {s2} = OpFAdd %float {s1} {t3}",
+        ])
+        return s2
+
+    a, b, d = dot3(gx, gx), dot3(gx, gy), dot3(gy, gy)
+    quarter, eps, two, half = C(0.25), C(1e-6), C(2.0), C(0.5)
+    amd, h2, b2, q, r2, r, tr, tre, twor, aniso = [I() for _ in range(10)]
+    ins += [
+        f"        {amd} = OpFSub %float {a} {d}",
+        f"        {h2} = OpFMul %float {amd} {amd}",
+        f"        {b2} = OpFMul %float {b} {b}",
+        f"        {q} = OpFMul %float {h2} {quarter}",
+        f"        {r2} = OpFAdd %float {q} {b2}",
+        f"        {r} = OpExtInst %float {gl} Sqrt {r2}",
+        f"        {tr} = OpFAdd %float {a} {d}",
+        f"        {tre} = OpFAdd %float {tr} {eps}",
+        f"        {twor} = OpFMul %float {r} {two}",
+        f"        {aniso} = OpFDiv %float {twor} {tre}",
+    ]
+    out = {"aniso": aniso}
+    if want_tangent:
+        nc = emit_nfetch(mod, ctx, x, y, ins)
+        # Major eigenvector of J. Both row forms of (J - l2*I) are valid
+        # eigenvectors: (l1-d, b) and (b, l1-a); each degenerates to zero when
+        # the major axis aligns with a coordinate axis (b=0), but never both
+        # at once -- pick the longer one branchlessly.
+        t_, l1, e1x, e2y = [I() for _ in range(4)]
+        m1s, m2s, gtc, vx, vy = [I() for _ in range(5)]
+        ins += [
+            f"        {t_} = OpFMul %float {tr} {half}",
+            f"        {l1} = OpFAdd %float {t_} {r}",
+            f"        {e1x} = OpFSub %float {l1} {d}",
+            f"        {e2y} = OpFSub %float {l1} {a}",
+            f"        {m1s} = OpFMul %float {e1x} {e1x}",
+            f"        {m2s} = OpFMul %float {e2y} {e2y}",
+            f"        {gtc} = OpFOrdGreaterThan %bool {m1s} {m2s}",
+            f"        {vx} = OpSelect %float {gtc} {e1x} {b}",
+            f"        {vy} = OpSelect %float {gtc} {b} {e2y}",
+        ]
+        w = []
+        for ch in range(3):
+            u1, u2, u3 = I(), I(), I()
+            ins += [
+                f"        {u1} = OpFMul %float {gx[ch]} {vx}",
+                f"        {u2} = OpFMul %float {gy[ch]} {vy}",
+                f"        {u3} = OpFAdd %float {u1} {u2}",
+            ]
+            w.append(u3)
+        vn, vw, cr = I(), I(), I()
+        ins += [
+            f"        {vn} = OpCompositeConstruct %v3float {nc[0]} {nc[1]} {nc[2]}",
+            f"        {vw} = OpCompositeConstruct %v3float {w[0]} {w[1]} {w[2]}",
+            f"        {cr} = OpExtInst %v3float {gl} Cross {vn} {vw}",
+        ]
+        tc = []
+        for ch in range(3):
+            e_ = I()
+            ins.append(f"        {e_} = OpCompositeExtract %float {cr} {ch}")
+            tc.append(e_)
+        dd = dot3(tc, tc)
+        dde, inv = I(), I()
+        ins += [
+            f"        {dde} = OpFAdd %float {dd} {eps}",
+            f"        {inv} = OpExtInst %float {gl} InverseSqrt {dde}",
+        ]
+        out["T"] = []
+        for ch in range(3):
+            n_ = I()
+            ins.append(f"        {n_} = OpFMul %float {tc[ch]} {inv}")
+            out["T"].append(n_)
+    return ins, out
+
+
+def build_hairdbg(mod, prim, gate, knobs):
+    """Paint the tensor confidence onto hair diffuse: red = no usable strand
+    direction, green = strong one. The go/no-go diagnostic for anisotropy."""
+    consts, edits = [], []
+    def C(v):
+        nid, c = mod.const(v)
+        if c: consts.append(c)
+        return nid
+    ctx = find_normal_gbuffer(mod)
+    one, kd = C(1.0), C(knobs["kd_dbg"])
+    blue = C(knobs["kd_dbg"] * 0.05)
+    for t in prim:
+        ins, res = emit_aniso(mod, ctx, C, want_tangent=False)
+        I = mod.new_id
+        ia, rm, gm = I(), I(), I()
+        ins += [
+            f"        {ia} = OpFSub %float {one} {res['aniso']}",
+            f"        {rm} = OpFMul %float {ia} {kd}",
+            f"        {gm} = OpFMul %float {res['aniso']} {kd}",
+        ]
+        tint = {0: rm, 1: gm, 2: blue}
+        newids = []
+        for k, vid in enumerate(t['ids']):
+            s, n = I(), I()
+            ins.append(f"        {s} = OpSelect %float {gate} {tint[t['chan'][k]]} {one}")
+            ins.append(f"        {n} = OpFMul %float {vid} {s}")
+            newids.append(n)
+        edits.append((t['line'] + 2, ins))
+        for vid, n in zip(t['ids'], newids):
+            replace_single_use(mod, vid, n, t['line'], 'hairdbg')
+    return consts, edits, dict(ctx_line=ctx['line'] + 1, triples=len(prim))
+
+
+def find_site_nh(mod, site):
+    """The N and H component ids at a GGX site, via the NoH chain:
+    den = NoH^2*(a2-1)+1 -> NoH -> OpDot(N-construct, H-construct).
+    H is the construct built nearest the site (L+V is site-local; N is not).
+    """
+    lo = max(0, site['line'] - 80)
+    am1 = None
+    for j in range(lo, site['line']):
+        m = re.match(r'\s*(%\d+)\s*=\s*OpFAdd %float ' + re.escape(site['a2'])
+                     + r' %float_n1\s*$', mod.lines[j])
+        if m: am1 = m.group(1); break
+    if not am1: return None
+    sq = None
+    for j in range(lo, site['line']):
+        m = re.match(r'\s*%\d+\s*=\s*OpFMul %float (%\d+) ' + re.escape(am1)
+                     + r'\s*$', mod.lines[j])
+        if m: sq = m.group(1); break
+    if not sq: return None
+    _, d1 = mod.find_def(sq)
+    m = re.match(r'OpFMul %float (%\d+) \1\s*$', d1 or '')
+    if not m: return None
+    c = m.group(1)
+    for _ in range(3):
+        _, dd = mod.find_def(c)
+        mm = re.match(r'OpExtInst %float %\w+ NClamp (%\d+) ', dd or '')
+        if not mm: break
+        c = mm.group(1)
+    _, dd = mod.find_def(c)
+    md = re.match(r'OpDot %float (%\d+) (%\d+)', dd or '')
+    if not md: return None
+    built = []
+    for cid in md.groups():
+        ln, cdf = mod.find_def(cid)
+        mc = re.match(r'OpCompositeConstruct %v3float (%\d+) (%\d+) (%\d+)', cdf or '')
+        if not mc: return None
+        built.append((ln, list(mc.groups())))
+    built.sort(key=lambda t: t[0])
+    return dict(n=built[0][1], h=built[1][1])
+
+
+def build_hairaniso(mod, sites, gate, knobs):
+    """Kajiya-Kay-flavoured spec modulation from the estimated tangent:
+        factor = 1 + m_aniso * aniso * (sin(T,H)^p - 1)
+    scaled by the tensor confidence so pixels with no strand signal stay at
+    exactly 1. m_aniso=0 is the identity."""
+    consts, edits = [], []
+    def C(v):
+        nid, c = mod.const(v)
+        if c: consts.append(c)
+        return nid
+    ctx = find_normal_gbuffer(mod)
+    one, eps2 = C(1.0), C(1e-4)
+    mkn, pex = C(knobs["m_aniso"]), C(knobs["p_aniso"] * 0.5)
+    gl = mod.glsl
+    rep = {"aniso_sites": 0, "skipped_no_nh": 0}
+    for s in sites:
+        nh = find_site_nh(mod, s)
+        if not nh:
+            rep["skipped_no_nh"] += 1
+            continue
+        ins, res = emit_aniso(mod, ctx, C, want_tangent=True)
+        T = res["T"]
+        I = mod.new_id
+        m1, m2, m3, a1, toh = [I() for _ in range(5)]
+        ins += [
+            f"        {m1} = OpFMul %float {T[0]} {nh['h'][0]}",
+            f"        {m2} = OpFMul %float {T[1]} {nh['h'][1]}",
+            f"        {m3} = OpFMul %float {T[2]} {nh['h'][2]}",
+            f"        {a1} = OpFAdd %float {m1} {m2}",
+            f"        {toh} = OpFAdd %float {a1} {m3}",
+        ]
+        t2, f_, fm, lg, ex, sv, sm1, ma, term, fac, sel = [I() for _ in range(11)]
+        ins += [
+            f"        {t2} = OpFMul %float {toh} {toh}",
+            f"        {f_} = OpFSub %float {one} {t2}",
+            f"        {fm} = OpExtInst %float {gl} NMax {f_} {eps2}",
+            f"        {lg} = OpExtInst %float {gl} Log2 {fm}",
+            f"        {ex} = OpFMul %float {lg} {pex}",
+            f"        {sv} = OpExtInst %float {gl} Exp2 {ex}",
+            f"        {sm1} = OpFSub %float {sv} {one}",
+            f"        {ma} = OpFMul %float {mkn} {res['aniso']}",
+            f"        {term} = OpFMul %float {ma} {sm1}",
+            f"        {fac} = OpFAdd %float {one} {term}",
+            f"        {sel} = OpSelect %float {gate} {fac} {one}",
+        ]
+        last_out = max(mod.find_def(o)[0] for o in s['outs'])
+        for o in s['outs']:
+            n = I()
+            ins.append(f"        {n} = OpFMul %float {o} {sel}")
+            replace_all_uses(mod, o, n, last_out)
+        edits.append((last_out, ins))
+        rep["aniso_sites"] += 1
+    return consts, edits, rep
+
+
 def build_hair_spec(mod, sites, gate, knobs):
     """Idea 2: roughness reshape at the common alpha + gated sheen on F."""
     consts, edits = [], []
@@ -674,7 +1000,7 @@ def roundtrip_check(spvasm, target_env):
     if v.returncode != 0:
         die(f"spirv-val failed on UNPATCHED {spvasm}:\n{v.stderr}")
 
-HAIR_TIERS = ('hair2', 'hair3', 'hair23')
+HAIR_TIERS = ('hair2', 'hair3', 'hair23', 'hairdbg', 'hairaniso')
 
 
 def process(path, outdir, tier, knobs, target_env, do_rt=True,
@@ -729,6 +1055,15 @@ def process(path, outdir, tier, knobs, target_env, do_rt=True,
             c2, e2, rep['spec'] = build_hair_spec(mod, sites, hgate, knobs)
             consts += c2; edits += e2
             rep['spec']['sites_found'] = len(sites)
+        if tier == 'hairdbg':
+            cD, eD, rep['dbg'] = build_hairdbg(mod, prim, hgate, knobs)
+            consts += cD; edits += eD
+        if tier == 'hairaniso':
+            sites = find_ggx_sites(mod)
+            if not sites: die(f"{mod.name}: no GGX specular sites found")
+            cA, eA, rep['aniso'] = build_hairaniso(mod, sites, hgate, knobs)
+            consts += cA; edits += eA
+            rep['aniso']['sites_found'] = len(sites)
         do_wrap = tier in ('hair3', 'hair23')
         if do_wrap or with_tier1:
             c3, e3, rep['diffuse'] = build_diffuse(
