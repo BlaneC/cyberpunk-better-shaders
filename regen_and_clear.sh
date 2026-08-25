@@ -11,8 +11,8 @@ SHADERCACHE="/mnt/f4333173-dd02-4314-9fd0-2ce547a9ba73/SteamLibrary/steamapps/sh
 # CET sandboxes mod file I/O to the mod's own folder, so the sliders write here:
 PARAMS="$GAME_DIR/bin/x64/plugins/cyber_engine_tweaks/mods/CallistoSSS/brdf_params.txt"
 KERNEL_FLAG="$GAME_DIR/red4ext/plugins/CallistoSSS/disable.flag"
-PATCHER="$MOD_DIR/../../scripts/patch_skin_brdf.py"
-SPVASM_DIR="/tmp/opencode/ngfx/spvA/dis"
+PATCHER="$MOD_DIR/dev/patch_skin_brdf.py"
+SPVASM_DIR="$MOD_DIR/dev/disasm"
 SWAPS="$MOD_DIR/swaps"
 LOG="$MOD_DIR/regen.log"
 # The game runs inside the Steam Linux Runtime container, which cannot see the
