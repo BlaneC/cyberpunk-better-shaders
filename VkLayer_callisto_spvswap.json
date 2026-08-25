@@ -1,0 +1,11 @@
+{
+    "file_format_version": "1.0.0",
+    "layer": {
+        "name": "VK_LAYER_CALLISTO_spvswap",
+        "type": "GLOBAL",
+        "library_path": "./libVkLayer_callisto_spvswap.so",
+        "api_version": "1.3.280",
+        "implementation_version": "1",
+        "description": "Callisto BRDF: swaps SPIR-V modules at vkCreateShaderModule (BRDF_HANDOFF.md)"
+    }
+}
