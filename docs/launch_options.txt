@@ -1,0 +1,27 @@
+# Cyberpunk 2077 — Steam launch options (Linux / Proton)
+
+Full combined line:
+
+"/mnt/f4333173-dd02-4314-9fd0-2ce547a9ba73/SteamLibrary/steamapps/common/Cyberpunk 2077/red4ext/plugins/CallistoSSS/sync_settings.sh"; WINEDLLOVERRIDES="winmm=native,builtin;version=native,builtin" CALLISTO_LOG=$HOME/callisto_swap.jsonl PROTON_ENABLE_WAYLAND=1 PROTON_ENABLE_HDR=1 DXVK_HDR=1 %command%
+
+## Breakdown
+
+1. "<game>/red4ext/plugins/CallistoSSS/sync_settings.sh";  — CallistoSSS kernel-toggle sync (runs first; the ';' separates it from the game command)
+2. WINEDLLOVERRIDES="winmm=native,builtin;version=native,builtin" — load red4ext (winmm.dll) + CET (version.dll) as native. Survives Proton prefix registry rebuilds.
+3. CALLISTO_LOG=$HOME/callisto_swap.jsonl — Callisto BRDF layer proof log (grep HIT to verify)
+4. PROTON_ENABLE_WAYLAND=1 — Wayland backend
+5. PROTON_ENABLE_HDR=1  — HDR support
+6. DXVK_HDR=1           — DXVK HDR passthrough
+7. %command%
+
+## Vanilla control (Callisto BRDF off for A/B screenshots)
+
+Same line, prefixed with CALLISTO_LAYER_DISABLE=1 before %command%.
+
+## Notes
+
+- The WINEDLLOVERRIDES / PROTON_* / DXVK_* values are environment variables, NOT Wine registry DLL overrides.
+  They belong here (launch options), not in the prefix's user.reg. A Proton update can rebuild the prefix
+  registry (wiping manual "winmm"/"version" DLL-override entries in user.reg) but cannot touch these.
+- If red4ext/CET ever "silently vanish" after a Proton/prefix update and redscript throws UNRESOLVED_TYPE
+  errors at boot, re-check these launch options first — the winmm/version DLL overrides are the usual cause.
