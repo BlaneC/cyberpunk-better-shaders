@@ -307,3 +307,52 @@ and you lose the shipped skin look.
   `r_max` / `w_wrap` if they appear.
 - Env triples are NOT wrapped (only the three primary/NEE triples), per the
   fallback in section 3. Revisit if hair still reads flat in bounce light.
+
+---
+
+# TANGENT INVESTIGATION — CONCLUSIVE NEGATIVE (offline, no game needed)
+
+Question: does a strand tangent / anisotropy direction reach the path tracer,
+which is what every real hair BSDF (Kajiya-Kay, Marschner, Chiang) needs?
+
+**Answer: no, and there is no spare room for one.**
+
+## Evidence
+
+1. **Zero `OpExtInst %v3float ... Cross` in spv_0170.** A tangent frame cannot
+   be constructed without a cross product. None exists anywhere in the raygen.
+   (The 22 Sin/Cos/Atan2 hits are ray sampling, not anisotropy.)
+
+2. **The hit payload is 16 bytes and every bit is accounted for.** The raygen
+   reads exactly four members of `%_ptr_RayPayloadKHR_* %100`:
+
+   | member | type | contents |
+   |---|---|---|
+   | 0 | uint | albedo r/g/b (8+8+8) + metallic (8) — bytes decoded at line 2554, `%1314` confirmed metallic by `(1-%1314)*albedo` at the three diffuse sites |
+   | 1 | uint | **octahedral normal (12+12) + roughness (8)** — decode at 2578-2598, roughness `%1309 = byte/255` → `%697` clamped [0.04, 1] |
+   | 2 | float | scalar, `*0.1` then saturated (`%1310` → `%1317`) |
+   | 3 | float | scalar |
+
+   Normal packing uses 24 of 32 bits; the remaining 8 are roughness. There is
+   no unused field to smuggle a tangent through.
+
+3. **The primary-hit G-buffer cluster (lines 1655-1712) carries no normal and
+   no tangent** — it fetches albedo (regs2+9), roughness + SSS masks
+   (regs2+11), matid (regs1+5), SSS profile (regs2+10). The normal comes from
+   the payload, not the G-buffer.
+
+## What a real hair BSDF would therefore require
+
+Not a raygen patch. It would need, together and consistently:
+- the closest-hit shader to obtain a per-vertex tangent (unverified whether
+  the geometry even carries one — this is the only remaining unknown);
+- the payload struct widened or repacked, patched identically in **every**
+  module that touches it, since payload layout must match across shaders;
+- the raygen to grow a tangent frame and a shifted-lobe evaluation.
+
+That is a substantially larger and riskier change than anything done so far,
+and it is blocked behind a geometry question we have not answered. Idea 1's
+isotropic dual lobe (section 4a) remains the only Marschner-flavoured option
+reachable from the raygen alone: it can fake the R + TRT split (sharp white
+highlight + wide colored one) but cannot shift either lobe along the strand,
+which is the part that most sells real hair.
