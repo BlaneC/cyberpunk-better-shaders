@@ -6,7 +6,7 @@
 -- this tab therefore applies on the NEXT GAME LAUNCH.
 local PARAMS = "brdf_params.txt"
 
-local brdf = { tier = "1", kernel = "on", hair = "on", rho_f = 1.35, rho_r = 1.25,
+local brdf = { tier = "1", kernel = "on", hair = "on", skinray = "on", rho_f = 1.35, rho_r = 1.25,
                n_f = 0.75, m_f = 0.75, n_r = 0.75, m_r = 0.75 }
 
 local function loadParams()
@@ -17,7 +17,7 @@ local function loadParams()
         -- without it every numeric knob silently failed to load and the
         -- defaults were written straight back over the file on launch.
         local k, v = line:match("^([%w_]+)=([%w%.%-]+)")
-        if k == "tier" or k == "kernel" or k == "hair" then brdf[k] = v
+        if k == "tier" or k == "kernel" or k == "hair" or k == "skinray" then brdf[k] = v
         elseif k and brdf[k] then brdf[k] = tonumber(v) or brdf[k] end
     end
     f:close()
@@ -29,6 +29,7 @@ local function saveParams()
     f:write("tier=" .. brdf.tier .. "\n")
     f:write("kernel=" .. brdf.kernel .. "\n")
     f:write("hair=" .. brdf.hair .. "\n")
+    f:write("skinray=" .. brdf.skinray .. "\n")
     for _, k in ipairs({"rho_f", "rho_r", "n_f", "m_f", "n_r", "m_r"}) do
         f:write(string.format("%s=%.3f\n", k, brdf[k]))
     end
@@ -63,6 +64,11 @@ registerForEvent("onInit", function()
         .. "estimated per pixel from the normal buffer. Applies on next launch.",
         brdf.hair ~= "off", true,
         function(state) brdf.hair = state and "on" or "off" saveParams() end)
+    nativeSettings.addSwitch("/callistoSSS/hair", "Callisto skin raygen sampling",
+        "Restore the original tier-1 raygen build (sampling-side skin BRDF). "
+        .. "Applies on next launch.",
+        brdf.skinray ~= "off", true,
+        function(state) brdf.skinray = state and "on" or "off" saveParams() end)
     nativeSettings.addSubcategory("/callistoSSS/brdf",
         "Callisto skin BRDF (restart required)")
     nativeSettings.addSwitch("/callistoSSS/brdf", "Callisto BRDF enabled",

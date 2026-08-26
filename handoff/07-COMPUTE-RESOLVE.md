@@ -114,3 +114,20 @@ reconstruction is unnecessary. Same maths as `emit_c1_factor`, same knobs
 (`rho_f/rho_r/n_f/m_f/n_r/m_r`). Installed: 68 modules, 149 c1 sites +
 361 Kajiya sites, one overlay, one toggle. The `--with-tier1` flag mirrors
 the reference patcher's.
+
+## Hair depth pass + skinray option
+
+- **Diffuse wrap ported.** `build_skin_c1` now emits skin c1 AND the hair
+  wrap as ONE multiply per Disney scalar (reference `build_diffuse` pattern) —
+  two passes rewriting the same scalar's uses would clobber each other.
+  wrap = sat((NoL+w)/(1+w))/(1+w), spliced as wrap/NoL since NoL is already in
+  the light weight, times `k_diff` (0.65) which darkens hair's diffuse so the
+  strands read as grounded instead of floating. 149 wrap sites.
+- **Punchier defaults** (the old raygen-era numbers were invisible):
+  m_aniso 0.7→0.95, p_aniso 16→28, k_sheen 0.15→0.3, s_h 0.55→0.45,
+  w_wrap 0.35, k_diff 0.65.
+- **skinray option**: CET switch → `skinray=on|off` → regen_and_clear.sh
+  copies/removes the pre-hunt tier-1 raygen build from `swaps.prehunt/`.
+  Sampling-side only (eval-invisible) but empirically measurable. `swaps/`
+  now holds ONLY those 2 tier-1 raygens + misc; all hunt-build raygen/CHS
+  diagnostics removed so nothing perturbs sampling with tint math.

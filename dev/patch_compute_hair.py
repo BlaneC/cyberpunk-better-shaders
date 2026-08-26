@@ -253,7 +253,7 @@ def find_c1_sites(mod):
     return sites, skipped
 
 
-def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
+def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs, hair_gate=None):
     """Tier-1 c1 at every Disney diffuse site, gated on skin (class 1).
 
     Same maths as patch_skin_brdf.emit_c1_factor -- Log2/Exp2 pow with eps
@@ -317,12 +317,80 @@ def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
             f"        {cf} = OpFAdd %float {one} {tf}",
             f"        {cr} = OpFAdd %float {one} {tr}",
             f"        {c1} = OpFMul %float {cf} {cr}",
-            f"        {g} = OpSelect %float {skin_gate} {c1} {one}",
-            f"        {out} = OpFMul %float {s['scalar']} {g}",
+            (f"        {g} = OpSelect %float {skin_gate} {c1} {one}"
+             if skin_gate is not None else
+             f"        {g} = OpFMul %float {one} {one}"),
         ]
+        fac = g
+        if hair_gate is not None:
+            # hair wrap + depth, combined into the same multiply so the two
+            # tiers never fight over the scalar's uses (reference
+            # build_diffuse learned this the hard way)
+            w = knobs["w_wrap"]
+            wk, inv = C(w), C(1.0 / (1.0 + w))
+            e3, rmax = C(1e-3), C(knobs["r_max"])
+            kd = C(knobs.get("k_diff", 1.0))
+            w1,w2,w3,w4,w5,w6,w7,w8,hg,comb = [I() for _ in range(10)]
+            ins += [
+                f"        {w1} = OpFAdd %float {s['nol']} {wk}",
+                f"        {w2} = OpFMul %float {w1} {inv}",
+                f"        {w3} = OpExtInst %float {gl} NClamp {w2} {C(0.0)} {one}",
+                f"        {w4} = OpFMul %float {w3} {inv}",
+                f"        {w5} = OpExtInst %float {gl} NMax {s['nol']} {e3}",
+                f"        {w6} = OpFDiv %float {w4} {w5}",
+                f"        {w7} = OpExtInst %float {gl} NMin {w6} {rmax}",
+                f"        {w8} = OpFMul %float {w7} {kd}",
+                f"        {hg} = OpSelect %float {hair_gate} {w8} {one}",
+                f"        {comb} = OpFMul %float {g} {hg}",
+            ]
+            fac = comb
+            rep["wrap_sites"] = rep.get("wrap_sites", 0) + 1
+        ins.append(f"        {out} = OpFMul %float {s['scalar']} {fac}")
         replace_all_uses(mod, s['scalar'], out, s['line'])
         edits.append((s['line'], ins))
         rep["c1_sites"] += 1
+    return consts, edits, rep
+
+
+def build_hair_wrap(mod, cfg, dom_id, hair_gate, knobs):
+    """Energy-normalized diffuse wrap + depth scale for hair, at the same
+    Disney scalar sites find_c1_sites locates. Spliced as wrap/NoL (NoL is
+    already folded into the light weight) times k_diff -- a global hair
+    diffuse scale below 1 that deepens shadow terms so hair stops floating.
+    Identity at w_wrap=0, k_diff=1."""
+    from patch_skin_brdf import replace_all_uses
+    consts, edits = [], []
+    def C(v):
+        nid, c = mod.const(v)
+        if c: consts.append(c)
+        return nid
+    one, zero = C(1.0), C(0.0)
+    w = knobs["w_wrap"]
+    wk, inv = C(w), C(1.0 / (1.0 + w))
+    e3, rmax, kd = C(1e-3), C(knobs["r_max"]), C(knobs.get("k_diff", 1.0))
+    gl = mod.glsl
+    sites, skipped = find_c1_sites(mod)
+    rep = {"wrap_sites": 0, "skipped": len(skipped)}
+    for st in sites:
+        if not cfg.dominates_line(dom_id, st['line']):
+            continue
+        I = mod.new_id
+        s1,s2,s3,s4,s5,s6,s7,s8,g,out = [I() for _ in range(10)]
+        ins = [
+            f"        {s1} = OpFAdd %float {st['nol']} {wk}",
+            f"        {s2} = OpFMul %float {s1} {inv}",
+            f"        {s3} = OpExtInst %float {gl} NClamp {s2} {zero} {one}",
+            f"        {s4} = OpFMul %float {s3} {inv}",
+            f"        {s5} = OpExtInst %float {gl} NMax {st['nol']} {e3}",
+            f"        {s6} = OpFDiv %float {s4} {s5}",
+            f"        {s7} = OpExtInst %float {gl} NMin {s6} {rmax}",
+            f"        {s8} = OpFMul %float {s7} {kd}",
+            f"        {g} = OpSelect %float {hair_gate} {s8} {one}",
+            f"        {out} = OpFMul %float {st['scalar']} {g}",
+        ]
+        replace_all_uses(mod, st['scalar'], out, st['line'])
+        edits.append((st['line'], ins))
+        rep["wrap_sites"] += 1
     return consts, edits, rep
 
 
@@ -469,11 +537,10 @@ def process(path, outdir, tier, knobs, hair_class, hunt_classes, do_rt=True,
         c2, e2, rep['spec'] = P.build_hair_spec(mod, sites, gate, knobs)
         consts += c2
         edits += e2
-        if with_tier1:
-            c3, e3, rep['skin_c1'] = build_skin_c1(mod, cfg, dom_id,
-                                                   skin_gate, knobs)
-            consts += c3
-            edits += e3
+        c3, e3, rep['diffuse'] = build_skin_c1(
+            mod, cfg, dom_id, skin_gate, knobs, hair_gate=gate)
+        consts += c3
+        edits += e3
         rep['params'] = {k: knobs[k] for k in
                          ('s_h', 'a_min', 'k_sheen', 'm_aniso', 'p_aniso')}
     else:
@@ -521,6 +588,11 @@ def main():
     a = ap.parse_args()
 
     knobs = dict(VANILLA if a.vanilla else KNOBS)
+    if not a.vanilla:
+        # compute-resolve hair defaults: stronger and deeper than the raygen
+        # era's timid numbers -- the user could barely see 0.7/16.
+        knobs.update(m_aniso=0.95, p_aniso=28.0, k_sheen=0.3, s_h=0.45,
+                     w_wrap=0.35, k_diff=0.65)
     for kv in a.set:
         k, v = kv.split('=')
         if k in knobs and k != 'tint':

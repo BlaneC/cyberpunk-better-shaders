@@ -36,12 +36,12 @@ exec >>"$LOG" 2>&1
 echo "=== regen $(date -Is) ==="
 
 # --- read params (key=value; CRLF tolerated) ---
-tier=1 kernel=on hair=on rho_f=1.35 rho_r=1.25 n_f=0.75 m_f=0.75 n_r=0.75 m_r=0.75
+tier=1 kernel=on hair=on skinray=on rho_f=1.35 rho_r=1.25 n_f=0.75 m_f=0.75 n_r=0.75 m_r=0.75
 if [[ -f "$PARAMS" ]]; then
     while IFS='=' read -r k v; do
         v="${v%$'\r'}"
         case "$k" in
-            tier|kernel|hair)  printf -v "$k" '%s' "$v" ;;
+            tier|kernel|hair|skinray)  printf -v "$k" '%s' "$v" ;;
             rho_f|rho_r|n_f|m_f|n_r|m_r) printf -v "$k" '%s' "$v" ;;
         esac
     done < "$PARAMS"
@@ -56,6 +56,18 @@ fi
 # and because the hair build lives in its own directory, sync_install's
 # "rm swaps/*.spv" never touches it.
 mkdir -p "$INSTALL_DIR"
+# skinray: the original Callisto tier-1 raygen build (sampling-side skin
+# BRDF). Eval-invisible but empirically measurable in the sampling; kept as
+# an option. Files come from the pre-hunt backup.
+if [[ "$skinray" == "off" ]]; then
+    rm -f "$INSTALL_DIR/swaps/d622fb9e1dcb8cd0.rgs_reference_main.spv" \
+          "$INSTALL_DIR/swaps/40c6faab52a13874.rgs_reference_main.spv"
+    echo "skin raygen sampling disabled"
+else
+    cp -f "$INSTALL_DIR/swaps.prehunt/"*.rgs_reference_main.spv \
+          "$INSTALL_DIR/swaps/" 2>/dev/null && echo "skin raygen sampling enabled (tier-1 prehunt build)"
+fi
+
 if [[ "$hair" == "off" ]]; then
     echo 1 > "$INSTALL_DIR/hair.disable"; echo "hair anisotropy disabled"
 else
