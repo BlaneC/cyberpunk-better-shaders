@@ -21,7 +21,11 @@ Three effects ship today:
 |---|---|---|
 | SSS diffusion kernel | RED4ext plugin patches the kernel upload | engine data |
 | Skin BRDF (tier-1 `c1`) | SPIR-V splice | compute resolve (+ optional raygen) |
-| Hair anisotropy | SPIR-V splice | compute resolve |
+| Hair anisotropy (direct + GI) | SPIR-V splice | compute resolve |
+| Hair shadow leak fix | SPIR-V splice (ray flags) | shadow/GI raygens |
+
+All four are confirmed visible on screen and independently toggleable from
+the CET settings tab.
 
 ---
 
@@ -199,14 +203,20 @@ math.
 
 ## 8. Open items
 
-1. **Ambient/GI hair.** Paths without a per-light GGX eval are untouched, so
-   fully backlit or shadowed hair changes least.
-2. **The 16 unpatched resolve modules** (14 no material read, 2 no dominated
-   GGX site).
-3. **CET sliders for the hair knobs** — currently patcher-side only.
-4. **The layer's stale rtpipe table** (§7) is still unfixed.
+1. ~~Ambient/GI hair.~~ **Done — §9.** Both indirect resolvers patched.
+2. **The 14 unpatched resolve modules** (no material G-buffer read at all —
+   sky/fog/volumetric passes; nothing to gate on).
+3. **CET sliders for the hair knobs** — currently patcher-side only. The
+   toggles exist; the continuous knobs (`m_aniso`, `p_aniso`, `k_diff`, …)
+   still require re-running the patcher.
+4. **The layer's stale rtpipe table** (§7) is still unfixed. Harmless now that
+   `pipe_stage` exists, but `trace_rays` output remains untrustworthy.
 5. **Second specular lobe / true Marschner** — needs a real tangent; the
    structure-tensor estimate is a screen-space approximation.
+6. **Dial back the exaggerated defaults.** Current values were set for visual
+   confirmation, not taste: `m_aniso=1.8, p_aniso=24, k_sheen=0.5, s_h=0.40,
+   w_wrap=0.45, k_diff=0.45`. Suggested shipping values: `m_aniso≈0.9`,
+   `k_diff≈0.65`, `k_sheen≈0.3`.
 
 ---
 
@@ -244,7 +254,10 @@ Dial back toward `m_aniso 0.9 / k_diff 0.65` once the effect is confirmed.
 
 ---
 
-## 10. Hair shadow leak fix (`shadowcull` overlay)
+## 10. Hair shadow leak fix (`shadowcull` overlay) — CONFIRMED FIXED
+
+**Status: confirmed on screen, Aug 26 2026.** The overlit gap at the hairline
+seam is gone. One constant per trace call.
 
 **Symptom:** dangling hair casts correct sharp shadows on the face, but there
 is an overlit gap right at the hairline seam — worst in *direct* light, not GI.
@@ -281,6 +294,16 @@ and a small any-hit perf cost.
 `hair,shadowcull`), each with its own `<name>.disable` flag, checked in order
 before base `swaps/`. Verified toggling independently.
 
-Considered and rejected for now: screen-space contact shadows. Against soft
-GI, a sharp screen-space term reads as an edge that does not belong — better
-to fix visibility at the source than composite an approximation over it.
+Considered and rejected: screen-space contact shadows. Against soft GI, a
+sharp screen-space term reads as an edge that does not belong — better to fix
+visibility at the source than composite an approximation over it. That
+judgement was vindicated: the real cause was a one-bit flag, and no
+screen-space approximation was needed. **Generalisable lesson: when occlusion
+looks wrong, interrogate what the shadow ray is allowed to hit before
+reaching for a screen-space term to paint the darkness back on.**
+
+Also rejected (§9 draft): weighting occlusion toward GI. Direct observation
+contradicted it — the leak was worst in *direct* light. The symptom
+description ("sharp shadows work, but there's a gap at the seam") is what
+localised the bug; a density- or AO-based approximation would have masked it
+without ever finding the cause.

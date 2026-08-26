@@ -1,9 +1,10 @@
 # CallistoSSS — handoff for external analysis
 
-**Current status:** shipping. Hair anisotropy and the tier-1 skin BRDF are
-live on the compute resolve — the surface that actually produces the image —
-gated by CET toggles. **Read `00-ARCHITECTURE.md` first**; it consolidates
-everything below, several of whose conclusions it supersedes.
+**Current status: shipping, all four effects confirmed on screen.** Hair
+anisotropy (direct + GI), the tier-1 skin BRDF, the SSS kernel, and the hair
+shadow-leak fix are live and independently toggleable from the CET tab.
+**Read `00-ARCHITECTURE.md` first** — it consolidates everything below, several
+of whose conclusions it supersedes.
 
 Read in this order:
 
