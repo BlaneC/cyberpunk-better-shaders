@@ -89,15 +89,24 @@ passes), 2 have no GGX site the class value dominates.
 
 ## 4. What ships (current build)
 
-`./dev/patch_compute_hair.sh --hair 4` → **68 modules**, all `spirv-val` clean:
+`./dev/patch_compute_hair.sh --hair 4` → **70 modules**, all `spirv-val` clean:
 
 | splice | sites | effect |
 |---|---|---|
-| Kajiya-Kay aniso | 361 | highlight stretched along the strand |
+| Kajiya-Kay aniso | 361 direct + 81 GI | highlight stretched along the strand |
+| **Shifted dual lobe (R + TRT)** | 361 direct + 81 GI | **Marschner-flavoured sharp white R + wide tinted TRT highlights, shifted along the strand — see `08-DUAL-LOBE.md`** |
 | Roughness reshape | all α uses | sharper spec; rewrites sampling too, so MIS stays unbiased |
-| Grazing sheen | 39 | rim glow on backlit hair |
+| Grazing sheen | 39 | rim glow on backlit hair — **actually live as of `08` (was dead code, see below)** |
 | Hair diffuse wrap + `k_diff` | 149 | softened terminator, darker diffuse → hair reads grounded |
 | Skin tier-1 `c1` | 149 | grazing-angle warmth on skin |
+
+> **Bug fixes (`08-DUAL-LOBE.md`, Aug 26):** the spec-output splice path had
+> two latent bugs, both proven by dead-code analysis, both now fixed by a
+> single combined pass (`build_hair_spec_lobes`) with per-out-at-def
+> anchoring: (A) the grazing sheen was **dead code** — the aniso pass consumed
+> every use of `s['outs']` before the sheen pass rewrote them; (B) `last_out`
+> anchoring missed out-consumers defined *before* `last_out` on interleaved
+> modules, so aniso reached only some channels. GI path fixed the same way.
 
 **The strand tangent has no geometric source** — the hit payload is 16 bytes
 with every bit accounted for. It is *estimated*: on a cylindrical fibre the
@@ -211,8 +220,10 @@ math.
    still require re-running the patcher.
 4. **The layer's stale rtpipe table** (§7) is still unfixed. Harmless now that
    `pipe_stage` exists, but `trace_rays` output remains untrustworthy.
-5. **Second specular lobe / true Marschner** — needs a real tangent; the
-   structure-tensor estimate is a screen-space approximation.
+5. ~~Second specular lobe / true Marschner~~ — **Done (shifted dual-lobe,
+   `08-DUAL-LOBE.md`).** R + TRT lobes shifted along the estimated tangent,
+   validated offline. Remaining ceiling: a *geometric* tangent (the estimate
+   is screen-space) and per-channel albedo tint on the TRT glint.
 6. **Dial back the exaggerated defaults.** Current values were set for visual
    confirmation, not taste: `m_aniso=1.8, p_aniso=24, k_sheen=0.5, s_h=0.40,
    w_wrap=0.45, k_diff=0.45`. Suggested shipping values: `m_aniso≈0.9`,

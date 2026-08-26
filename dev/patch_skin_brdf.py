@@ -59,6 +59,22 @@ KNOBS = {
     "kd_dbg": 4.0,    # hairdbg tint gain (red=low confidence, green=high)
     "m_aniso": 0.7,   # anisotropic spec strength; 0 = identity
     "p_aniso": 16.0,  # Kajiya-style exponent on sin(T,H)
+    # shifted dual-lobe (R + TRT) -- Marschner-flavoured second highlight.
+    # m_dual=0 is the identity; all others only matter when m_dual > 0.
+    "m_dual": 0.0,    # dual-lobe strength; 0 = off/identity
+    "beta_R": -7.0,   # R-lobe tangent shift, degrees (toward root)
+    "beta_TRT": 10.0, # TRT-lobe tangent shift, degrees (toward tip)
+    "p_R": 28.0,      # R lobe exponent (sharp, white)
+    "p_TRT": 10.0,    # TRT lobe exponent (wide, tinted)
+    "wR": 1.0,        # R lobe weight
+    "wTRT": 0.3,      # TRT lobe weight
+    # GI-resolver dual-lobe variants: wider lobes (many indirect samples make
+    # a tight lobe read as noise), TRT-weighted (the coloured glint shows in
+    # bounce light). m_dual_gi defaults to m_dual (shared on/off).
+    "m_dual_gi": -1.0,   # <0 => follow m_dual; >=0 overrides GI strength
+    "p_R_gi": 8.0,       # GI R lobe exponent (wider than direct)
+    "p_TRT_gi": 6.0,     # GI TRT lobe exponent (wider than direct)
+    "wTRT_gi": 0.5,      # GI TRT weight (bounce-light glint)
 }
 VANILLA = dict(KNOBS, tint=(1.0, 1.0, 1.0), rho_f=1.0, rho_r=1.0,
                s_h=1.0, a_min=0.0, k_sheen=0.0, w_wrap=0.0, m_aniso=0.0)

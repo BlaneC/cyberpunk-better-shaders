@@ -11,6 +11,7 @@ Read in this order:
 | file | what it covers |
 |---|---|
 | `00-ARCHITECTURE.md` | **START HERE** — what the mod is, how it works, current state, open items |
+| `08-DUAL-LOBE.md` | **newest** — shifted dual-lobe hair (R+TRT); two latent spec-output bugs found & fixed |
 | `07-COMPUTE-RESOLVE.md` | the visible pixels are shaded in compute; RT passes only produce samples |
 | `06-PT-IS-THE-CHS.md` | live PT shades in the closest-hit shader, not the raygen; explains every null result |
 | `05-SHADOW-ANCHORS.md` | the shadow-raygen anchor family (built); why the reference anchors really failed to port |

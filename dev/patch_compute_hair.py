@@ -468,6 +468,16 @@ def build_hair_gi(mod, cfg, sites, hair_class, knobs):
     gl = mod.glsl
     mkn = C(knobs["m_aniso"] * knobs.get("gi_boost", 1.0))
     pex = C(knobs.get("p_aniso_gi", knobs["p_aniso"]) * 0.5)
+    # GI dual-lobe knobs (wider, TRT-weighted); m_dual_gi<0 follows m_dual.
+    import math
+    mdg = knobs["m_dual"] if knobs.get("m_dual_gi", -1.0) < 0 else knobs["m_dual_gi"]
+    md = C(mdg)
+    sR = math.tan(math.radians(knobs["beta_R"]))
+    sTRT = math.tan(math.radians(knobs["beta_TRT"]))
+    pexRg = C(knobs.get("p_R_gi", knobs["p_R"]) * 0.5)
+    pexTg = C(knobs.get("p_TRT_gi", knobs["p_TRT"]) * 0.5)
+    wRc = C(knobs["wR"])
+    wTc = C(knobs.get("wTRT_gi", knobs["wTRT"]))
     uid, ud = mod.uconst(hair_class)
     if ud: consts.append(ud)
     hins = []
@@ -479,9 +489,22 @@ def build_hair_gi(mod, cfg, sites, hair_class, knobs):
     T, aniso = res["T"], res["aniso"]
     edits = [(pos, hins)]
     n = 0
+    skipped_late = []
     for st in usable:
         nh = P.find_site_nh(mod, st)
         I = mod.new_id
+        outs = st['outs']
+        first_out = min(mod.find_def(o)[0] for o in outs)
+        # The factor block references nh (N,H) and the hoisted T/aniso. It must
+        # sit before the FIRST out; nh ids must be defined there. (Per-out-at-
+        # def anchoring, same fix as build_hair_spec_lobes -- last_out anchoring
+        # left dead multiplies where GI out-consumers precede last_out.)
+        need = list(nh['n']) + list(nh['h'])
+        late = [d for d in need
+                if mod.find_def(d)[0] is None or mod.find_def(d)[0] >= first_out]
+        if late:
+            skipped_late.append(st['line'] + 1)
+            continue
         m1,m2,m3,a1,toh,t2,f_,fm,lg,ex,sv,sm1,ma,term,fac,sel = [I() for _ in range(16)]
         ins = [
             f"        {m1} = OpFMul %float {T[0]} {nh['h'][0]}",
@@ -499,17 +522,279 @@ def build_hair_gi(mod, cfg, sites, hair_class, knobs):
             f"        {ma} = OpFMul %float {mkn} {aniso}",
             f"        {term} = OpFMul %float {ma} {sm1}",
             f"        {fac} = OpFAdd %float {one} {term}",
-            f"        {sel} = OpSelect %float {gate} {fac} {one}",
         ]
-        last_out = max(mod.find_def(o)[0] for o in st['outs'])
-        for o in st['outs']:
+        combined = fac
+        # shifted dual lobes in GI (needs NoH + ToN at this site; N varies per
+        # site, H per sample). Wider lobes than direct -- tight lobes across
+        # many indirect samples read as noise.
+        if mdg != 0.0:
+            def d3(u, v):
+                r1, r2, r3, s1, s2 = I(), I(), I(), I(), I()
+                ins.extend([
+                    f"        {r1} = OpFMul %float {u[0]} {v[0]}",
+                    f"        {r2} = OpFMul %float {u[1]} {v[1]}",
+                    f"        {r3} = OpFMul %float {u[2]} {v[2]}",
+                    f"        {s1} = OpFAdd %float {r1} {r2}",
+                    f"        {s2} = OpFAdd %float {s1} {r3}",
+                ])
+                return s2
+            noh = d3(nh['n'], nh['h'])
+            ton = d3(T, nh['n'])
+            lobe_terms = []
+            for s_, pexL, wL in ((sR, pexRg, wRc), (sTRT, pexTg, wTc)):
+                cbase = C(1.0 + s_ * s_); cslope = C(2.0 * s_); cs = C(s_)
+                b1, den2, inv, nu1, num, tpH = I(), I(), I(), I(), I(), I()
+                q2, qm, qc, ql, qe, lob, wlob = I(), I(), I(), I(), I(), I(), I()
+                ins += [
+                    f"        {b1} = OpFMul %float {cslope} {ton}",
+                    f"        {den2} = OpFAdd %float {cbase} {b1}",
+                    f"        {inv} = OpExtInst %float {gl} InverseSqrt {den2}",
+                    f"        {nu1} = OpFMul %float {cs} {noh}",
+                    f"        {num} = OpFAdd %float {toh} {nu1}",
+                    f"        {tpH} = OpFMul %float {num} {inv}",
+                    f"        {q2} = OpFMul %float {tpH} {tpH}",
+                    f"        {qm} = OpFSub %float {one} {q2}",
+                    f"        {qc} = OpExtInst %float {gl} NMax {qm} {eps2}",
+                    f"        {ql} = OpExtInst %float {gl} Log2 {qc}",
+                    f"        {qe} = OpFMul %float {ql} {pexL}",
+                    f"        {lob} = OpExtInst %float {gl} Exp2 {qe}",
+                    f"        {wlob} = OpFMul %float {lob} {wL}",
+                ]
+                lobe_terms.append(wlob)
+            ds, dm, dm2, df, cc = I(), I(), I(), I(), I()
+            ins += [
+                f"        {ds} = OpFAdd %float {lobe_terms[0]} {lobe_terms[1]}",
+                f"        {dm} = OpFMul %float {md} {aniso}",
+                f"        {dm2} = OpFMul %float {dm} {ds}",
+                f"        {df} = OpFAdd %float {one} {dm2}",
+                f"        {cc} = OpFMul %float {combined} {df}",
+            ]
+            combined = cc
+        ins.append(f"        {sel} = OpSelect %float {gate} {combined} {one}")
+        edits.append((first_out - 1, ins))
+        for o in outs:
+            odef = mod.find_def(o)[0]
             nid = I()
-            ins.append(f"        {nid} = OpFMul %float {o} {sel}")
-            replace_all_uses(mod, o, nid, last_out)
-        edits.append((last_out, ins))
+            edits.append((odef, [f"        {nid} = OpFMul %float {o} {sel}"]))
+            replace_all_uses(mod, o, nid, odef)
         n += 1
     return consts, edits, {"gi_sites": n, "hoist_line": pos + 1,
+                           "dual_gi": mdg != 0.0,
+                           "skipped_late": skipped_late,
                            "skipped_no_nh": len(sites) - len(usable)}
+
+
+def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
+    """Combined spec-lobe pass: alpha reshape + Kajiya aniso + shifted dual
+    (R/TRT) lobes + sheen, applied as ONE robust per-out rewrite.
+
+    Supersedes the split build_hairaniso + build_hair_spec for two reasons,
+    both confirmed by dead-code analysis on the shipped swaps:
+
+      * The split passes each called replace_all_uses on the SAME s['outs'].
+        The aniso pass consumed them first, so the sheen pass found no uses
+        left and every sheen OpSelect was silently dead. One combined pass
+        computing (sheen_base) x (aniso_fac x dual_fac) has no such clobber.
+      * Anchoring each rewrite at `last_out` missed out-consumers defined
+        BEFORE last_out (modules that interleave out/consumer, e.g.
+        out1->use, out2->use, out3->use). Anchoring each out's rewrite at its
+        OWN def line (replace_all_uses after odef) catches every consumer
+        regardless of layout -- this also fixes aniso applying to only some
+        channels on those modules.
+
+    The factor (aniso x dual) and the sheen `add` are computed once, in a
+    block inserted immediately before the FIRST out's def, so every per-out
+    multiply (inserted right after each out's def) sees them defined.
+
+    Dual lobe (validate_dual_lobe.py): per lobe with tangent shift s=tan(beta),
+        tpH  = (ToH + s*NoH) / sqrt(1 + 2*s*ToN + s^2)   == dot(norm(T+s*N), H)
+        lobe = (1 - tpH^2)^(p/2)                          (Kajiya sin(T',H)^p)
+        dual_fac = 1 + m_dual*aniso*(wR*L_R + wTRT*L_TRT)  (bounded additive
+                   boost, ~[1, 1+m_dual*(wR+wTRT)] -- no ratio, no firefly div)
+    Identity: m_aniso=0 AND m_dual=0 => combined factor == 1; k_sheen=0 =>
+    sheen not emitted at all; so non-hair pixels and --vanilla are bit-exact.
+    """
+    from patch_skin_brdf import replace_all_uses, find_site_nh, emit_aniso
+    import math
+    consts, edits = [], []
+
+    def C(v):
+        nid, c = mod.const(v)
+        if c:
+            consts.append(c)
+        return nid
+
+    gl = mod.glsl
+    one, zero = C(1.0), C(0.0)
+    eps2 = C(1e-4)
+    rep = {"alphas": [], "lobe_sites": 0, "sheen_sites": 0,
+           "skipped_no_nh": 0, "skipped_no_pow5": 0, "skipped_late": []}
+
+    s_h, a_min = C(knobs["s_h"]), C(knobs["a_min"])
+    k_sheen_v = knobs["k_sheen"]
+    k_sh = C(k_sheen_v)
+    m_aniso_v = knobs["m_aniso"]
+    mkn, pex = C(m_aniso_v), C(knobs["p_aniso"] * 0.5)
+    m_dual_v = knobs["m_dual"]
+    md = C(m_dual_v)
+    sR = math.tan(math.radians(knobs["beta_R"]))
+    sTRT = math.tan(math.radians(knobs["beta_TRT"]))
+    pexR, pexT = C(knobs["p_R"] * 0.5), C(knobs["p_TRT"] * 0.5)
+    wRc, wTc = C(knobs["wR"]), C(knobs["wTRT"])
+
+    I = mod.new_id
+
+    def dot3(u, v, ins):
+        t1, t2, t3, s1, s2 = I(), I(), I(), I(), I()
+        ins += [
+            f"        {t1} = OpFMul %float {u[0]} {v[0]}",
+            f"        {t2} = OpFMul %float {u[1]} {v[1]}",
+            f"        {t3} = OpFMul %float {u[2]} {v[2]}",
+            f"        {s1} = OpFAdd %float {t1} {t2}",
+            f"        {s2} = OpFAdd %float {s1} {t3}",
+        ]
+        return s2
+
+    # --- alpha reshape (2a): one per distinct alpha source, ALL uses rewritten
+    # so the eval and the sampling branch agree (MIS stays unbiased).
+    for alpha in sorted({s['alpha'] for s in sites},
+                        key=lambda a: mod.find_def(a)[0]):
+        aline, _ = mod.find_def(alpha)
+        sc, cl, sel = I(), I(), I()
+        replace_all_uses(mod, alpha, sel, aline)
+        edits.append((aline, [
+            f"        {sc} = OpFMul %float {alpha} {s_h}",
+            f"        {cl} = OpExtInst %float {gl} NClamp {sc} {a_min} {one}",
+            f"        {sel} = OpSelect %float {gate} {cl} {alpha}",
+        ]))
+        rep["alphas"].append({"alpha": alpha, "line": aline + 1, "sel": sel})
+
+    ctx = find_normal_gbuffer_any(mod)
+
+    for s in sites:
+        nh = find_site_nh(mod, s)
+        if not nh:
+            rep["skipped_no_nh"] += 1
+            continue
+        outs = s['outs']
+        first_out = min(mod.find_def(o)[0] for o in outs)
+        # every id the factor block references must be defined before first_out
+        need = list(nh['n']) + list(nh['h']) + [s['alpha'], s['vd']]
+        pow5_ok = False
+        if k_sheen_v != 0.0 and s['pow5']:
+            pline, _ = mod.find_def(s['pow5'])
+            pow5_ok = pline is not None and pline < first_out
+        late = [d for d in need
+                if mod.find_def(d)[0] is None or mod.find_def(d)[0] >= first_out]
+        if late:
+            rep["skipped_late"].append({"site": s['line'] + 1,
+                                        "late": {d: mod.find_def(d)[0] for d in late}})
+            continue
+        do_sheen = (k_sheen_v != 0.0) and pow5_ok
+        if k_sheen_v != 0.0 and not pow5_ok:
+            rep["skipped_no_pow5"] += 1
+
+        # --- structure tensor + tangent (reused), then the lobe factors
+        tins, res = emit_aniso(mod, ctx, C, want_tangent=True)
+        T, aniso = res["T"], res["aniso"]
+        ins = list(tins)
+        ToH = dot3(T, nh['h'], ins)
+        NoH = dot3(nh['n'], nh['h'], ins)
+        ToN = dot3(T, nh['n'], ins)
+
+        # Kajiya aniso factor: fac = 1 + m_aniso*aniso*(sin(T,H)^p_aniso - 1)
+        t2, f_, fm, lg, ex, sv = I(), I(), I(), I(), I(), I()
+        sm1, ma, term, fac = I(), I(), I(), I()
+        ins += [
+            f"        {t2} = OpFMul %float {ToH} {ToH}",
+            f"        {f_} = OpFSub %float {one} {t2}",
+            f"        {fm} = OpExtInst %float {gl} NMax {f_} {eps2}",
+            f"        {lg} = OpExtInst %float {gl} Log2 {fm}",
+            f"        {ex} = OpFMul %float {lg} {pex}",
+            f"        {sv} = OpExtInst %float {gl} Exp2 {ex}",
+            f"        {sm1} = OpFSub %float {sv} {one}",
+            f"        {ma} = OpFMul %float {mkn} {aniso}",
+            f"        {term} = OpFMul %float {ma} {sm1}",
+            f"        {fac} = OpFAdd %float {one} {term}",
+        ]
+        combined = fac
+
+        # shifted dual lobes (R + TRT): dual_fac = 1 + m_dual*aniso*(wR*LR + wTRT*LTRT)
+        if m_dual_v != 0.0:
+            lobe_terms = []
+            for s_, pexL, wL in ((sR, pexR, wRc), (sTRT, pexT, wTc)):
+                cbase = C(1.0 + s_ * s_)
+                cslope = C(2.0 * s_)
+                cs = C(s_)
+                a1, den2, inv = I(), I(), I()
+                num1, num, tpH = I(), I(), I()
+                q2, qm, qc, ql, qe, lob, wlob = I(), I(), I(), I(), I(), I(), I()
+                ins += [
+                    f"        {a1} = OpFMul %float {cslope} {ToN}",
+                    f"        {den2} = OpFAdd %float {cbase} {a1}",
+                    f"        {inv} = OpExtInst %float {gl} InverseSqrt {den2}",
+                    f"        {num1} = OpFMul %float {cs} {NoH}",
+                    f"        {num} = OpFAdd %float {ToH} {num1}",
+                    f"        {tpH} = OpFMul %float {num} {inv}",
+                    f"        {q2} = OpFMul %float {tpH} {tpH}",
+                    f"        {qm} = OpFSub %float {one} {q2}",
+                    f"        {qc} = OpExtInst %float {gl} NMax {qm} {eps2}",
+                    f"        {ql} = OpExtInst %float {gl} Log2 {qc}",
+                    f"        {qe} = OpFMul %float {ql} {pexL}",
+                    f"        {lob} = OpExtInst %float {gl} Exp2 {qe}",
+                    f"        {wlob} = OpFMul %float {lob} {wL}",
+                ]
+                lobe_terms.append(wlob)
+            dsum, dmod, dmod2, dfac = I(), I(), I(), I()
+            ins += [
+                f"        {dsum} = OpFAdd %float {lobe_terms[0]} {lobe_terms[1]}",
+                f"        {dmod} = OpFMul %float {md} {aniso}",
+                f"        {dmod2} = OpFMul %float {dmod} {dsum}",
+                f"        {dfac} = OpFAdd %float {one} {dmod2}",
+            ]
+            comb2 = I()
+            ins.append(f"        {comb2} = OpFMul %float {combined} {dfac}")
+            combined = comb2
+
+        sel = I()
+        ins.append(f"        {sel} = OpSelect %float {gate} {combined} {one}")
+
+        # sheen `add`, computed once beside the factor (only when k_sheen>0 and
+        # a usable pow5 exists before first_out). add = (gate ? pow5*k_sheen:0)*vd
+        add = None
+        if do_sheen:
+            sh, ssel, add = I(), I(), I()
+            ins += [
+                f"        {sh} = OpFMul %float {s['pow5']} {k_sh}",
+                f"        {ssel} = OpSelect %float {gate} {sh} {zero}",
+                f"        {add} = OpFMul %float {ssel} {s['vd']}",
+            ]
+
+        # factor block goes immediately before the FIRST out's def so every
+        # per-out rewrite below sees sel/add defined.
+        edits.append((first_out - 1, ins))
+
+        # --- per-out rewrite, each anchored at its OWN def line
+        for o in outs:
+            odef = mod.find_def(o)[0]
+            pins = []
+            base = o
+            if do_sheen:
+                a, b, c = I(), I(), I()
+                pins += [
+                    f"        {a} = OpFAdd %float {o} {add}",
+                    f"        {b} = OpExtInst %float {gl} NMin {a} {s['vd']}",
+                    f"        {c} = OpSelect %float {gate} {b} {o}",
+                ]
+                base = c
+            n = I()
+            pins.append(f"        {n} = OpFMul %float {base} {sel}")
+            edits.append((odef, pins))
+            replace_all_uses(mod, o, n, odef)
+        rep["lobe_sites"] += 1
+        if do_sheen:
+            rep["sheen_sites"] += 1
+    return consts, edits, rep
 
 
 def build_hunt_writes(mod, cfg, writes, classes):
@@ -636,36 +921,24 @@ def process(path, outdir, tier, knobs, hair_class, hunt_classes, do_rt=True,
             apply_edits(mod, consts + cG, edits + eG)
             return _emit(mod, outdir, target_env, rep)
         sites = dominated
-        # build_hair_spec splices at the last spec output's line; a pow5 whose
-        # definition comes AFTER that point would be referenced before it is
-        # defined (seen live: %700 undefined). Drop those to the no-sheen path.
-        for s in sites:
-            if s['pow5']:
-                last_out = max(mod.find_def(o)[0] for o in s['outs'])
-                pline, _ = mod.find_def(s['pow5'])
-                if pline is None or pline >= last_out:
-                    s['pow5'] = None
         rep.update(hair_class=hair_class, gate=gate, ggx_sites=len(sites),
                    ungated_sites=und)
-        # Hand the compute-encoded normal ctx to the reference builders by
-        # swapping the finder they call internally; contract-identical dict.
-        saved = P.find_normal_gbuffer
-        P.find_normal_gbuffer = find_normal_gbuffer_compute
-        try:
-            cA, eA, rep['aniso'] = P.build_hairaniso(mod, sites, gate, knobs)
-        finally:
-            P.find_normal_gbuffer = saved
-        consts += cA
-        edits += eA
-        c2, e2, rep['spec'] = P.build_hair_spec(mod, sites, gate, knobs)
-        consts += c2
-        edits += e2
+        # Combined spec-lobe pass (alpha reshape + aniso + shifted dual lobes
+        # + sheen) in ONE robust per-out-at-def rewrite. Replaces the old
+        # split build_hairaniso + build_hair_spec, which clobbered each other
+        # (sheen was dead) and missed interleaved out-consumers.
+        cS, eS, rep['lobes'] = build_hair_spec_lobes(
+            mod, cfg, dom_id, sites, gate, knobs)
+        consts += cS
+        edits += eS
         c3, e3, rep['diffuse'] = build_skin_c1(
             mod, cfg, dom_id, skin_gate, knobs, hair_gate=gate)
         consts += c3
         edits += e3
         rep['params'] = {k: knobs[k] for k in
-                         ('s_h', 'a_min', 'k_sheen', 'm_aniso', 'p_aniso')}
+                         ('s_h', 'a_min', 'k_sheen', 'm_aniso', 'p_aniso',
+                          'm_dual', 'beta_R', 'beta_TRT', 'p_R', 'p_TRT',
+                          'wR', 'wTRT')}
     else:
         die(f"unknown tier {tier}")
 
@@ -723,7 +996,10 @@ def main():
                      # GI lobe: wider (many samples -> a tight lobe reads as
                      # noise) but boosted, since ambient is where hair reads
                      # most ungrounded.
-                     gi_boost=1.6, p_aniso_gi=10.0)
+                     gi_boost=1.6, p_aniso_gi=10.0,
+                     # shifted dual-lobe (R + TRT) ON by default; m_dual=0
+                     # (--set m_dual=0, or --vanilla) is the identity.
+                     m_dual=1.0)
     for kv in a.set:
         k, v = kv.split('=')
         if k in knobs and k != 'tint':
