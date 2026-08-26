@@ -1,5 +1,16 @@
 # The blocker: swap HITs, nothing renders
 
+**STATUS (Aug 25, late): superseded — read `04-RESET-STATE.md`.** A capture
+replay proved the swap attaches to exactly the pipelines a PT frame
+dispatches (both reference permutations, swap HIT, traced at 1280×720 and
+160×90), so the build was always correctly targeted. But a subsequent live
+launch with Ultra Plus uninstalled and PT confirmed on STILL dispatched only
+`rgs_shadow_main` pipes — fewer RT passes than any session before it. The
+question is now: why does live PT not behave like the capture's PT (three
+hypotheses: PT silently not engaging, a game-build change since Aug 23, or
+an instrumentation hole specific to the reference pass). Everything below is
+the diagnostic trail.
+
 ## 1. Symptom
 
 A diagnostic swap tints ten G-buffer material classes ten distinct colours at
@@ -95,25 +106,41 @@ created 3 times — `996a3b16253c3e7f` (293748 bytes, **never patched**) and the
 two we do patch. It groups with ours and is unpatched.
 
 ### How to confirm and fix
-1. Rebuild the layer (dump support was just added) and dump every permutation:
-   ```bash
-   cd CallistoSSS && ./build_swap_layer.sh
-   cp libVkLayer_callisto_spvswap.so ~/.local/lib/callisto/
-   mkdir -p ~/callisto_dump
-   # add to launch options: CALLISTO_DUMP_DIR=$HOME/callisto_dump \
-   #                        CALLISTO_DUMP_MATCH=rgs_reference_main
+
+**STATUS (Aug 25, evening): CLOSED — see the resolution note at the top of
+this file.** The hash-only whole-library theory below was a misread of one
+odd session (8 hash-only raygen ids, never reproduced — a one-off
+pipeline-build/menu state, not the PT integrator). The capture replay proved
+the PT frame dispatches the two named reference permutations, and the live
+sessions were all hybrid RT.
+
+1. ~~Rebuild the layer~~ — DONE, and it now does far more than dump. As well
+   as `CALLISTO_DUMP_DIR`/`CALLISTO_DUMP_MATCH`, the layer records every
+   module's identity and hooks `vkCreateRayTracingPipelinesKHR`,
+   `vkCmdBindPipeline` and `vkCmdTraceRays*KHR`. Two new log events:
    ```
-   Launch, reach gameplay, quit. `~/callisto_dump/` now holds the live SPIR-V
-   for every permutation.
-2. Disassemble and patch them all — the patcher is fully structural, so it
-   should handle any permutation without per-module constants:
-   ```bash
-   for f in ~/callisto_dump/*.rgs_reference_main.spv; do
-       spirv-dis "$f" -o "${f%.spv}.spvasm"; done
-   python3 dev/patch_skin_brdf.py ~/callisto_dump/*.spvasm \
-       --tier forcetint --outdir swaps
+   {"ev":"rt_pipeline","rgs":"<id>","swapped":0|1}   pipeline built from this raygen
+   {"ev":"trace_rays","rgs":"<id>","swapped":0|1}    this raygen is DISPATCHED
    ```
-3. Install, clear caches, relaunch. If the screen goes red, this was it.
+   `trace_rays` fires once per distinct pipeline that actually traces rays —
+   it is the ground truth this whole diagnosis was missing. Installed at
+   `~/.local/lib/callisto/libVkLayer_callisto_spvswap.so`.
+2. ~~Dump + patch all permutations~~ — scripted as `dev/patch_all_perms.sh`
+   (disassembles every dump, patches each independently so one structural
+   failure cannot block the rest, installs, clears caches). Smoke-tested on
+   the two capture-derived modules: reproduces the known hunt builds
+   byte-identically (`1fba2d96…` / `7e052a77…`).
+   Remaining manual steps: `mkdir -p ~/callisto_dump`, add
+   `CALLISTO_DUMP_DIR=$HOME/callisto_dump CALLISTO_DUMP_MATCH=rgs_reference_main`
+   to the launch options, launch, reach gameplay, quit, then:
+   ```bash
+   ./dev/patch_all_perms.sh            # or --forcetint for the null-bisect
+   grep '"ev":"trace_rays"' ~/callisto_swap.jsonl
+   ```
+3. Relaunch. If the dispatched rgs shows `swapped:1` and skin is red, read
+   hair's class off the legend and this was it. If `trace_rays` names a
+   permutation that failed to patch, that module needs anchor work. If no
+   `trace_rays` lines appear at all, see §5 — the raygen is not executing.
 
 ## 5. Second hypothesis: this raygen is not running at all
 

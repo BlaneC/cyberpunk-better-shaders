@@ -97,9 +97,21 @@ class Module:
             self.dxil = m.group(1)
             self.ident = f"{m.group(1)}.{m.group(2)}"
         else:
-            m2 = re.search(r'"([0-9a-f]{16})\.[^"]*\.dxil"', '\n'.join(self.lines))
+            # Whole-library modules carry no entry in the OpString -- just
+            # "<libhash>.dxil". The layer's scan parses that as id
+            # "<libhash>.dxil" (the "entry" reads as "dxil"), so the ident
+            # must match or the swap file name will not.
+            # The middle segment is optional: a pure hash-only OpString is
+            # exactly "<libhash>.dxil" with ONE dot, which the two-dot form of
+            # this regex used to miss (ident came back None for every
+            # whole-library compute module).
+            m2 = re.search(r'"([0-9a-f]{16})\.(?:([^".]*)\.)?dxil"',
+                           '\n'.join(self.lines))
             self.dxil = m2.group(1) if m2 else None
-            self.ident = self.dxil
+            if m2 and not m2.group(2):
+                self.ident = f"{self.dxil}.dxil"     # hash-only library module
+            else:
+                self.ident = self.dxil
         # numeric id space
         ids = [int(x) for ln in self.lines for x in re.findall(r'%(\d+)\b', ln)]
         self.next_id = max(ids) + 1

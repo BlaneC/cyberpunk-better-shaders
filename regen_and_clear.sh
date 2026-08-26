@@ -36,21 +36,32 @@ exec >>"$LOG" 2>&1
 echo "=== regen $(date -Is) ==="
 
 # --- read params (key=value; CRLF tolerated) ---
-tier=1 kernel=on rho_f=1.35 rho_r=1.25 n_f=0.75 m_f=0.75 n_r=0.75 m_r=0.75
+tier=1 kernel=on hair=on rho_f=1.35 rho_r=1.25 n_f=0.75 m_f=0.75 n_r=0.75 m_r=0.75
 if [[ -f "$PARAMS" ]]; then
     while IFS='=' read -r k v; do
         v="${v%$'\r'}"
         case "$k" in
-            tier|kernel)  printf -v "$k" '%s' "$v" ;;
+            tier|kernel|hair)  printf -v "$k" '%s' "$v" ;;
             rho_f|rho_r|n_f|m_f|n_r|m_r) printf -v "$k" '%s' "$v" ;;
         esac
     done < "$PARAMS"
-    echo "params: tier=$tier kernel=$kernel rho_f=$rho_f rho_r=$rho_r n_f=$n_f m_f=$m_f n_r=$n_r m_r=$m_r"
+    echo "params: tier=$tier kernel=$kernel hair=$hair rho_f=$rho_f rho_r=$rho_r n_f=$n_f m_f=$m_f n_r=$n_r m_r=$m_r"
 else
     echo "no params file at $PARAMS — using defaults"
 fi
 
 # sync the RED4ext kernel-swap flag (the DLL checks disable.flag per upload)
+# sync the hair overlay flag. The layer serves $INSTALL_DIR/swaps.hair/ ahead
+# of swaps/ unless hair.disable exists, so this toggle needs no re-patching --
+# and because the hair build lives in its own directory, sync_install's
+# "rm swaps/*.spv" never touches it.
+mkdir -p "$INSTALL_DIR"
+if [[ "$hair" == "off" ]]; then
+    echo 1 > "$INSTALL_DIR/hair.disable"; echo "hair anisotropy disabled"
+else
+    rm -f "$INSTALL_DIR/hair.disable"; echo "hair anisotropy enabled"
+fi
+
 if [[ "$kernel" == "off" ]]; then
     echo 1 > "$KERNEL_FLAG"; echo "kernel swap disabled"
 else

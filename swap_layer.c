@@ -24,6 +24,16 @@
  *   CALLISTO_DUMP_DIR       dump incoming SPIR-V of every module here
  *   CALLISTO_DUMP_MATCH     only dump ids containing this substring
  *
+ * Dispatch evidence (the missing link between "created" and "dispatched"):
+ * the layer records every module's identity, then hooks
+ * vkCreateRayTracingPipelinesKHR to log which raygen module each RT pipeline
+ * is built from, and vkCmdBindPipeline/vkCmdTraceRays*KHR to log, once per
+ * distinct pipeline, which raygen actually TRACES RAYS. Watch for:
+ *   {"ev":"rt_pipeline","rgs":"<id>",...}      pipeline built from this raygen
+ *   {"ev":"trace_rays","rgs":"<id>",...}       this raygen is DISPATCHED
+ * A swap HIT proves creation; trace_rays proves dispatch. Patch whatever
+ * shows up in trace_rays.
+ *
  * Build:
  *   gcc -shared -fPIC -O2 -o libVkLayer_callisto_spvswap.so swap_layer.c -ldl -lpthread
  *
@@ -194,22 +204,39 @@ static int scan_dxil_id(const uint32_t *code, size_t size,
 /* swap file resolution                                                */
 /* ------------------------------------------------------------------ */
 static char g_swapdir[4096];
+static char g_layerdir[4096];
 static void swapdir_init(void) {
-    const char *env = getenv("CALLISTO_SWAP_DIR");
-    if (env && *env) { snprintf(g_swapdir, sizeof g_swapdir, "%s", env); return; }
     Dl_info di;
     if (dladdr((void *)swapdir_init, &di) && di.dli_fname) {
-        snprintf(g_swapdir, sizeof g_swapdir, "%s", di.dli_fname);
-        char *s = strrchr(g_swapdir, '/');
-        if (s) { strcpy(s + 1, "swaps"); return; }
+        snprintf(g_layerdir, sizeof g_layerdir, "%s", di.dli_fname);
+        char *s = strrchr(g_layerdir, '/');
+        if (s) *s = 0; else g_layerdir[0] = 0;
+    }
+    const char *env = getenv("CALLISTO_SWAP_DIR");
+    if (env && *env) { snprintf(g_swapdir, sizeof g_swapdir, "%s", env); return; }
+    if (g_layerdir[0]) {
+        snprintf(g_swapdir, sizeof g_swapdir, "%s/swaps", g_layerdir);
+        return;
     }
     snprintf(g_swapdir, sizeof g_swapdir, "swaps");
 }
 
 /* returns malloc'd code + size, or NULL */
-static uint32_t *load_swap(const char *name, size_t *out_size) {
+/* Optional overlay directory, checked BEFORE the base swaps dir.
+ *
+ * This is the shader-side equivalent of the RED4ext plugin's disable.flag:
+ * an effect that ships as its own set of swap files lives in <layerdir>/
+ * swaps.<name>/, and a flag file <layerdir>/<name>.disable turns it off
+ * without uninstalling anything. sync_settings.sh writes that flag from the
+ * CET settings UI at launch, so the toggle costs one relaunch and never
+ * needs the patcher re-run. The base swaps/ dir is always served. */
+static char g_overlaydir[4096];
+static int g_overlay_on;
+
+static uint32_t *load_swap_from(const char *dir, const char *name,
+                                size_t *out_size) {
     char path[4608];
-    snprintf(path, sizeof path, "%s/%s.spv", g_swapdir, name);
+    snprintf(path, sizeof path, "%s/%s.spv", dir, name);
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
@@ -221,6 +248,29 @@ static uint32_t *load_swap(const char *name, size_t *out_size) {
     *out_size = (size_t)n;
     LOGF("\"ev\":\"swap_load\",\"file\":\"%s\",\"size\":%ld}", path, n);
     return buf;
+}
+
+/* Resolve <layerdir>/swaps.<name> and its <layerdir>/<name>.disable flag.
+ * Name comes from CALLISTO_OVERLAY (default "hair"). Called once, after
+ * swapdir_init has filled g_layerdir. */
+static void overlay_init(void) {
+    const char *name = getenv("CALLISTO_OVERLAY");
+    if (!name || !*name) name = "hair";
+    const char *base = g_layerdir[0] ? g_layerdir : ".";
+    snprintf(g_overlaydir, sizeof g_overlaydir, "%s/swaps.%s", base, name);
+    char flag[4608];
+    snprintf(flag, sizeof flag, "%s/%s.disable", base, name);
+    g_overlay_on = (access(g_overlaydir, F_OK) == 0) && (access(flag, F_OK) != 0);
+    LOGF("\"ev\":\"overlay\",\"name\":\"%s\",\"dir\":\"%s\",\"enabled\":%d}",
+         name, g_overlaydir, g_overlay_on);
+}
+
+static uint32_t *load_swap(const char *name, size_t *out_size) {
+    if (g_overlay_on && g_overlaydir[0]) {
+        uint32_t *c = load_swap_from(g_overlaydir, name, out_size);
+        if (c) return c;
+    }
+    return load_swap_from(g_swapdir, name, out_size);
 }
 
 /* ------------------------------------------------------------------ */
@@ -246,6 +296,9 @@ typedef struct {
     PFN_vkGetDeviceProcAddr gdpa;
     PFN_vkDestroyDevice DestroyDevice;
     PFN_vkCreateShaderModule CreateShaderModule;
+    PFN_vkDestroyShaderModule DestroyShaderModule;
+    PFN_vkDestroyPipeline DestroyPipeline;
+    PFN_vkCreateRayTracingPipelinesKHR CreateRTPipelines;
 } DevData;
 
 static InstData g_inst[MAX_OBJ]; static int g_ninst;
@@ -312,6 +365,114 @@ static void del_dev(VkDevice v) {
 }
 
 /* ------------------------------------------------------------------ */
+/* identity tracking: module -> id, pipeline -> raygen module,         */
+/* command buffer -> bound RT pipeline. This is how a swap HIT (module  */
+/* CREATED) gets connected to a raygen actually being DISPATCHED.       */
+/* ------------------------------------------------------------------ */
+#define MAX_MODID 16384
+#define MAX_RTPIPE 1024
+#define MAX_CBBIND 1024
+
+typedef struct { uint64_t h; char id[96]; int swapped; } ModId;
+typedef struct { uint64_t h; int rgs; } RtPipe;      /* rgs: index into g_modid, -1 unknown */
+typedef struct { const void *cb; uint64_t pipe; } CbBind;
+
+static ModId g_modid[MAX_MODID];   static int g_nmodid;
+static RtPipe g_rtpipe[MAX_RTPIPE]; static int g_nrtpipe;
+static CbBind g_cbbind[MAX_CBBIND]; static int g_ncbbind;
+static uint64_t g_traced[MAX_RTPIPE]; static int g_ntraced;   /* dedup trace_rays */
+static pthread_mutex_t g_id_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* next pointers for command-buffer hooks (resolved at device creation) */
+static PFN_vkCmdBindPipeline g_next_bind;
+static PFN_vkCmdTraceRaysKHR g_next_trace;
+static PFN_vkCmdTraceRaysIndirectKHR g_next_trace_ind;
+static PFN_vkCmdTraceRaysIndirect2KHR g_next_trace_ind2;
+
+/* call with g_id_mu held */
+static int modid_find(uint64_t h) {
+    for (int n = 0; n < g_nmodid; n++) if (g_modid[n].h == h) return n;
+    return -1;
+}
+static void modid_add(uint64_t h, const char *id, int swapped) {
+    if (!id || !*id) return;
+    pthread_mutex_lock(&g_id_mu);
+    int i = modid_find(h);
+    if (i < 0 && g_nmodid < MAX_MODID) {
+        i = g_nmodid++;
+        g_modid[i].h = h;
+    }
+    if (i >= 0) {
+        snprintf(g_modid[i].id, sizeof g_modid[i].id, "%s", id);
+        g_modid[i].swapped = swapped;
+    }
+    pthread_mutex_unlock(&g_id_mu);
+}
+static void modid_del(uint64_t h) {
+    pthread_mutex_lock(&g_id_mu);
+    int i = modid_find(h);
+    if (i >= 0) g_modid[i] = g_modid[--g_nmodid];
+    pthread_mutex_unlock(&g_id_mu);
+}
+/* call with g_id_mu held */
+static int rtpipe_find(uint64_t h) {
+    for (int n = 0; n < g_nrtpipe; n++) if (g_rtpipe[n].h == h) return n;
+    return -1;
+}
+static void rtpipe_set(uint64_t h, int rgs) {
+    pthread_mutex_lock(&g_id_mu);
+    int i = rtpipe_find(h);
+    if (i < 0 && g_nrtpipe < MAX_RTPIPE) {
+        i = g_nrtpipe++;
+        g_rtpipe[i].h = h;
+    }
+    if (i >= 0) g_rtpipe[i].rgs = rgs;
+    pthread_mutex_unlock(&g_id_mu);
+}
+static void rtpipe_del(uint64_t h) {
+    pthread_mutex_lock(&g_id_mu);
+    int i = rtpipe_find(h);
+    if (i >= 0) g_rtpipe[i] = g_rtpipe[--g_nrtpipe];
+    for (i = 0; i < g_ntraced; i++)
+        if (g_traced[i] == h) { g_traced[i] = g_traced[--g_ntraced]; break; }
+    pthread_mutex_unlock(&g_id_mu);
+}
+static void cbbind_set(const void *cb, uint64_t pipe) {
+    pthread_mutex_lock(&g_id_mu);
+    int i;
+    for (i = 0; i < g_ncbbind; i++) if (g_cbbind[i].cb == cb) break;
+    if (i == g_ncbbind && g_ncbbind < MAX_CBBIND) {
+        g_cbbind[i].cb = cb; g_ncbbind++;
+    }
+    if (i < g_ncbbind) g_cbbind[i].pipe = pipe;
+    pthread_mutex_unlock(&g_id_mu);
+}
+static void trace_maybe_log(const void *cb) {
+    pthread_mutex_lock(&g_id_mu);
+    uint64_t pipe = 0;
+    for (int i = 0; i < g_ncbbind; i++)
+        if (g_cbbind[i].cb == cb) { pipe = g_cbbind[i].pipe; break; }
+    if (pipe) {
+        for (int i = 0; i < g_ntraced; i++)
+            if (g_traced[i] == pipe) pipe = 0;   /* already logged */
+    }
+    if (pipe && g_ntraced < MAX_RTPIPE) {
+        g_traced[g_ntraced++] = pipe;
+        int pi = rtpipe_find(pipe);
+        const char *id = ""; int sw = -1;
+        if (pi >= 0 && g_rtpipe[pi].rgs >= 0) {
+            id = g_modid[g_rtpipe[pi].rgs].id;
+            sw = g_modid[g_rtpipe[pi].rgs].swapped;
+        }
+        pthread_mutex_unlock(&g_id_mu);
+        LOGF("\"ev\":\"trace_rays\",\"pipe\":\"0x%llx\",\"rgs\":\"%s\",\"swapped\":%d}",
+             (unsigned long long)pipe, id, sw);
+        return;
+    }
+    pthread_mutex_unlock(&g_id_mu);
+}
+
+/* ------------------------------------------------------------------ */
 /* instance / device creation (loader chain advance)                   */
 /* ------------------------------------------------------------------ */
 static VkResult VKAPI_CALL xCreateInstance(const VkInstanceCreateInfo *ci,
@@ -373,6 +534,22 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
     d->gdpa = next_gdpa;
     d->DestroyDevice = (PFN_vkDestroyDevice)d->gdpa(dev, "vkDestroyDevice");
     d->CreateShaderModule = (PFN_vkCreateShaderModule)d->gdpa(dev, "vkCreateShaderModule");
+    d->DestroyShaderModule = (PFN_vkDestroyShaderModule)d->gdpa(dev, "vkDestroyShaderModule");
+    d->DestroyPipeline = (PFN_vkDestroyPipeline)d->gdpa(dev, "vkDestroyPipeline");
+    d->CreateRTPipelines = (PFN_vkCreateRayTracingPipelinesKHR)
+        d->gdpa(dev, "vkCreateRayTracingPipelinesKHR");
+    /* Command-buffer hooks are keyed by device-independent globals: the game
+     * uses one VkDevice, so first resolution wins. */
+    if (!g_next_bind)
+        g_next_bind = (PFN_vkCmdBindPipeline)d->gdpa(dev, "vkCmdBindPipeline");
+    if (!g_next_trace)
+        g_next_trace = (PFN_vkCmdTraceRaysKHR)d->gdpa(dev, "vkCmdTraceRaysKHR");
+    if (!g_next_trace_ind)
+        g_next_trace_ind = (PFN_vkCmdTraceRaysIndirectKHR)
+            d->gdpa(dev, "vkCmdTraceRaysIndirectKHR");
+    if (!g_next_trace_ind2)
+        g_next_trace_ind2 = (PFN_vkCmdTraceRaysIndirect2KHR)
+            d->gdpa(dev, "vkCmdTraceRaysIndirect2KHR");
     LOGF("\"ev\":\"vkCreateDevice\",\"dev\":\"%p\"}", (void *)dev);
     return r;
 }
@@ -434,7 +611,9 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
         if (!g_quiet)
             LOGF("\"ev\":\"module\",\"size\":%zu,\"id\":\"%s\",\"sha256\":\"%s\",\"swap\":\"disabled\"}",
                  ci->codeSize, has_id ? id : "", sha);
-        return next(dev, ci, ac, pMod);
+        VkResult r = next(dev, ci, ac, pMod);
+        if (r == VK_SUCCESS && pMod) modid_add((uint64_t)*pMod, id, 0);
+        return r;
     }
 
     uint32_t *code = NULL; size_t size = 0;
@@ -449,7 +628,9 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
         if (!g_quiet)
             LOGF("\"ev\":\"module\",\"size\":%zu,\"id\":\"%s\",\"sha256\":\"%s\",\"swap\":\"none\"}",
                  ci->codeSize, has_id ? id : "", sha);
-        return next(dev, ci, ac, pMod);
+        VkResult r = next(dev, ci, ac, pMod);
+        if (r == VK_SUCCESS && pMod) modid_add((uint64_t)*pMod, id, 0);
+        return r;
     }
 
     VkShaderModuleCreateInfo sub = *ci;
@@ -458,8 +639,138 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
     LOGF("\"ev\":\"module\",\"size\":%zu,\"id\":\"%s\",\"sha256\":\"%s\",\"swap\":\"%s\",\"result\":%d}",
          ci->codeSize, has_id ? id : "", sha,
          r == VK_SUCCESS ? "HIT" : "hit_failed", (int)r);
+    if (r == VK_SUCCESS && pMod) modid_add((uint64_t)*pMod, id, 1);
     free(code);
     return r;
+}
+
+static void VKAPI_CALL xDestroyShaderModule(VkDevice dev, VkShaderModule mod,
+        const VkAllocationCallbacks *ac) {
+    DevData *d = find_dev(dev);
+    PFN_vkDestroyShaderModule next = d ? d->DestroyShaderModule : NULL;
+    modid_del((uint64_t)mod);
+    if (next) next(dev, mod, ac);
+}
+
+static void VKAPI_CALL xDestroyPipeline(VkDevice dev, VkPipeline pipe,
+        const VkAllocationCallbacks *ac) {
+    DevData *d = find_dev(dev);
+    PFN_vkDestroyPipeline next = d ? d->DestroyPipeline : NULL;
+    rtpipe_del((uint64_t)pipe);   /* handles get reused -- drop stale raygen + trace dedup */
+    if (next) next(dev, pipe, ac);
+}
+
+/* Log which raygen module each RT pipeline is built from. This runs at
+ * pipeline-build time; it narrows the suspect set but still does not prove
+ * dispatch -- that is what the trace_rays hook below is for. */
+static VkResult VKAPI_CALL xCreateRayTracingPipelinesKHR(VkDevice dev,
+        VkDeferredOperationKHR dop, VkPipelineCache cache, uint32_t count,
+        const VkRayTracingPipelineCreateInfoKHR *infos,
+        const VkAllocationCallbacks *ac, VkPipeline *pPipes) {
+    DevData *d = find_dev(dev);
+    PFN_vkCreateRayTracingPipelinesKHR next = d ? d->CreateRTPipelines : NULL;
+    if (!next) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = next(dev, dop, cache, count, infos, ac, pPipes);
+    if (r != VK_SUCCESS && r != VK_PIPELINE_COMPILE_REQUIRED) return r;
+
+    for (uint32_t i = 0; i < count; i++) {
+        int rgs = -1;
+        const char *rgs_name = "";
+        for (uint32_t s = 0; s < infos[i].stageCount; s++) {
+            const VkPipelineShaderStageCreateInfo *st = &infos[i].pStages[s];
+            if (st->stage == VK_SHADER_STAGE_RAYGEN_BIT_KHR) {
+                if (st->pName) rgs_name = st->pName;
+                pthread_mutex_lock(&g_id_mu);
+                rgs = modid_find((uint64_t)st->module);
+                pthread_mutex_unlock(&g_id_mu);
+                break;
+            }
+        }
+        /* Pipeline libraries: the raygen may come from a linked library
+         * rather than an inline stage -- inherit it. */
+        if (rgs < 0 && infos[i].pLibraryInfo) {
+            pthread_mutex_lock(&g_id_mu);
+            for (uint32_t l = 0; l < infos[i].pLibraryInfo->libraryCount && rgs < 0; l++) {
+                int li = rtpipe_find((uint64_t)infos[i].pLibraryInfo->pLibraries[l]);
+                if (li >= 0) rgs = g_rtpipe[li].rgs;
+            }
+            pthread_mutex_unlock(&g_id_mu);
+        }
+        const char *id = ""; int sw = -1;
+        if (rgs >= 0) {
+            pthread_mutex_lock(&g_id_mu);
+            if (rgs < g_nmodid) { id = g_modid[rgs].id; sw = g_modid[rgs].swapped; }
+            pthread_mutex_unlock(&g_id_mu);
+        }
+        uint64_t ph = pPipes ? (uint64_t)pPipes[i] : 0;
+        if (ph) rtpipe_set(ph, rgs);
+        LOGF("\"ev\":\"rt_pipeline\",\"pipe\":\"0x%llx\",\"rgs\":\"%s\",\"entry\":\"%s\",\"swapped\":%d}",
+             (unsigned long long)ph, id, rgs_name, sw);
+
+        /* Full stage composition. trace_rays can only ever name the RAYGEN of
+         * a dispatched pipeline, but in a deferred path tracer the raygen is a
+         * thin tracer and the shading lives in the closest-hit shader reached
+         * through the SBT -- invisible to every hook we had. Logging every
+         * stage lets a traced pipeline handle be joined to its hit shaders, so
+         * "which shader actually shades a PT frame" becomes a lookup instead
+         * of a guess. */
+        for (uint32_t s = 0; s < infos[i].stageCount; s++) {
+            const VkPipelineShaderStageCreateInfo *st = &infos[i].pStages[s];
+            const char *kind;
+            switch (st->stage) {
+            case VK_SHADER_STAGE_RAYGEN_BIT_KHR:       kind = "rgen";  break;
+            case VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR:  kind = "chit";  break;
+            case VK_SHADER_STAGE_ANY_HIT_BIT_KHR:      kind = "ahit";  break;
+            case VK_SHADER_STAGE_MISS_BIT_KHR:         kind = "miss";  break;
+            case VK_SHADER_STAGE_INTERSECTION_BIT_KHR: kind = "isect"; break;
+            case VK_SHADER_STAGE_CALLABLE_BIT_KHR:     kind = "call";  break;
+            default:                                   kind = "other"; break;
+            }
+            const char *sid = ""; int ssw = -1;
+            pthread_mutex_lock(&g_id_mu);
+            int mi = modid_find((uint64_t)st->module);
+            if (mi >= 0 && mi < g_nmodid) { sid = g_modid[mi].id; ssw = g_modid[mi].swapped; }
+            pthread_mutex_unlock(&g_id_mu);
+            LOGF("\"ev\":\"pipe_stage\",\"pipe\":\"0x%llx\",\"kind\":\"%s\","
+                 "\"id\":\"%s\",\"entry\":\"%s\",\"swapped\":%d}",
+                 (unsigned long long)ph, kind, sid,
+                 st->pName ? st->pName : "", ssw);
+        }
+    }
+    return r;
+}
+
+static void VKAPI_CALL xCmdBindPipeline(VkCommandBuffer cb,
+        VkPipelineBindPoint bindPoint, VkPipeline pipe) {
+    if (bindPoint == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
+        cbbind_set(cb, (uint64_t)pipe);
+    g_next_bind(cb, bindPoint, pipe);
+}
+
+static void VKAPI_CALL xCmdTraceRaysKHR(VkCommandBuffer cb,
+        const VkStridedDeviceAddressRegionKHR *rgen,
+        const VkStridedDeviceAddressRegionKHR *miss,
+        const VkStridedDeviceAddressRegionKHR *hit,
+        const VkStridedDeviceAddressRegionKHR *call,
+        uint32_t w, uint32_t h, uint32_t d) {
+    trace_maybe_log(cb);
+    g_next_trace(cb, rgen, miss, hit, call, w, h, d);
+}
+
+static void VKAPI_CALL xCmdTraceRaysIndirectKHR(VkCommandBuffer cb,
+        const VkStridedDeviceAddressRegionKHR *rgen,
+        const VkStridedDeviceAddressRegionKHR *miss,
+        const VkStridedDeviceAddressRegionKHR *hit,
+        const VkStridedDeviceAddressRegionKHR *call,
+        VkDeviceAddress indirect) {
+    trace_maybe_log(cb);
+    g_next_trace_ind(cb, rgen, miss, hit, call, indirect);
+}
+
+static void VKAPI_CALL xCmdTraceRaysIndirect2KHR(VkCommandBuffer cb,
+        VkDeviceAddress indirect) {
+    trace_maybe_log(cb);
+    g_next_trace_ind2(cb, indirect);
 }
 
 static void VKAPI_CALL xDestroyDevice(VkDevice dev, const VkAllocationCallbacks *ac) {
@@ -486,6 +797,30 @@ static const HookEnt kDevHooks[] = {
     {"vkCreateShaderModule", (void *)xCreateShaderModule},
     {"vkDestroyDevice", (void *)xDestroyDevice},
 };
+/* Conditionally hooked: only exposed when the underlying entrypoint was
+ * resolved at device-creation time, so a missing extension (or an untracked
+ * device) degrades to pure passthrough instead of a NULL call. */
+static PFN_vkVoidFunction cond_dev_hook(VkDevice dev, const char *name) {
+    if (!strcmp(name, "vkDestroyShaderModule")) {
+        DevData *d = find_dev(dev);
+        if (d && d->DestroyShaderModule) return (PFN_vkVoidFunction)xDestroyShaderModule;
+    } else if (!strcmp(name, "vkDestroyPipeline")) {
+        DevData *d = find_dev(dev);
+        if (d && d->DestroyPipeline) return (PFN_vkVoidFunction)xDestroyPipeline;
+    } else if (!strcmp(name, "vkCreateRayTracingPipelinesKHR")) {
+        DevData *d = find_dev(dev);
+        if (d && d->CreateRTPipelines) return (PFN_vkVoidFunction)xCreateRayTracingPipelinesKHR;
+    } else if (!strcmp(name, "vkCmdBindPipeline")) {
+        if (g_next_bind) return (PFN_vkVoidFunction)xCmdBindPipeline;
+    } else if (!strcmp(name, "vkCmdTraceRaysKHR")) {
+        if (g_next_trace) return (PFN_vkVoidFunction)xCmdTraceRaysKHR;
+    } else if (!strcmp(name, "vkCmdTraceRaysIndirectKHR")) {
+        if (g_next_trace_ind) return (PFN_vkVoidFunction)xCmdTraceRaysIndirectKHR;
+    } else if (!strcmp(name, "vkCmdTraceRaysIndirect2KHR")) {
+        if (g_next_trace_ind2) return (PFN_vkVoidFunction)xCmdTraceRaysIndirect2KHR;
+    }
+    return NULL;
+}
 static const HookEnt kInstHooks[] = {
     {"vkCreateInstance", (void *)xCreateInstance},
     {"vkCreateDevice", (void *)xCreateDevice},
@@ -496,6 +831,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
         VkDevice dev, const char *name) {
     for (size_t i = 0; i < sizeof kDevHooks / sizeof kDevHooks[0]; i++)
         if (!strcmp(kDevHooks[i].name, name)) return (PFN_vkVoidFunction)kDevHooks[i].fn;
+    PFN_vkVoidFunction ch = cond_dev_hook(dev, name);
+    if (ch) return ch;
     DevData *d = find_dev(dev);
     if (d && d->gdpa) return d->gdpa(dev, name);
     return NULL;
@@ -505,6 +842,9 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
         VkInstance inst, const char *name) {
     for (size_t i = 0; i < sizeof kDevHooks / sizeof kDevHooks[0]; i++)
         if (!strcmp(kDevHooks[i].name, name)) return (PFN_vkVoidFunction)kDevHooks[i].fn;
+    /* Device functions the app may fetch through gipa (legal in Vulkan). */
+    PFN_vkVoidFunction ch = cond_dev_hook(VK_NULL_HANDLE, name);
+    if (ch) return ch;
     for (size_t i = 0; i < sizeof kInstHooks / sizeof kInstHooks[0]; i++)
         if (!strcmp(kInstHooks[i].name, name)) return (PFN_vkVoidFunction)kInstHooks[i].fn;
     if (!strcmp(name, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)vkGetInstanceProcAddr;
@@ -545,4 +885,4 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateDeviceLayerProperties(
     return VK_ERROR_LAYER_NOT_PRESENT;
 }
 
-__attribute__((constructor)) static void swap_init(void) { log_open(); swapdir_init(); }
+__attribute__((constructor)) static void swap_init(void) { log_open(); swapdir_init(); overlay_init(); }
