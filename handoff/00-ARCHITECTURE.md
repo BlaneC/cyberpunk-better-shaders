@@ -207,3 +207,37 @@ math.
 4. **The layer's stale rtpipe table** (§7) is still unfixed.
 5. **Second specular lobe / true Marschner** — needs a real tangent; the
    structure-tensor estimate is a screen-space approximation.
+
+---
+
+## 9. GI/indirect hair (added after §8 item 1)
+
+Two modules are shaped unlike the rest — `99bb7c2698997b2a` (52,765 lines,
+62 GGX, 19 inputs) and `ab0bc2fee876d489` (18,633 lines, 20 GGX). Direct
+resolvers write **two** buffers (diffuse+specular lighting) and read ~6
+inputs; these write **one** and read many. That is an indirect/GI resolve,
+and it explains why backlit and shadowed hair barely changed.
+
+Both failed the normal path because their own class gate dominates **0** eval
+sites — but the class is refetchable at **100%** of them. `build_hair_gi`
+takes the hoisted path:
+
+- **Class gate and structure tensor are emitted ONCE**, at the deepest block
+  dominating every site (`hoist_pos`), and shared. Per-site emission would
+  have cost ~5 normal fetches x 62 per pixel; the tangent is per-pixel and
+  does not vary per site, so hoisting is both cheaper and equivalent.
+- **Alpha reshape is skipped** on this path: alpha definitions can precede the
+  hoist point, and rewriting them against a non-dominating gate is invalid.
+- Two gotchas: `hoist_pos` must insert *above* any `OpSelectionMerge`
+  (it must stay immediately before its branch), and the GI resolvers decode
+  normals as `(n-0.5)` while the direct ones use `n*2-1` —
+  `find_normal_gbuffer_any` accepts either (the tensor is indifferent, since
+  it consumes neighbour differences).
+
+Result: **70 modules**, 361 direct + **81 GI** aniso sites. GI uses a wider,
+boosted lobe (`p_aniso_gi=10`, `gi_boost=1.6`) — a tight lobe across many
+indirect samples reads as noise.
+
+Current defaults are deliberately **exaggerated** for visibility:
+`m_aniso=1.8, p_aniso=24, k_sheen=0.5, s_h=0.40, w_wrap=0.45, k_diff=0.45`.
+Dial back toward `m_aniso 0.9 / k_diff 0.65` once the effect is confirmed.

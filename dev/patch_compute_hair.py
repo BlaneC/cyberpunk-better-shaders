@@ -128,6 +128,17 @@ def find_normal_gbuffer_compute(mod):
     die(f"{mod.name}: normal G-buffer fetch (n*2-1 decode) not found")
 
 
+def find_normal_gbuffer_any(mod):
+    """Normal G-buffer, either encoding. The direct resolvers decode n*2-1;
+    the GI resolvers use the reference (n-0.5) form. The structure tensor is
+    indifferent -- it consumes neighbour DIFFERENCES, and (2v-1) is just a
+    scaled (v-0.5), so the eigenvectors are identical either way."""
+    try:
+        return find_normal_gbuffer_compute(mod)
+    except SystemExit:
+        return P.find_normal_gbuffer(mod)
+
+
 def find_class_anchor_variant(mod):
     """The material G-buffer read in modules that never compute `y >> 5`.
 
@@ -394,6 +405,113 @@ def build_hair_wrap(mod, cfg, dom_id, hair_gate, knobs):
     return consts, edits, rep
 
 
+def hoist_pos(mod, cfg, site_lines):
+    """Insertion point inside the deepest block dominating every site.
+
+    The GI resolvers evaluate the BRDF 62 times per pixel. Re-emitting the
+    structure tensor at each site would cost ~5 normal fetches x 62 -- a real
+    frame-time regression -- and the tangent is a per-PIXEL quantity anyway:
+    it does not vary per light or per site. So the tensor AND the class gate
+    are emitted once here and reused. Returns an apply_edits pos (it inserts
+    at pos+1) or None."""
+    blocks = [cfg.block_of(l) for l in site_lines]
+    if any(b is None for b in blocks):
+        return None
+    doms = [cfg.dom.get(b['label'], set()) for b in blocks]
+    common = set.intersection(*doms) if doms else set()
+    if not common:
+        return None
+    starts = {b['label']: b['start'] for b in cfg.blocks}
+    best = max(common, key=lambda l: starts.get(l, -1))
+    blk = next((b for b in cfg.blocks if b['label'] == best), None)
+    if not blk or blk['end'] is None:
+        return None
+    # OpSelectionMerge/OpLoopMerge must stay immediately before the block's
+    # branch, so the insertion point is above any merge instruction, not just
+    # above the terminator.
+    t = blk['end']
+    while t - 1 >= blk['start'] and re.match(r'\s*Op(Selection|Loop)Merge',
+                                             mod.lines[t - 1]):
+        t -= 1
+    pos = min(t - 1, min(site_lines) - 1)
+    return pos if pos >= blk['start'] else None
+
+
+def build_hair_gi(mod, cfg, sites, hair_class, knobs):
+    """Anisotropy for the GI/indirect resolvers, where the module's own class
+    gate dominates NO eval site (0/62 and 0/20 measured). The class is
+    refetched and the tensor computed ONCE at a common dominator, then shared
+    by every site -- see hoist_pos. Alpha reshape is deliberately skipped
+    here: alpha definitions can precede the hoist point, and rewriting them
+    against a gate that does not dominate them would be invalid."""
+    from patch_shadow_brdf import find_class_fetch, class_fetch_inputs, \
+                                  emit_class_value
+    from patch_skin_brdf import replace_all_uses
+    consts = []
+    def C(v):
+        nid, c = mod.const(v)
+        if c: consts.append(c)
+        return nid
+    usable = [s for s in sites if P.find_site_nh(mod, s)]
+    if not usable:
+        die(f"{mod.name}: GI path found no site with N/H")
+    pos = hoist_pos(mod, cfg, [s['line'] for s in usable])
+    if pos is None:
+        die(f"{mod.name}: no common dominator to hoist the tangent to")
+    nctx = find_normal_gbuffer_any(mod)
+    cctx = find_class_fetch(mod)
+    need = class_fetch_inputs(cctx) + [nctx['x'], nctx['y'], nctx['arr']]
+    bad = [x for x in need if not cfg.dominates_line(x, pos)]
+    if bad:
+        die(f"{mod.name}: hoist point cannot see {bad}")
+    one, eps2 = C(1.0), C(1e-4)
+    gl = mod.glsl
+    mkn = C(knobs["m_aniso"] * knobs.get("gi_boost", 1.0))
+    pex = C(knobs.get("p_aniso_gi", knobs["p_aniso"]) * 0.5)
+    uid, ud = mod.uconst(hair_class)
+    if ud: consts.append(ud)
+    hins = []
+    cls = emit_class_value(mod, cctx, hins)
+    gate = mod.new_id()
+    hins.append(f"        {gate} = OpIEqual %bool {cls} {uid}")
+    tins, res = P.emit_aniso(mod, nctx, C, want_tangent=True)
+    hins += tins
+    T, aniso = res["T"], res["aniso"]
+    edits = [(pos, hins)]
+    n = 0
+    for st in usable:
+        nh = P.find_site_nh(mod, st)
+        I = mod.new_id
+        m1,m2,m3,a1,toh,t2,f_,fm,lg,ex,sv,sm1,ma,term,fac,sel = [I() for _ in range(16)]
+        ins = [
+            f"        {m1} = OpFMul %float {T[0]} {nh['h'][0]}",
+            f"        {m2} = OpFMul %float {T[1]} {nh['h'][1]}",
+            f"        {m3} = OpFMul %float {T[2]} {nh['h'][2]}",
+            f"        {a1} = OpFAdd %float {m1} {m2}",
+            f"        {toh} = OpFAdd %float {a1} {m3}",
+            f"        {t2} = OpFMul %float {toh} {toh}",
+            f"        {f_} = OpFSub %float {one} {t2}",
+            f"        {fm} = OpExtInst %float {gl} NMax {f_} {eps2}",
+            f"        {lg} = OpExtInst %float {gl} Log2 {fm}",
+            f"        {ex} = OpFMul %float {lg} {pex}",
+            f"        {sv} = OpExtInst %float {gl} Exp2 {ex}",
+            f"        {sm1} = OpFSub %float {sv} {one}",
+            f"        {ma} = OpFMul %float {mkn} {aniso}",
+            f"        {term} = OpFMul %float {ma} {sm1}",
+            f"        {fac} = OpFAdd %float {one} {term}",
+            f"        {sel} = OpSelect %float {gate} {fac} {one}",
+        ]
+        last_out = max(mod.find_def(o)[0] for o in st['outs'])
+        for o in st['outs']:
+            nid = I()
+            ins.append(f"        {nid} = OpFMul %float {o} {sel}")
+            replace_all_uses(mod, o, nid, last_out)
+        edits.append((last_out, ins))
+        n += 1
+    return consts, edits, {"gi_sites": n, "hoist_line": pos + 1,
+                           "skipped_no_nh": len(sites) - len(usable)}
+
+
 def build_hunt_writes(mod, cfg, writes, classes):
     """Palette tint per material class at every image write (gate refetched
     only if the module's own gate does not dominate -- same policy as
@@ -510,9 +628,14 @@ def process(path, outdir, tier, knobs, hair_class, hunt_classes, do_rt=True,
         # modules keep one GGX eval outside the material-classified path.
         und = [s['line'] + 1 for s in sites
                if not cfg.dominates_line(dom_id, s['line'])]
-        sites = [s for s in sites if cfg.dominates_line(dom_id, s['line'])]
-        if not sites:
-            die(f"{mod.name}: class shift dominates no GGX site")
+        dominated = [s for s in sites if cfg.dominates_line(dom_id, s['line'])]
+        if not dominated:
+            # GI/indirect resolvers: the class gate reaches no eval site, but
+            # the class is refetchable at all of them. Hoisted path.
+            cG, eG, rep['gi'] = build_hair_gi(mod, cfg, sites, hair_class, knobs)
+            apply_edits(mod, consts + cG, edits + eG)
+            return _emit(mod, outdir, target_env, rep)
+        sites = dominated
         # build_hair_spec splices at the last spec output's line; a pow5 whose
         # definition comes AFTER that point would be referenced before it is
         # defined (seen live: %700 undefined). Drop those to the no-sheen path.
@@ -547,6 +670,10 @@ def process(path, outdir, tier, knobs, hair_class, hunt_classes, do_rt=True,
         die(f"unknown tier {tier}")
 
     apply_edits(mod, consts, edits)
+    return _emit(mod, outdir, target_env, rep)
+
+
+def _emit(mod, outdir, target_env, rep):
     os.makedirs(outdir, exist_ok=True)
     asm_out = os.path.join(outdir, mod.ident + '.spvasm')
     spv_out = os.path.join(outdir, mod.ident + '.spv')
@@ -591,8 +718,12 @@ def main():
     if not a.vanilla:
         # compute-resolve hair defaults: stronger and deeper than the raygen
         # era's timid numbers -- the user could barely see 0.7/16.
-        knobs.update(m_aniso=0.95, p_aniso=28.0, k_sheen=0.3, s_h=0.45,
-                     w_wrap=0.35, k_diff=0.65)
+        knobs.update(m_aniso=1.8, p_aniso=24.0, k_sheen=0.5, s_h=0.40,
+                     w_wrap=0.45, k_diff=0.45,
+                     # GI lobe: wider (many samples -> a tight lobe reads as
+                     # noise) but boosted, since ambient is where hair reads
+                     # most ungrounded.
+                     gi_boost=1.6, p_aniso_gi=10.0)
     for kv in a.set:
         k, v = kv.split('=')
         if k in knobs and k != 'tint':
