@@ -2,3 +2,18 @@ sdk/
 regen.log
 dist/
 __pycache__/
+
+# Generated build artifacts: patched SPIR-V and disassembly.
+# These are derivative copies of the game's own shader bytecode, so they are
+# NOT redistributed here. Regenerate them locally from your own game dump:
+#   ./dev/patch_compute_hair.sh --hunt      # find the hair material class
+#   ./dev/patch_compute_hair.sh --hair <N>  # build + install the hair swaps
+#   ./dev/patch_shadow_flags.sh             # build + install the shadow fix
+swaps/
+swaps.hair/
+swaps.shadowcull/
+swaps.prehunt/
+swaps_smoke/
+dev/disasm/
+*.spv
+*.spvasm
