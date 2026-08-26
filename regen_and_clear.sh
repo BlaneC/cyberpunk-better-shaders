@@ -36,12 +36,12 @@ exec >>"$LOG" 2>&1
 echo "=== regen $(date -Is) ==="
 
 # --- read params (key=value; CRLF tolerated) ---
-tier=1 kernel=on hair=on skinray=on rho_f=1.35 rho_r=1.25 n_f=0.75 m_f=0.75 n_r=0.75 m_r=0.75
+tier=1 kernel=on hair=on skinray=on shadowcull=on rho_f=1.35 rho_r=1.25 n_f=0.75 m_f=0.75 n_r=0.75 m_r=0.75
 if [[ -f "$PARAMS" ]]; then
     while IFS='=' read -r k v; do
         v="${v%$'\r'}"
         case "$k" in
-            tier|kernel|hair|skinray)  printf -v "$k" '%s' "$v" ;;
+            tier|kernel|hair|skinray|shadowcull)  printf -v "$k" '%s' "$v" ;;
             rho_f|rho_r|n_f|m_f|n_r|m_r) printf -v "$k" '%s' "$v" ;;
         esac
     done < "$PARAMS"
@@ -66,6 +66,12 @@ if [[ "$skinray" == "off" ]]; then
 else
     cp -f "$INSTALL_DIR/swaps.prehunt/"*.rgs_reference_main.spv \
           "$INSTALL_DIR/swaps/" 2>/dev/null && echo "skin raygen sampling enabled (tier-1 prehunt build)"
+fi
+
+if [[ "$shadowcull" == "off" ]]; then
+    echo 1 > "$INSTALL_DIR/shadowcull.disable"; echo "hair shadow leak fix disabled"
+else
+    rm -f "$INSTALL_DIR/shadowcull.disable"; echo "hair shadow leak fix enabled"
 fi
 
 if [[ "$hair" == "off" ]]; then

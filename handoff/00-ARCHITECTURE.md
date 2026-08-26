@@ -241,3 +241,46 @@ indirect samples reads as noise.
 Current defaults are deliberately **exaggerated** for visibility:
 `m_aniso=1.8, p_aniso=24, k_sheen=0.5, s_h=0.40, w_wrap=0.45, k_diff=0.45`.
 Dial back toward `m_aniso 0.9 / k_diff 0.65` once the effect is confirmed.
+
+---
+
+## 10. Hair shadow leak fix (`shadowcull` overlay)
+
+**Symptom:** dangling hair casts correct sharp shadows on the face, but there
+is an overlit gap right at the hairline seam — worst in *direct* light, not GI.
+
+**Not** missing geometry (the sharp shadows prove hair is in the BVH) and
+**not** ray bias (`tMin` is 1e-6). The cause is the shadow ray flags:
+
+```
+28 = TerminateOnFirstHit | SkipClosestHitShader | CullBackFacingTriangles
+```
+
+Hair is card geometry — thin, single-layer, double-sided quads. A card whose
+winding faces away from the light is invisible to the shadow ray and occludes
+nothing. In a thick clump enough cards face the light that the shadow reads;
+at the sparse, near-edge-on seam it does not, and light pours through.
+
+**Fix:** clear `0x10`, `28 → 12`. Not exotic: the game already traces the
+majority of its shadow rays with flags 12 (52 sites vs 28), so the renderer
+is known to work this way. 18 modules, 25 more skipped (no culling shadow
+ray), 0 failures.
+
+**Why this is visible when raygen BRDF edits were not** (§2): the estimator is
+`BRDF × light × visibility / pdf`. `/pdf` cancels the *sampling distribution*;
+**visibility is a factor of the integrand and is not cancelled.** Shadow-ray
+parameters in a raygen therefore do change the image. The §2 lesson is about
+sampling distributions specifically — it does not make raygens off-limits.
+
+Scope note: ray flags are per-trace-call and cannot know the occluder will be
+hair, so this is global to shadow rays. Back-face culling is often on to
+suppress self-shadow acne, hence the toggle. Watch for acne on closed meshes
+and a small any-hit perf cost.
+
+**Layer now supports multiple overlays** (`CALLISTO_OVERLAYS`, default
+`hair,shadowcull`), each with its own `<name>.disable` flag, checked in order
+before base `swaps/`. Verified toggling independently.
+
+Considered and rejected for now: screen-space contact shadows. Against soft
+GI, a sharp screen-space term reads as an edge that does not belong — better
+to fix visibility at the source than composite an approximation over it.

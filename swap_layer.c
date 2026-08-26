@@ -230,8 +230,9 @@ static void swapdir_init(void) {
  * without uninstalling anything. sync_settings.sh writes that flag from the
  * CET settings UI at launch, so the toggle costs one relaunch and never
  * needs the patcher re-run. The base swaps/ dir is always served. */
-static char g_overlaydir[4096];
-static int g_overlay_on;
+#define MAX_OVERLAYS 8
+static char g_overlaydir[MAX_OVERLAYS][4096];
+static int g_noverlay;
 
 static uint32_t *load_swap_from(const char *dir, const char *name,
                                 size_t *out_size) {
@@ -254,20 +255,28 @@ static uint32_t *load_swap_from(const char *dir, const char *name,
  * Name comes from CALLISTO_OVERLAY (default "hair"). Called once, after
  * swapdir_init has filled g_layerdir. */
 static void overlay_init(void) {
-    const char *name = getenv("CALLISTO_OVERLAY");
-    if (!name || !*name) name = "hair";
+    const char *list = getenv("CALLISTO_OVERLAYS");
+    if (!list || !*list) list = "hair,shadowcull";
     const char *base = g_layerdir[0] ? g_layerdir : ".";
-    snprintf(g_overlaydir, sizeof g_overlaydir, "%s/swaps.%s", base, name);
-    char flag[4608];
-    snprintf(flag, sizeof flag, "%s/%s.disable", base, name);
-    g_overlay_on = (access(g_overlaydir, F_OK) == 0) && (access(flag, F_OK) != 0);
-    LOGF("\"ev\":\"overlay\",\"name\":\"%s\",\"dir\":\"%s\",\"enabled\":%d}",
-         name, g_overlaydir, g_overlay_on);
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", list);
+    for (char *tok = strtok(buf, ","); tok && g_noverlay < MAX_OVERLAYS;
+         tok = strtok(NULL, ",")) {
+        while (*tok == ' ') tok++;
+        if (!*tok) continue;
+        char dir[4096], flag[4608];
+        snprintf(dir, sizeof dir, "%s/swaps.%s", base, tok);
+        snprintf(flag, sizeof flag, "%s/%s.disable", base, tok);
+        int on = (access(dir, F_OK) == 0) && (access(flag, F_OK) != 0);
+        LOGF("\"ev\":\"overlay\",\"name\":\"%s\",\"dir\":\"%s\",\"enabled\":%d}",
+             tok, dir, on);
+        if (on) snprintf(g_overlaydir[g_noverlay++], 4096, "%s", dir);
+    }
 }
 
 static uint32_t *load_swap(const char *name, size_t *out_size) {
-    if (g_overlay_on && g_overlaydir[0]) {
-        uint32_t *c = load_swap_from(g_overlaydir, name, out_size);
+    for (int i = 0; i < g_noverlay; i++) {
+        uint32_t *c = load_swap_from(g_overlaydir[i], name, out_size);
         if (c) return c;
     }
     return load_swap_from(g_swapdir, name, out_size);
