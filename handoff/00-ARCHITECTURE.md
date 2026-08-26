@@ -95,10 +95,16 @@ passes), 2 have no GGX site the class value dominates.
 |---|---|---|
 | Kajiya-Kay aniso | 361 direct + 81 GI | highlight stretched along the strand |
 | **Shifted dual lobe (R + TRT)** | 361 direct + 81 GI | **Marschner-flavoured sharp white R + wide tinted TRT highlights, shifted along the strand — see `08-DUAL-LOBE.md`** |
+| **TRT transmission tint** | 361 direct + 81 GI | **constant RGB (`trt_r/g/b`); per-pixel albedo not recoverable in these modules** |
 | Roughness reshape | all α uses | sharper spec; rewrites sampling too, so MIS stays unbiased |
 | Grazing sheen | 39 | rim glow on backlit hair — **actually live as of `08` (was dead code, see below)** |
 | Hair diffuse wrap + `k_diff` | 149 | softened terminator, darker diffuse → hair reads grounded |
 | Skin tier-1 `c1` | 149 | grazing-angle warmth on skin |
+
+> **`08-DUAL-LOBE.md` follow-up (Aug 26):** the structure tensor + tangent is
+> now **hoisted** — emitted once per module (the `hoist_pos` pattern already
+> used by the GI path) instead of re-emitted at each of the ~14 spec sites,
+> cutting ~5 normal fetches per site. Achieved on all 68 direct modules.
 
 > **Bug fixes (`08-DUAL-LOBE.md`, Aug 26):** the spec-output splice path had
 > two latent bugs, both proven by dead-code analysis, both now fixed by a
@@ -129,6 +135,8 @@ m_aniso 0.95   aniso strength      p_aniso 28    highlight tightness
 s_h     0.45   roughness scale     a_min   0.04  roughness floor
 k_sheen 0.30   grazing sheen       w_wrap  0.35  diffuse wrap width
 k_diff  0.65   hair diffuse scale (lower = more depth/grounding)
+m_dual 1.0     dual-lobe strength  beta_R -7 / beta_TRT 10  (deg)
+p_R 28 / p_TRT 10   wR 1.0 / wTRT 0.3    trt_r/g/b 1/0.85/0.55
 rho_f 1.35  rho_r 1.25  n_f/m_f/n_r/m_r 0.75    (skin c1)
 ```
 
@@ -142,7 +150,7 @@ Every knob has an identity value (`--vanilla` ⇒ bit-identical output).
 ~/.local/lib/callisto/
   libVkLayer_callisto_spvswap.so
   swaps/            2 tier-1 reference raygens  (skinray option)
-  swaps.hair/       68 compute resolve swaps    (the visible effects)
+  swaps.hair/       70 compute resolve swaps    (the visible effects; 68 direct + 2 GI)
   swaps.prehunt/    pristine tier-1 backup
   hair.disable      present ⇒ hair overlay OFF
 ```
@@ -155,10 +163,12 @@ mirroring the existing kernel switch:
 CET switch → brdf_params.txt → regen_and_clear.sh (launch) → flag file → layer
 ```
 
-Toggles: **Callisto skin kernel**, **Callisto hair anisotropy**, **Callisto
+Toggles: **Callisto skin kernel**, **Callisto hair BRDF**, **Callisto
 skin raygen sampling**, **Callisto BRDF**. All apply next launch; none require
 re-running the patcher. Because hair lives in its own directory,
-`sync_install`'s `rm -f swaps/*.spv` can never delete it.
+`sync_install`'s `rm -f swaps/*.spv` can never delete it. With every toggle
+off (hair + shadowcull + skinray + kernel + tier), `load_swap` finds nothing
+and the layer passes through — **bit-exact vanilla**, the A/B baseline.
 
 `swaps/` deliberately holds *only* the two tier-1 raygens. Leftover hunt-build
 raygens are eval-invisible but still perturb sampling with diagnostic tint
@@ -222,8 +232,10 @@ math.
    `pipe_stage` exists, but `trace_rays` output remains untrustworthy.
 5. ~~Second specular lobe / true Marschner~~ — **Done (shifted dual-lobe,
    `08-DUAL-LOBE.md`).** R + TRT lobes shifted along the estimated tangent,
-   validated offline. Remaining ceiling: a *geometric* tangent (the estimate
-   is screen-space) and per-channel albedo tint on the TRT glint.
+   validated offline, tensor hoisted, TRT glint tinted with a constant RGB
+   (`trt_r/g/b`). Remaining ceiling: a *geometric* tangent (the estimate is
+   screen-space) and a **per-pixel** TRT albedo tint (the constant is a
+   stand-in — the compute resolvers don't expose the diffuse albedo).
 6. **Dial back the exaggerated defaults.** Current values were set for visual
    confirmation, not taste: `m_aniso=1.8, p_aniso=24, k_sheen=0.5, s_h=0.40,
    w_wrap=0.45, k_diff=0.45`. Suggested shipping values: `m_aniso≈0.9`,

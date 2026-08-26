@@ -59,10 +59,12 @@ registerForEvent("onInit", function()
             function(v) brdf[key] = v saveParams() end)
     end
     nativeSettings.addSubcategory("/callistoSSS/hair", "Hair")
-    nativeSettings.addSwitch("/callistoSSS/hair", "Callisto hair anisotropy",
-        "Anisotropic (Kajiya-Kay) hair highlight that runs along the strand, "
-        .. "with a roughness reshape and grazing sheen. The strand direction is "
-        .. "estimated per pixel from the normal buffer. Applies on next launch.",
+    nativeSettings.addSwitch("/callistoSSS/hair", "Callisto hair BRDF",
+        "The full hair specular package: strand-anisotropic (Kajiya-Kay) "
+        .. "highlight, a shifted dual-lobe (sharp white R + wide tinted TRT "
+        .. "glint), roughness reshape, grazing sheen and diffuse wrap. The "
+        .. "strand direction is estimated per pixel from the normal buffer. "
+        .. "Off restores vanilla hair. Applies on next launch.",
         brdf.hair ~= "off", true,
         function(state) brdf.hair = state and "on" or "off" saveParams() end)
     nativeSettings.addSwitch("/callistoSSS/hair", "Hair shadow leak fix",

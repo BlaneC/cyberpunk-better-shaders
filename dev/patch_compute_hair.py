@@ -477,7 +477,11 @@ def build_hair_gi(mod, cfg, sites, hair_class, knobs):
     pexRg = C(knobs.get("p_R_gi", knobs["p_R"]) * 0.5)
     pexTg = C(knobs.get("p_TRT_gi", knobs["p_TRT"]) * 0.5)
     wRc = C(knobs["wR"])
-    wTc = C(knobs.get("wTRT_gi", knobs["wTRT"]))
+    # GI TRT weight, tinted by the transmission colour's luminance (GI sites
+    # are scalar, so a per-channel tint is not possible here).
+    trt_lum = 0.299 * knobs["trt_r"] + 0.587 * knobs["trt_g"] \
+              + 0.114 * knobs["trt_b"]
+    wTc = C(knobs.get("wTRT_gi", knobs["wTRT"]) * trt_lum)
     uid, ud = mod.uconst(hair_class)
     if ud: consts.append(ud)
     hins = []
@@ -641,6 +645,9 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
     sTRT = math.tan(math.radians(knobs["beta_TRT"]))
     pexR, pexT = C(knobs["p_R"] * 0.5), C(knobs["p_TRT"] * 0.5)
     wRc, wTc = C(knobs["wR"]), C(knobs["wTRT"])
+    trt = [C(knobs["trt_r"]), C(knobs["trt_g"]), C(knobs["trt_b"])]
+    trt_lum = C(0.299 * knobs["trt_r"] + 0.587 * knobs["trt_g"]
+                + 0.114 * knobs["trt_b"])
 
     I = mod.new_id
 
@@ -671,6 +678,7 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
 
     ctx = find_normal_gbuffer_any(mod)
 
+    usable = []
     for s in sites:
         nh = find_site_nh(mod, s)
         if not nh:
@@ -693,11 +701,33 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
         do_sheen = (k_sheen_v != 0.0) and pow5_ok
         if k_sheen_v != 0.0 and not pow5_ok:
             rep["skipped_no_pow5"] += 1
+        usable.append((s, nh, first_out, do_sheen))
 
-        # --- structure tensor + tangent (reused), then the lobe factors
-        tins, res = emit_aniso(mod, ctx, C, want_tangent=True)
-        T, aniso = res["T"], res["aniso"]
-        ins = list(tins)
+    # Hoist the structure tensor + tangent to a common dominator. It is a
+    # per-PIXEL quantity (the normal-field neighbourhood) -- identical across
+    # every site -- so computing it once instead of re-emitting at each of the
+    # ~14 spec sites per module saves ~5 normal fetches per site (the GI path
+    # already does this). Falls back to per-site emission where no common
+    # dominator sees the fetch inputs.
+    T = aniso = None
+    if usable:
+        pos = hoist_pos(mod, cfg, [u[0]['line'] for u in usable])
+        if pos is not None:
+            ids = [ctx[k] for k in ('x', 'y', 'arr', 'regs', 'off', 'idx', 'lod')]
+            if all(cfg.dominates_line(i, pos) for i in ids):
+                tins, res = emit_aniso(mod, ctx, C, want_tangent=True)
+                T, aniso = res["T"], res["aniso"]
+                edits.append((pos, tins))
+    hoisted = T is not None
+    rep["hoisted"] = hoisted
+
+    for s, nh, first_out, do_sheen in usable:
+        outs = s['outs']
+        ins = []
+        if not hoisted:
+            tins, res = emit_aniso(mod, ctx, C, want_tangent=True)
+            T, aniso = res["T"], res["aniso"]
+            ins = list(tins)
         ToH = dot3(T, nh['h'], ins)
         NoH = dot3(nh['n'], nh['h'], ins)
         ToN = dot3(T, nh['n'], ins)
@@ -719,16 +749,21 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
         ]
         combined = fac
 
-        # shifted dual lobes (R + TRT): dual_fac = 1 + m_dual*aniso*(wR*LR + wTRT*LTRT)
+        # shifted dual lobes (R + TRT), split so the TRT glint can be tinted
+        # per channel. combined_white is the white (aniso + R-only) factor;
+        # trt_gain is the scalar TRT boost the tint multiplies:
+        #   factor_c = combined_white + trt_gain * tint[c]
+        combined_white = combined
+        trt_gain = None
         if m_dual_v != 0.0:
-            lobe_terms = []
-            for s_, pexL, wL in ((sR, pexR, wRc), (sTRT, pexT, wTc)):
+            lobes = []
+            for s_, pexL in ((sR, pexR), (sTRT, pexT)):
                 cbase = C(1.0 + s_ * s_)
                 cslope = C(2.0 * s_)
                 cs = C(s_)
                 a1, den2, inv = I(), I(), I()
                 num1, num, tpH = I(), I(), I()
-                q2, qm, qc, ql, qe, lob, wlob = I(), I(), I(), I(), I(), I(), I()
+                q2, qm, qc, ql, qe, lob = I(), I(), I(), I(), I(), I()
                 ins += [
                     f"        {a1} = OpFMul %float {cslope} {ToN}",
                     f"        {den2} = OpFAdd %float {cbase} {a1}",
@@ -742,22 +777,23 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
                     f"        {ql} = OpExtInst %float {gl} Log2 {qc}",
                     f"        {qe} = OpFMul %float {ql} {pexL}",
                     f"        {lob} = OpExtInst %float {gl} Exp2 {qe}",
-                    f"        {wlob} = OpFMul %float {lob} {wL}",
                 ]
-                lobe_terms.append(wlob)
-            dsum, dmod, dmod2, dfac = I(), I(), I(), I()
+                lobes.append(lob)
+            lR, lT = lobes[0], lobes[1]
+            rgain, wgain, cw = I(), I(), I()
+            cw1, cw2, tg, cwa, cwb = I(), I(), I(), I(), I()
             ins += [
-                f"        {dsum} = OpFAdd %float {lobe_terms[0]} {lobe_terms[1]}",
-                f"        {dmod} = OpFMul %float {md} {aniso}",
-                f"        {dmod2} = OpFMul %float {dmod} {dsum}",
-                f"        {dfac} = OpFAdd %float {one} {dmod2}",
+                f"        {rgain} = OpFMul %float {wRc} {lR}",
+                f"        {wgain} = OpFMul %float {wTc} {lT}",
+                f"        {cw} = OpFMul %float {md} {aniso}",
+                f"        {cw1} = OpFMul %float {cw} {rgain}",
+                f"        {cw2} = OpFMul %float {cw} {wgain}",
+                f"        {tg} = OpFMul %float {combined} {cw2}",
+                f"        {cwa} = OpFMul %float {combined} {cw1}",
+                f"        {cwb} = OpFAdd %float {combined} {cwa}",
             ]
-            comb2 = I()
-            ins.append(f"        {comb2} = OpFMul %float {combined} {dfac}")
-            combined = comb2
-
-        sel = I()
-        ins.append(f"        {sel} = OpSelect %float {gate} {combined} {one}")
+            trt_gain = tg
+            combined_white = cwb
 
         # sheen `add`, computed once beside the factor (only when k_sheen>0 and
         # a usable pow5 exists before first_out). add = (gate ? pow5*k_sheen:0)*vd
@@ -774,8 +810,11 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
         # per-out rewrite below sees sel/add defined.
         edits.append((first_out - 1, ins))
 
-        # --- per-out rewrite, each anchored at its OWN def line
-        for o in outs:
+        # --- per-out rewrite, each anchored at its OWN def line, with the TRT
+        # tint applied per channel (3-out sites: r/g/b; scalar sites: luminance)
+        nt = len(outs)
+        chans = trt if nt == 3 else [trt_lum] * nt
+        for k, o in enumerate(outs):
             odef = mod.find_def(o)[0]
             pins = []
             base = o
@@ -787,8 +826,19 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
                     f"        {c} = OpSelect %float {gate} {b} {o}",
                 ]
                 base = c
-            n = I()
-            pins.append(f"        {n} = OpFMul %float {base} {sel}")
+            fac_c = combined_white
+            if trt_gain is not None:
+                ft, fa = I(), I()
+                pins += [
+                    f"        {ft} = OpFMul %float {trt_gain} {chans[k]}",
+                    f"        {fa} = OpFAdd %float {combined_white} {ft}",
+                ]
+                fac_c = fa
+            sc, n = I(), I()
+            pins += [
+                f"        {sc} = OpSelect %float {gate} {fac_c} {one}",
+                f"        {n} = OpFMul %float {base} {sc}",
+            ]
             edits.append((odef, pins))
             replace_all_uses(mod, o, n, odef)
         rep["lobe_sites"] += 1
@@ -938,7 +988,7 @@ def process(path, outdir, tier, knobs, hair_class, hunt_classes, do_rt=True,
         rep['params'] = {k: knobs[k] for k in
                          ('s_h', 'a_min', 'k_sheen', 'm_aniso', 'p_aniso',
                           'm_dual', 'beta_R', 'beta_TRT', 'p_R', 'p_TRT',
-                          'wR', 'wTRT')}
+                          'wR', 'wTRT', 'trt_r', 'trt_g', 'trt_b')}
     else:
         die(f"unknown tier {tier}")
 
