@@ -167,3 +167,21 @@ sliders, regeneration script) is in the source repository.
 ## License & permissions
 
 MIT (see LICENSE). Do what you want with it; credit is appreciated.
+
+---
+
+## Hair: before / after
+
+Vanilla path-traced hair is shaded as slightly rough plastic — one isotropic
+GGX lobe, no anisotropy, no strand direction. The mod adds a Kajiya-Kay lobe
+whose highlight runs *along* the strand, a roughness reshape, grazing sheen,
+and a diffuse wrap that stops hair floating off the scalp.
+
+| before | after |
+|---|---|
+| ![before](pics/before_rogue.png) | ![after](pics/after_rogue.png) |
+| ![before](pics/before_hellmen.png) | ![after](pics/after_hellmen.png) |
+
+Also fixed: an overlit gap at the hairline seam, caused by shadow rays culling
+back-facing triangles — hair cards are thin double-sided quads, so cards facing
+away from the light occluded nothing. See `handoff/00-ARCHITECTURE.md` §10.
