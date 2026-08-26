@@ -1,19 +1,17 @@
 # CallistoSSS — handoff for external analysis
 
-**Current status:** the null result is explained. A clean vanilla PT run showed
-that live path tracing dispatches *thin* raygens carrying no shading at all —
-PT shades in the **closest-hit shader**, which `trace_rays` logging is
-structurally blind to. Every patcher through `05` targeted raygens, so PT
-frames always rendered vanilla. A CHS forcetint is built, validated and
-installed, awaiting the launch that confirms it.
-**`07-COMPUTE-RESOLVE.md` is the current source of truth.**
+**Current status:** shipping. Hair anisotropy and the tier-1 skin BRDF are
+live on the compute resolve — the surface that actually produces the image —
+gated by CET toggles. **Read `00-ARCHITECTURE.md` first**; it consolidates
+everything below, several of whose conclusions it supersedes.
 
 Read in this order:
 
 | file | what it covers |
 |---|---|
-| `07-COMPUTE-RESOLVE.md` | **START HERE** — the visible pixels are shaded in compute; RT passes only produce samples |
-| `06-PT-IS-THE-CHS.md` | — live PT shades in the closest-hit shader, not the raygen; explains every null result |
+| `00-ARCHITECTURE.md` | **START HERE** — what the mod is, how it works, current state, open items |
+| `07-COMPUTE-RESOLVE.md` | the visible pixels are shaded in compute; RT passes only produce samples |
+| `06-PT-IS-THE-CHS.md` | live PT shades in the closest-hit shader, not the raygen; explains every null result |
 | `05-SHADOW-ANCHORS.md` | the shadow-raygen anchor family (built); why the reference anchors really failed to port |
 | `04-RESET-STATE.md` | full saga, proven facts, open contradictions, post-reset checklist (fact 4 corrected by 05) |
 | `01-BLOCKER.md` | the null-result problem, all evidence, what is ruled out (resolution note on top) |
