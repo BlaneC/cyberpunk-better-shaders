@@ -88,9 +88,11 @@ Ships pre-tuned to tasteful defaults — no configuration required.
 
 - `vulkaninfo --summary | grep -i callisto` — the layer is registered.
 - After launching the game: `grep HIT ~/callisto_swap.jsonl` — you should see
-  two `"swap":"HIT"` lines (the two path-tracer shader permutations).
+  many `"swap":"HIT"` lines (the hair compute resolves, shadow rays, and
+  path-tracer raygens being substituted).
 - Vanilla control run: prefix the launch options with
-  `CALLISTO_LAYER_DISABLE=1` (or remove the swaps) — useful for A/B shots.
+  `CALLISTO_LAYER_DISABLE=1` (skip the layer entirely; or turn every CET
+  toggle off) — useful for A/B shots.
 
 ## Uninstall
 
