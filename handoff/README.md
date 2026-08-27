@@ -19,7 +19,8 @@ Read in this order:
 | file | what it covers |
 |---|---|
 | `00-ARCHITECTURE.md` | **START HERE** — what the mod is, how it works, current state, open items |
-| `10-DISPATCH-TRUTH.md` | **newest, READ WITH 00** — what actually dispatches: 16 of 70 patched modules, only the coarse GI resolver directly; the anchor scan selects the wrong family; 4 executing modules unpatched |
+| `11-PROPER-HAIR.md` | **newest** — what a real strand tangent would take: the G-buffer has none and no free channel; three delivery routes, tooling needed, and the probe that gates the decision |
+| `10-DISPATCH-TRUTH.md` | **READ WITH 00** — what actually dispatches: 16 of 70 patched modules, only the coarse GI resolver directly; the anchor scan selects the wrong family; 4 executing modules unpatched |
 | `09-SETTINGS-AUDIT.md` | why the settings page can't be trusted: 11 confirmed defects, root causes, phased plan, invariants |
 | `08-DUAL-LOBE.md` | shifted dual-lobe hair (R+TRT); two latent spec-output bugs found & fixed |
 | `07-COMPUTE-RESOLVE.md` | the visible pixels are shaded in compute; RT passes only produce samples |
