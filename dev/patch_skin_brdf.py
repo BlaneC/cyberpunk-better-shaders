@@ -57,6 +57,17 @@ KNOBS = {
     "r_max": 4.0,     # wrap ratio clamp (firefly guard)
     # structure-tensor tangent (HAIR_HANDOFF "tangent can be ESTIMATED")
     "kd_dbg": 4.0,    # hairdbg tint gain (red=low confidence, green=high)
+    # Structure-tensor confidence remap. `aniso` = (l1-l2)/(l1+l2) gates BOTH
+    # the Kajiya factor and the dual lobe, so a weak tangent estimate collapses
+    # every hair effect to identity regardless of m_aniso/m_dual (the
+    # 2026-08-26 null result). Identity at gain=1, floor=0.
+    # Diagnostic: an ADDITIVE constant on the hair spec outs. Every real hair
+    # effect is a multiply, so all of them are invisible if the out is ~0 --
+    # which a multiply can never distinguish from "this out is never read".
+    # Identity at 0.0.
+    "spec_add": 0.0,
+    "conf_gain": 1.0,  # scale on the measured confidence
+    "conf_floor": 0.0, # lower bound under it; 1.0 = ignore the estimate
     "m_aniso": 0.7,   # anisotropic spec strength; 0 = identity
     "p_aniso": 16.0,  # Kajiya-style exponent on sin(T,H)
     # shifted dual-lobe (R + TRT) -- Marschner-flavoured second highlight.

@@ -232,6 +232,7 @@ static void swapdir_init(void) {
  * needs the patcher re-run. The base swaps/ dir is always served. */
 #define MAX_OVERLAYS 8
 static char g_overlaydir[MAX_OVERLAYS][4096];
+static char g_overlayname[MAX_OVERLAYS][64];
 static int g_noverlay;
 
 static uint32_t *load_swap_from(const char *dir, const char *name,
@@ -270,8 +271,108 @@ static void overlay_init(void) {
         int on = (access(dir, F_OK) == 0) && (access(flag, F_OK) != 0);
         LOGF("\"ev\":\"overlay\",\"name\":\"%s\",\"dir\":\"%s\",\"enabled\":%d}",
              tok, dir, on);
-        if (on) snprintf(g_overlaydir[g_noverlay++], 4096, "%s", dir);
+        if (on) {
+            snprintf(g_overlayname[g_noverlay], 64, "%s", tok);
+            snprintf(g_overlaydir[g_noverlay], 4096, "%s", dir);
+            g_noverlay++;
+        }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* run status (the settings-page feedback loop)                        */
+/* ------------------------------------------------------------------ */
+/* The CET settings page can only render what it was asked for -- it has no
+ * way to know whether a toggle actually reached the GPU. A stale pipeline
+ * cache, a missing swap file or an env override all leave the page reading
+ * "on" while nothing happens (see handoff/09-SETTINGS-AUDIT.md, D5/D9).
+ *
+ * So the layer records what it really did. CET sandboxes mod file I/O to the
+ * mod's own folder, which the layer cannot know, so we write next to our own
+ * .so and let sync_settings.sh copy the previous run's file into the CET mod
+ * dir at the next launch. The page therefore shows "last launch", which is
+ * the honest claim: this run's totals do not exist until this run is over.
+ *
+ * Rewritten on every hit (~92 tiny writes per launch) rather than at exit, so
+ * a crash still leaves an accurate record. Written via tmp+rename so a reader
+ * never sees a half-file. */
+static pthread_mutex_t g_status_mu = PTHREAD_MUTEX_INITIALIZER;
+static char g_statuspath[4608];
+static struct {
+    unsigned resolve, shadow, raygen, gi, other, failed;
+} g_hits;
+
+static void status_init(void) {
+    const char *env = getenv("CALLISTO_STATUS");
+    if (env && *env) snprintf(g_statuspath, sizeof g_statuspath, "%s", env);
+    else if (g_layerdir[0])
+        snprintf(g_statuspath, sizeof g_statuspath, "%s/last_run.json", g_layerdir);
+}
+
+/* Under Proton a dozen processes load this layer -- the game, plus Steam's
+ * fossilize pre-cache replayers and assorted helpers, none of which create
+ * modules. A "created it first" rule was not enough: a helper still wins the
+ * race when it starts before the game, and sync_settings.sh (which runs at
+ * launch, concurrently with those helpers) then reads its zeroes and reports
+ * "0 applied" for a launch that swapped everything.
+ *
+ * So the record is only ever written by a process that actually swapped
+ * something. Helpers cannot produce one. "The layer loaded at all" is a
+ * separate, contentless marker file, which any process may touch -- that
+ * keeps "loaded but swapped nothing" (a real fault) distinguishable from
+ * "never loaded" without letting a helper speak for the game. */
+static void status_mark_loaded(void) {
+    if (!g_statuspath[0]) return;
+    char mark[4680];
+    snprintf(mark, sizeof mark, "%s.loaded", g_statuspath);
+    FILE *f = fopen(mark, "w");
+    if (f) fclose(f);
+}
+
+static void status_write(void) {
+    if (!g_statuspath[0]) return;
+    char tmp[4680];
+    snprintf(tmp, sizeof tmp, "%s.tmp", g_statuspath);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    char ovl[MAX_OVERLAYS * 68], *o = ovl; *o = 0;
+    for (int i = 0; i < g_noverlay; i++)
+        o += snprintf(o, sizeof ovl - (size_t)(o - ovl), "%s\"%s\"",
+                      i ? ", " : "", g_overlayname[i]);
+    pthread_mutex_lock(&g_status_mu);
+    fprintf(f,
+        "{\n"
+        "  \"pid\": %d,\n"
+        "  \"modules_seen\": %llu,\n"
+        "  \"layer\": \"loaded\",\n"
+        "  \"swap_dir\": \"%s\",\n"
+        "  \"overlays\": [%s],\n"
+        "  \"passthrough\": %s,\n"
+        "  \"hits\": { \"resolve\": %u, \"shadow\": %u, \"raygen\": %u,"
+        " \"gi\": %u, \"other\": %u, \"failed\": %u }\n"
+        "}\n",
+        (int)getpid(), (unsigned long long)g_seq, g_swapdir, ovl,
+        g_disabled ? "true" : "false",
+        g_hits.resolve, g_hits.shadow, g_hits.raygen, g_hits.gi,
+        g_hits.other, g_hits.failed);
+    pthread_mutex_unlock(&g_status_mu);
+    fclose(f);
+    if (rename(tmp, g_statuspath) != 0) remove(tmp);
+}
+
+/* Classify by the entry-point half of the module id, which is what the
+ * settings page cares about: "resolve" is the GLCompute set where every
+ * visible effect lives, and is the count that silently goes to zero. */
+static void status_hit(const char *id, int ok) {
+    pthread_mutex_lock(&g_status_mu);
+    if (!ok) g_hits.failed++;
+    else if (strstr(id, ".dxil")) g_hits.resolve++;
+    else if (strstr(id, "rgs_shadow_main")) g_hits.shadow++;
+    else if (strstr(id, "rgs_reference_main")) g_hits.raygen++;
+    else if (strstr(id, "rgs_restirgi")) g_hits.gi++;
+    else g_hits.other++;
+    pthread_mutex_unlock(&g_status_mu);
+    status_write();
 }
 
 static uint32_t *load_swap(const char *name, size_t *out_size) {
@@ -308,6 +409,7 @@ typedef struct {
     PFN_vkDestroyShaderModule DestroyShaderModule;
     PFN_vkDestroyPipeline DestroyPipeline;
     PFN_vkCreateRayTracingPipelinesKHR CreateRTPipelines;
+    PFN_vkCreateComputePipelines CreateComputePipelines;
 } DevData;
 
 static InstData g_inst[MAX_OBJ]; static int g_ninst;
@@ -384,16 +486,29 @@ static void del_dev(VkDevice v) {
 
 typedef struct { uint64_t h; char id[96]; int swapped; } ModId;
 typedef struct { uint64_t h; int rgs; } RtPipe;      /* rgs: index into g_modid, -1 unknown */
-typedef struct { const void *cb; uint64_t pipe; } CbBind;
+typedef struct { const void *cb; uint64_t pipe; uint64_t cpipe; } CbBind;
+/* compute pipeline -> the module it was built from. A swap HIT only proves
+ * the module was CREATED; this is what proves it is DISPATCHED, and the group
+ * counts say at what resolution -- per-pixel, or a coarse probe/tile grid. */
+/* id and swapped are copied BY VALUE at pipeline creation. Storing an index
+ * into g_modid was wrong: modid_del compacts the table (last entry swaps into
+ * the freed slot), and the game destroys shader modules right after building
+ * pipelines, so every stored index goes stale and misattributes the result. */
+typedef struct { uint64_t h; char id[128]; int swapped; } CPipe;
+#define MAX_CPIPE 4096
 
 static ModId g_modid[MAX_MODID];   static int g_nmodid;
 static RtPipe g_rtpipe[MAX_RTPIPE]; static int g_nrtpipe;
 static CbBind g_cbbind[MAX_CBBIND]; static int g_ncbbind;
+static CPipe g_cpipe[MAX_CPIPE];    static int g_ncpipe;
+static uint64_t g_dispatched[MAX_CPIPE]; static int g_ndispatched; /* dedup */
 static uint64_t g_traced[MAX_RTPIPE]; static int g_ntraced;   /* dedup trace_rays */
 static pthread_mutex_t g_id_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* next pointers for command-buffer hooks (resolved at device creation) */
 static PFN_vkCmdBindPipeline g_next_bind;
+static PFN_vkCmdDispatch g_next_dispatch;
+static PFN_vkCmdDispatchIndirect g_next_dispatch_ind;
 static PFN_vkCmdTraceRaysKHR g_next_trace;
 static PFN_vkCmdTraceRaysIndirectKHR g_next_trace_ind;
 static PFN_vkCmdTraceRaysIndirect2KHR g_next_trace_ind2;
@@ -446,6 +561,47 @@ static void rtpipe_del(uint64_t h) {
         if (g_traced[i] == h) { g_traced[i] = g_traced[--g_ntraced]; break; }
     pthread_mutex_unlock(&g_id_mu);
 }
+static void cpipe_set(uint64_t h, const char *id, int swapped) {
+    pthread_mutex_lock(&g_id_mu);
+    int i;
+    for (i = 0; i < g_ncpipe; i++) if (g_cpipe[i].h == h) break;
+    if (i == g_ncpipe && g_ncpipe < MAX_CPIPE) { g_cpipe[i].h = h; g_ncpipe++; }
+    if (i < g_ncpipe) {
+        snprintf(g_cpipe[i].id, sizeof g_cpipe[i].id, "%s", id ? id : "");
+        g_cpipe[i].swapped = swapped;
+    }
+    pthread_mutex_unlock(&g_id_mu);
+}
+
+/* Logged once per pipeline per group-count, not per dispatch: these run every
+ * frame and the log would be useless otherwise. */
+static void dispatch_maybe_log(const void *cb, uint32_t gx, uint32_t gy,
+                               uint32_t gz) {
+    uint64_t pipe = 0;
+    pthread_mutex_lock(&g_id_mu);
+    for (int i = 0; i < g_ncbbind; i++)
+        if (g_cbbind[i].cb == cb) { pipe = g_cbbind[i].cpipe; break; }
+    int seen = 0;
+    for (int i = 0; i < g_ndispatched; i++)
+        if (g_dispatched[i] == pipe) { seen = 1; break; }
+    char id[128]; int swapped = 0;
+    id[0] = 0;
+    if (pipe && !seen) {
+        for (int i = 0; i < g_ncpipe; i++)
+            if (g_cpipe[i].h == pipe) {
+                snprintf(id, sizeof id, "%s", g_cpipe[i].id);
+                swapped = g_cpipe[i].swapped;
+                break;
+            }
+        if (g_ndispatched < MAX_CPIPE) g_dispatched[g_ndispatched++] = pipe;
+    }
+    pthread_mutex_unlock(&g_id_mu);
+    if (pipe && !seen)
+        LOGF("\"ev\":\"dispatch\",\"pipe\":\"0x%llx\",\"id\":\"%s\","
+             "\"swapped\":%d,\"groups\":[%u,%u,%u]}",
+             (unsigned long long)pipe, id, swapped, gx, gy, gz);
+}
+
 static void cbbind_set(const void *cb, uint64_t pipe) {
     pthread_mutex_lock(&g_id_mu);
     int i;
@@ -454,6 +610,17 @@ static void cbbind_set(const void *cb, uint64_t pipe) {
         g_cbbind[i].cb = cb; g_ncbbind++;
     }
     if (i < g_ncbbind) g_cbbind[i].pipe = pipe;
+    pthread_mutex_unlock(&g_id_mu);
+}
+
+static void cbbind_set_compute(const void *cb, uint64_t pipe) {
+    pthread_mutex_lock(&g_id_mu);
+    int i;
+    for (i = 0; i < g_ncbbind; i++) if (g_cbbind[i].cb == cb) break;
+    if (i == g_ncbbind && g_ncbbind < MAX_CBBIND) {
+        g_cbbind[i].cb = cb; g_ncbbind++;
+    }
+    if (i < g_ncbbind) g_cbbind[i].cpipe = pipe;
     pthread_mutex_unlock(&g_id_mu);
 }
 static void trace_maybe_log(const void *cb) {
@@ -547,10 +714,17 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
     d->DestroyPipeline = (PFN_vkDestroyPipeline)d->gdpa(dev, "vkDestroyPipeline");
     d->CreateRTPipelines = (PFN_vkCreateRayTracingPipelinesKHR)
         d->gdpa(dev, "vkCreateRayTracingPipelinesKHR");
+    d->CreateComputePipelines = (PFN_vkCreateComputePipelines)
+        d->gdpa(dev, "vkCreateComputePipelines");
     /* Command-buffer hooks are keyed by device-independent globals: the game
      * uses one VkDevice, so first resolution wins. */
     if (!g_next_bind)
         g_next_bind = (PFN_vkCmdBindPipeline)d->gdpa(dev, "vkCmdBindPipeline");
+    if (!g_next_dispatch)
+        g_next_dispatch = (PFN_vkCmdDispatch)d->gdpa(dev, "vkCmdDispatch");
+    if (!g_next_dispatch_ind)
+        g_next_dispatch_ind = (PFN_vkCmdDispatchIndirect)
+            d->gdpa(dev, "vkCmdDispatchIndirect");
     if (!g_next_trace)
         g_next_trace = (PFN_vkCmdTraceRaysKHR)d->gdpa(dev, "vkCmdTraceRaysKHR");
     if (!g_next_trace_ind)
@@ -649,6 +823,7 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
          ci->codeSize, has_id ? id : "", sha,
          r == VK_SUCCESS ? "HIT" : "hit_failed", (int)r);
     if (r == VK_SUCCESS && pMod) modid_add((uint64_t)*pMod, id, 1);
+    status_hit(has_id ? id : "", r == VK_SUCCESS);
     free(code);
     return r;
 }
@@ -749,11 +924,58 @@ static VkResult VKAPI_CALL xCreateRayTracingPipelinesKHR(VkDevice dev,
     return r;
 }
 
+static VkResult VKAPI_CALL xCreateComputePipelines(VkDevice dev,
+        VkPipelineCache cache, uint32_t n,
+        const VkComputePipelineCreateInfo *infos,
+        const VkAllocationCallbacks *ac, VkPipeline *pipes) {
+    DevData *d = find_dev(dev);
+    if (!d || !d->CreateComputePipelines)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = d->CreateComputePipelines(dev, cache, n, infos, ac, pipes);
+    if (r == VK_SUCCESS && pipes && infos) {
+        for (uint32_t i = 0; i < n; i++) {
+            char id[128]; int swapped = 0;
+            id[0] = 0;
+            pthread_mutex_lock(&g_id_mu);
+            int mi = modid_find((uint64_t)infos[i].stage.module);
+            if (mi >= 0) {
+                snprintf(id, sizeof id, "%s", g_modid[mi].id);
+                swapped = g_modid[mi].swapped;
+            }
+            pthread_mutex_unlock(&g_id_mu);
+            cpipe_set((uint64_t)pipes[i], id, swapped);
+            /* Logged for swapped modules only: this alone answers whether our
+             * modules ever reach a compute pipeline, independent of dispatch. */
+            if (swapped)
+                LOGF("\"ev\":\"cpipe\",\"pipe\":\"0x%llx\",\"id\":\"%s\"}",
+                     (unsigned long long)pipes[i], id);
+        }
+    }
+    return r;
+}
+
 static void VKAPI_CALL xCmdBindPipeline(VkCommandBuffer cb,
         VkPipelineBindPoint bindPoint, VkPipeline pipe) {
     if (bindPoint == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
         cbbind_set(cb, (uint64_t)pipe);
+    else if (bindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
+        cbbind_set_compute(cb, (uint64_t)pipe);
     g_next_bind(cb, bindPoint, pipe);
+}
+
+static void VKAPI_CALL xCmdDispatch(VkCommandBuffer cb,
+        uint32_t gx, uint32_t gy, uint32_t gz) {
+    dispatch_maybe_log(cb, gx, gy, gz);
+    g_next_dispatch(cb, gx, gy, gz);
+}
+
+/* Indirect dispatches carry their group counts in a buffer we cannot read
+ * here, logged as -1. Without this hook a pass dispatched indirectly would
+ * look like it never ran at all -- the wrong conclusion, loudly. */
+static void VKAPI_CALL xCmdDispatchIndirect(VkCommandBuffer cb,
+        VkBuffer buf, VkDeviceSize off) {
+    dispatch_maybe_log(cb, (uint32_t)-1, (uint32_t)-1, (uint32_t)-1);
+    g_next_dispatch_ind(cb, buf, off);
 }
 
 static void VKAPI_CALL xCmdTraceRaysKHR(VkCommandBuffer cb,
@@ -819,6 +1041,14 @@ static PFN_vkVoidFunction cond_dev_hook(VkDevice dev, const char *name) {
     } else if (!strcmp(name, "vkCreateRayTracingPipelinesKHR")) {
         DevData *d = find_dev(dev);
         if (d && d->CreateRTPipelines) return (PFN_vkVoidFunction)xCreateRayTracingPipelinesKHR;
+    } else if (!strcmp(name, "vkCreateComputePipelines")) {
+        DevData *d = find_dev(dev);
+        if (d && d->CreateComputePipelines)
+            return (PFN_vkVoidFunction)xCreateComputePipelines;
+    } else if (!strcmp(name, "vkCmdDispatch")) {
+        if (g_next_dispatch) return (PFN_vkVoidFunction)xCmdDispatch;
+    } else if (!strcmp(name, "vkCmdDispatchIndirect")) {
+        if (g_next_dispatch_ind) return (PFN_vkVoidFunction)xCmdDispatchIndirect;
     } else if (!strcmp(name, "vkCmdBindPipeline")) {
         if (g_next_bind) return (PFN_vkVoidFunction)xCmdBindPipeline;
     } else if (!strcmp(name, "vkCmdTraceRaysKHR")) {
@@ -894,4 +1124,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateDeviceLayerProperties(
     return VK_ERROR_LAYER_NOT_PRESENT;
 }
 
-__attribute__((constructor)) static void swap_init(void) { log_open(); swapdir_init(); overlay_init(); }
+__attribute__((constructor)) static void swap_init(void) {
+    log_open(); swapdir_init(); overlay_init(); status_init();
+    status_mark_loaded();
+}

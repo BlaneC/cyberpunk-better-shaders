@@ -90,9 +90,21 @@ Ships pre-tuned to tasteful defaults — no configuration required.
 - After launching the game: `grep HIT ~/callisto_swap.jsonl` — you should see
   many `"swap":"HIT"` lines (the hair compute resolves, shadow rays, and
   path-tracer raygens being substituted).
-- Vanilla control run: prefix the launch options with
-  `CALLISTO_LAYER_DISABLE=1` (skip the layer entirely; or turn every CET
-  toggle off) — useful for A/B shots.
+- Specifically count the compute resolves, which is where every visible effect
+  lives. The log appends across launches, so truncate it first
+  (`: > ~/callisto_swap.jsonl`), play, then
+  `grep -c '"id":"[0-9a-f]*\.dxil".*HIT' ~/callisto_swap.jsonl` — expect ~70.
+  **Zero there while the flags look healthy means a stale pipeline cache**: a
+  cached pipeline never re-creates its shader module, so the layer never sees
+  it. Relaunch with `CALLISTO_FORCE_CLEAR=1` prefixed to the launch options,
+  or flip any CET toggle — either clears the caches.
+- Vanilla control run: **turn the CET toggles off** and relaunch. That routes
+  through `sync_settings.sh`, which notices the change and evicts the pipeline
+  caches, so the vanilla half really is vanilla — and turning them back on
+  evicts again, so the modded half really is modded.
+  `CALLISTO_LAYER_DISABLE=1` also skips the layer, but it bypasses the settings
+  gate: the caches keep whatever was compiled last, and the following modded
+  launch can silently reuse vanilla compute pipelines. Use the toggles for A/B.
 
 ## Uninstall
 
@@ -173,6 +185,15 @@ MIT (see LICENSE). Do what you want with it; credit is appreciated.
 ---
 
 ## Hair: before / after
+
+> **Unverified as of 2026-08-26 — do not publish this section yet.** The
+> before/after pair below was shot with Ultra Plus installed, whose hair
+> ray-bounce settings were not isolated; that mod's contribution was mistakenly
+> read as this one's. In a clean isolation test the hair BRDF produces no
+> observable change, and the likely cause is understood (the structure-tensor
+> confidence gates every hair lobe and collapses them to identity — see
+> `handoff/09-SETTINGS-AUDIT.md` D11). The shadow-leak fix below *is* confirmed
+> independently. Re-shoot both halves with no other mods before this ships.
 
 Vanilla path-traced hair is shaded as slightly rough plastic — one isotropic
 GGX lobe, no anisotropy, no strand direction. The mod adds a Kajiya-Kay lobe

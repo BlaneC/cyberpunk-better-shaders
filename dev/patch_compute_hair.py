@@ -489,8 +489,9 @@ def build_hair_gi(mod, cfg, sites, hair_class, knobs):
     gate = mod.new_id()
     hins.append(f"        {gate} = OpIEqual %bool {cls} {uid}")
     tins, res = P.emit_aniso(mod, nctx, C, want_tangent=True)
-    hins += tins
     T, aniso = res["T"], res["aniso"]
+    aniso = apply_conf(mod, C, aniso, knobs, tins)
+    hins += tins
     edits = [(pos, hins)]
     n = 0
     skipped_late = []
@@ -588,6 +589,36 @@ def build_hair_gi(mod, cfg, sites, hair_class, knobs):
                            "skipped_no_nh": len(sites) - len(usable)}
 
 
+def apply_conf(mod, C, aniso, knobs, ins):
+    """Remap the structure-tensor confidence before it gates the hair lobes.
+
+    `aniso` = (l1-l2)/(l1+l2) from emit_aniso multiplies both the Kajiya
+    factor and the dual lobe, so where the normal field carries no strand
+    signal every hair effect is exactly identity and no knob can rescue it.
+    conf_gain scales the estimate; conf_floor puts a bound under it
+    (conf_floor=1.0 ignores it entirely -- the diagnostic that separates "the
+    lobes never fire" from "the sites never reach the screen").
+
+    Emits nothing at gain=1/floor=0, so --vanilla stays bit-exact.
+    """
+    g = float(knobs.get("conf_gain", 1.0))
+    fl = float(knobs.get("conf_floor", 0.0))
+    if g == 1.0 and fl == 0.0:
+        return aniso
+    gl, cur = mod.glsl, aniso
+    if g != 1.0:
+        n = mod.new_id()
+        ins.append(f"        {n} = OpFMul %float {cur} {C(g)}")
+        cur = n
+    if fl != 0.0:
+        n = mod.new_id()
+        ins.append(f"        {n} = OpExtInst %float {gl} NMax {cur} {C(fl)}")
+        cur = n
+    n = mod.new_id()
+    ins.append(f"        {n} = OpExtInst %float {gl} NMin {cur} {C(1.0)}")
+    return n
+
+
 def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
     """Combined spec-lobe pass: alpha reshape + Kajiya aniso + shifted dual
     (R/TRT) lobes + sheen, applied as ONE robust per-out rewrite.
@@ -640,6 +671,7 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
     m_aniso_v = knobs["m_aniso"]
     mkn, pex = C(m_aniso_v), C(knobs["p_aniso"] * 0.5)
     m_dual_v = knobs["m_dual"]
+    spec_add_v = float(knobs.get("spec_add", 0.0))
     md = C(m_dual_v)
     sR = math.tan(math.radians(knobs["beta_R"]))
     sTRT = math.tan(math.radians(knobs["beta_TRT"]))
@@ -717,6 +749,7 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
             if all(cfg.dominates_line(i, pos) for i in ids):
                 tins, res = emit_aniso(mod, ctx, C, want_tangent=True)
                 T, aniso = res["T"], res["aniso"]
+                aniso = apply_conf(mod, C, aniso, knobs, tins)
                 edits.append((pos, tins))
     hoisted = T is not None
     rep["hoisted"] = hoisted
@@ -728,6 +761,7 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
             tins, res = emit_aniso(mod, ctx, C, want_tangent=True)
             T, aniso = res["T"], res["aniso"]
             ins = list(tins)
+            aniso = apply_conf(mod, C, aniso, knobs, ins)
         ToH = dot3(T, nh['h'], ins)
         NoH = dot3(nh['n'], nh['h'], ins)
         ToN = dot3(T, nh['n'], ins)
@@ -839,8 +873,19 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
                 f"        {sc} = OpSelect %float {gate} {fac_c} {one}",
                 f"        {n} = OpFMul %float {base} {sc}",
             ]
+            final = n
+            # Diagnostic only: additive, so it survives an out whose value is
+            # zero. Distinguishes "these outs never reach the image" from
+            # "these outs reach it but carry no hair specular".
+            if spec_add_v != 0.0:
+                sa, na = I(), I()
+                pins += [
+                    f"        {sa} = OpSelect %float {gate} {C(spec_add_v)} {zero}",
+                    f"        {na} = OpFAdd %float {n} {sa}",
+                ]
+                final = na
             edits.append((odef, pins))
-            replace_all_uses(mod, o, n, odef)
+            replace_all_uses(mod, o, final, odef)
         rep["lobe_sites"] += 1
         if do_sheen:
             rep["sheen_sites"] += 1

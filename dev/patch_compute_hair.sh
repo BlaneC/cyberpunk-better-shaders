@@ -15,11 +15,14 @@ INSTALL_DIR="${CALLISTO_INSTALL_DIR:-$HOME/.local/lib/callisto}"
 SWAPS="${CALLISTO_SWAPS_DIR:-$MOD_DIR/swaps}"
 WORK="$MOD_DIR/dev/disasm/compute"
 
-TIER=""; CLASS=""
+TIER=""; CLASS=""; EXTRA=()
 while (( $# )); do
     case "$1" in
         --hunt) TIER=hairhunt ;;
         --hair) TIER=hair; CLASS="${2:?--hair needs a class number}"; shift ;;
+        # forwarded verbatim to the patcher, so a tuning sweep is one command:
+        #   ./dev/patch_compute_hair.sh --hair 4 --set m_aniso=6 --set m_dual=4
+        --set) EXTRA+=(--set "${2:?--set needs K=V}"); shift ;;
         -*) echo "unknown flag: $1" >&2; exit 2 ;;
         *)  DUMP_DIR="$1" ;;
     esac
@@ -45,6 +48,7 @@ rm -f "$SWAPS"/*.dxil.spv "$SWAPS"/*.dxil.spvasm 2>/dev/null || true
 ARGS=(--tier "$TIER")
 [[ "$TIER" == hair ]] && ARGS+=(--with-tier1)   # Callisto tier-1 skin c1 rides along
 [[ -n "$CLASS" ]] && ARGS+=(--hair-class "$CLASS")
+(( ${#EXTRA[@]} )) && ARGS+=("${EXTRA[@]}")
 
 pass=(); fail=()
 for f in "${targets[@]}"; do
