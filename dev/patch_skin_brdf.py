@@ -334,21 +334,50 @@ def find_class_shift(mod):
     gate for any class value can be built from it. Inserting the new IEqual
     directly after the existing one inherits its dominance, which is what lets
     the hair gate reach every eval site the skin gate already reaches.
+
+    The comparison constant is deliberately NOT pinned to %uint_1 here (unlike
+    find_skin_gate, which really does want the skin test). Requiring it skipped
+    every module that special-cases HAIR: those compare the same shift against
+    %uint_4 and switch on it, so the chain is identical and only the consumer
+    differs. Four of the nine modules that actually dispatch were lost this way
+    -- see handoff/10-DISPATCH-TRUTH.md. What matters is the shift, not who
+    reads it: the caller builds its own IEqual for the class it wants.
     """
-    for i, ln in enumerate(mod.lines):
-        m = re.match(r'\s*(%\d+)\s*=\s*OpIEqual %bool (%\d+) %uint_1\s*$', ln)
-        if not m: continue
-        _, sh = mod.find_def(m.group(2))
-        if not sh: continue
-        ms = re.match(r'OpShiftRightLogical %uint (%\d+) %uint_5', sh)
-        if not ms: continue
-        _, ex = mod.find_def(ms.group(1))
-        if not ex: continue
-        me = re.match(r'OpCompositeExtract %uint (%\d+) 1', ex)
-        if not me: continue
-        _, fe = mod.find_def(me.group(1))
-        if fe and fe.startswith('OpImageFetch %v4uint'):
-            return m.group(2), i
+    # Two passes. The first is the historical behaviour, unchanged: anchor on
+    # the module's skin test. Only if a module has no skin test at all do we
+    # accept a comparison against any other class -- widening the first pass
+    # instead would move the anchor line in modules that already worked, and
+    # one of them (69220ed5e0ca675f) then failed spirv-val with a use before
+    # its gate's definition. Old modules keep their old anchor; the hair-
+    # special ones, which only ever compare against %uint_4, gain one.
+    for want_skin in (True, False):
+        pat = (r'\s*(%\d+)\s*=\s*OpIEqual %bool (%\d+) %uint_1\s*$' if want_skin
+               else r'\s*(%\d+)\s*=\s*OpIEqual %bool (%\d+) %uint_\d+\s*$')
+        for i, ln in enumerate(mod.lines):
+            m = re.match(pat, ln)
+            if not m: continue
+            _, sh = mod.find_def(m.group(2))
+            if not sh: continue
+            ms = re.match(r'OpShiftRightLogical %uint (%\d+) %uint_5', sh)
+            if not ms: continue
+            _, ex = mod.find_def(ms.group(1))
+            if not ex: continue
+            me = re.match(r'OpCompositeExtract %uint (%\d+) 1', ex)
+            if not me: continue
+            _, fe = mod.find_def(me.group(1))
+            if not (fe and fe.startswith('OpImageFetch %v4uint')):
+                continue
+            if want_skin:
+                return m.group(2), i
+            # Fallback pass: anchor on the SHIFT's own def, not on this
+            # comparison. A module with no skin test may not compare the class
+            # until long after the sites we patch (69220ed5e0ca675f compares at
+            # line 1536, with a site at 1064), and anchoring there emits the
+            # gate below its own uses. The shift sits in the same block as the
+            # G-buffer fetch, so it dominates everything the comparison does
+            # and then some -- the same choice the &31 variant path makes.
+            shift_line, _ = mod.find_def(m.group(2))
+            return m.group(2), shift_line
     die(f"{mod.name}: material-class shift (gbuf.y>>5) not found")
 
 
