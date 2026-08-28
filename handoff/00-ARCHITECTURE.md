@@ -2,7 +2,12 @@
 
 **Read this first.** `01`–`07` are the chronological investigation trail, each
 correcting the one before it; several of their conclusions are superseded.
-This document is the consolidated truth as of Aug 2026.
+This document is the consolidated truth as of Aug 2026 for the **hair/skin**
+work. Two later documents override parts of it: `16-ENGINE-HAIR-BRDF.md`
+(the engine already ships a live-tunable three-lobe hair BRDF as CVars) and
+`19-STATUS.md` (the ledger of what is confirmed on screen versus merely built).
+The tonemapper track is separate and lives in `18-AGX-FEASIBILITY.md`, with
+`21-AGX-GRADE-AND-SDR.md` superseding its SDR half.
 
 ---
 
@@ -187,6 +192,10 @@ math.
 | `dev/patch_shadow_brdf.py` | shadow-raygen anchors; **CFG + dominator analysis** reused everywhere |
 | `dev/patch_chs_brdf.py` | hit-shader anchors; lenient module loader |
 | `dev/scan_dump.py` | rank dumped modules by BRDF fingerprint |
+| `dev/patch_agx.py` | **AgX tonemapper** — splices into the LUT *generator*; sites `auto`/`ap1`/`sdr2` (`sdr` is legacy and wrong); `--set grade=` keeps the authored area LUTs |
+| `dev/find_lut_gens.py` | finds all **10** tonemap-LUT generator permutations (2 HDR + 8 SDR) |
+| `dev/build_agx.sh` / `dev/install_agx.sh` | build the 14 variants × 10 permutations; install/remove/list |
+| `dev/prov_map.py` | render graph from **offline** capture replay — its docstring carries the recipe |
 
 ### Layer instrumentation worth knowing
 

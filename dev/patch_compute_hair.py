@@ -5,6 +5,9 @@ shaders (the confirmed visible shading surface, handoff/07 + the white-skin
 confirmation launch).
 
 Tiers:
+  hunttint          unconditional tint at every image write -- no class read
+                    needed, so it patches the tile-permutation modules the
+                    palette tier cannot (15-RENDER-GRAPH.md 3).
   hairhunt          10-class palette tint at every image write. One launch
                     identifies hair's material class by colour (skin=1=red is
                     the control -- it is the same gate that just turned skin
@@ -161,10 +164,38 @@ def find_class_anchor_variant(mod):
             if not me:
                 continue
             eid = me.group(1)
+            # Two low-bit idioms anchor the same material fetch:
+            #   & 31          -- the local-light family reads the sub-field
+            #   & 4294967264  -- mask-compare idiom: (y & ~31) == K is exactly
+            #                    (y >> 5) == K, the class test without a shift
             if any(re.match(r'\s*%\d+\s*=\s*OpBitwiseAnd %uint '
-                            + re.escape(eid) + r' %uint_31\s*$', l2)
+                            + re.escape(eid) + r' %uint_(?:31|4294967264)\s*$', l2)
                    for l2 in mod.lines):
                 return eid, j
+    # Fourth idiom: the class word arrives via a buffer OpLoad + OpBitcast,
+    # not an OpImageFetch, so the fetch-anchored scan above never sees it.
+    # Anchor directly on the mask-compare: any extract masked with ~31 IS a
+    # class test; dxil-spirv may also have lifted it through an OpPhi.
+    for i, ln in enumerate(mod.lines):
+        m = re.match(r'\s*%\d+\s*=\s*OpBitwiseAnd %uint (%\d+) %uint_4294967264\s*$', ln)
+        if not m:
+            continue
+        ex = m.group(1)
+        _, exd = mod.find_def(ex)
+        # component 0 or 1: the material word rides .y in the fetch family
+        # doc 11 read, but at least one class-gated module (8e5618efab94b955,
+        # gate == 5<<5) masks component 0 of its own fetch.
+        if not re.match(r'OpCompositeExtract %uint %\d+ [01]\s*$', exd or ''):
+            mp = re.match(r'OpPhi %uint((?:\s+%\w+)+)\s*$', exd or '')
+            if mp:
+                for op in mp.group(1).split():
+                    _, od = mod.find_def(op)
+                    if re.match(r'OpCompositeExtract %uint %\d+ [01]\s*$', od or ''):
+                        ex, exd = op, od
+                        break
+        if re.match(r'OpCompositeExtract %uint %\d+ [01]\s*$', exd or ''):
+            eline, _ = mod.find_def(ex)
+            return ex, eline
     die(f"{mod.name}: no material G-buffer read found (neither >>5 nor &31)")
 
 
@@ -892,6 +923,54 @@ def build_hair_spec_lobes(mod, cfg, dom_id, sites, gate, knobs):
     return consts, edits, rep
 
 
+def build_tint_writes(mod, cfg, writes, rgb):
+    """Unconditional constant tint at every image write.
+
+    The palette tier (build_hunt_writes) needs a material-class read so it can
+    colour by class; that requirement is what made 149 of the 178 dispatched
+    modules unpatchable (`15-RENDER-GRAPH.md` 3).  For a tile-classified
+    permutation none of that is needed: the module is *dispatched* only for the
+    tiles it owns, so an unconditional multiply on its output paints exactly
+    those tiles and nothing else -- dispatch is the gate.
+
+    No class fetch, no dominance test (constants dominate everything), so this
+    tier patches any module that has a reconstructable v4float image write.
+    """
+    consts, edits = [], []
+
+    def C(v):
+        nid, c = mod.const(v)
+        if c:
+            consts.append(c)
+        return nid
+
+    tids = [C(x) for x in rgb]
+    done, skipped = [], []
+    for w in writes:
+        if w['comps'] is None:
+            skipped.append({"line": w['line'] + 1,
+                            "why": "texel not a v4 construct"})
+            continue
+        ins, newc = [], []
+        for ch in range(3):
+            n_ = mod.new_id()
+            ins.append(f"        {n_} = OpFMul %float {w['comps'][ch]} "
+                       f"{tids[ch]}")
+            newc.append(n_)
+        nt = mod.new_id()
+        ins.append(f"        {nt} = OpCompositeConstruct %v4float "
+                   f"{newc[0]} {newc[1]} {newc[2]} {w['comps'][3]}")
+        edits.append((w['line'] - 1, ins))
+        mod.lines[w['line']] = re.sub(
+            r'(OpImageWrite %\w+ %\w+ )%\w+\s*$', r'\g<1>' + nt,
+            mod.lines[w['line']])
+        done.append(w['line'] + 1)
+    if not done:
+        die(f"{mod.name}: no image write reachable for the tint")
+    return consts, edits, {"tint": list(rgb), "writes": done,
+                           "skipped": skipped}
+
+
 def build_hunt_writes(mod, cfg, writes, classes):
     """Palette tint per material class at every image write (gate refetched
     only if the module's own gate does not dominate -- same policy as
@@ -905,7 +984,13 @@ def build_hunt_writes(mod, cfg, writes, classes):
         return nid
 
     one = C(1.0)
-    shift, _ = P.find_class_shift(mod)
+    # acquire_class_shift (not find_class_shift): the &31 and mask-compare
+    # variants have no `y >> 5` of their own; the fallback emits one after the
+    # shared texel's extract and we splice it in here.
+    shift, ins_line, pre_ins, pre_consts, dom_id = acquire_class_shift(mod)
+    consts.extend(pre_consts)
+    if pre_ins:
+        edits.append((ins_line, pre_ins))
     palette, legend = [], []
     for n in classes:
         if n not in HUNT_PALETTE:
@@ -926,9 +1011,12 @@ def build_hunt_writes(mod, cfg, writes, classes):
             continue
         ins = []
         cls = shift
-        # Same fallback policy as build_skinmark: when the module's own class
-        # value cannot reach the write, refetch it there.
-        if not cfg.dominates_line(shift, w['line']):
+        # Same fallback policy as build_skinmark: when the class value cannot
+        # reach the write, refetch it there. Test dominance on the anchor id
+        # (the module's own shift, or the extract in the fallback variants) --
+        # the pending shift has no def in the module yet and would be treated
+        # as always-dominating.
+        if not cfg.dominates_line(dom_id, w['line']):
             if ctx is None:
                 ctx = find_class_fetch(mod)
             if any(not cfg.dominates_line(x, w['line'])
@@ -965,7 +1053,7 @@ def build_hunt_writes(mod, cfg, writes, classes):
 
 
 def process(path, outdir, tier, knobs, hair_class, hunt_classes, do_rt=True,
-            with_tier1=False):
+            with_tier1=False, tint=None):
     target_env = detect_target_env(path) or 'spv1.3'
     mod, problems = load_lenient(path)
     if not mod.ident:
@@ -977,7 +1065,11 @@ def process(path, outdir, tier, knobs, hair_class, hunt_classes, do_rt=True,
     if problems:
         rep['module_warnings'] = problems
 
-    if tier == 'hairhunt':
+    if tier == 'hunttint':
+        writes = find_image_writes(mod)
+        consts, edits, rep['tint'] = build_tint_writes(
+            mod, cfg, writes, tint or (1.0, 0.25, 0.25))
+    elif tier == 'hairhunt':
         writes = find_image_writes(mod)
         consts, edits, rep['hunt'] = build_hunt_writes(
             mod, cfg, writes, hunt_classes or HUNT_DEFAULT)
@@ -1068,7 +1160,8 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('modules', nargs='+')
-    ap.add_argument('--tier', choices=['hairhunt', 'hair'], required=True)
+    ap.add_argument('--tier', choices=['hunttint', 'hairhunt', 'hair'],
+                    required=True)
     ap.add_argument('--hair-class', type=int, default=None, metavar='N')
     ap.add_argument('--classes', default=None)
     ap.add_argument('--with-tier1', action='store_true',
@@ -1080,6 +1173,8 @@ def main():
                     help='identity params (regression)')
     ap.add_argument('--no-roundtrip-check', action='store_true')
     ap.add_argument('--set', action='append', default=[], metavar='K=V')
+    ap.add_argument('--tint', default='1.0,0.25,0.25', metavar='R,G,B',
+                    help='hunttint tier: unconditional output multiplier')
     a = ap.parse_args()
 
     knobs = dict(VANILLA if a.vanilla else KNOBS)
@@ -1103,9 +1198,14 @@ def main():
             die(f"unknown knob {k}")
     hunt = [int(x) for x in a.classes.split(',')] if a.classes else None
 
+    tint = tuple(float(x) for x in a.tint.split(','))
+    if len(tint) != 3:
+        die('--tint needs R,G,B')
+
     reports = [process(p, a.outdir, a.tier, knobs, a.hair_class, hunt,
                        do_rt=not a.no_roundtrip_check,
-                       with_tier1=a.with_tier1) for p in a.modules]
+                       with_tier1=a.with_tier1, tint=tint)
+               for p in a.modules]
     print(json.dumps(reports, indent=1))
 
 

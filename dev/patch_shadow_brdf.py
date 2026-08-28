@@ -188,15 +188,34 @@ def find_class_fetch(mod):
         %h = OpCompositeExtract %uint %g 1
         %i = OpShiftRightLogical %uint %h <shift>
     """
-    for i, ln in enumerate(mod.lines):
-        m = re.match(r'\s*(%\d+)\s*=\s*OpShiftRightLogical %uint (%\d+) (%\w+)\s*$', ln)
-        if not m:
-            continue
-        shift_id, ex_id, shift_const = m.groups()
-        if shift_const != '%uint_5':
-            continue
+    def candidates():
+        """Extract ids that carry the material class, by idiom:
+        the module's own `y >> 5`, or the mask-compare `(y & ~31) == K`
+        (which is `(y >> 5) == K` with no shift; the refetch then emits
+        its own >> 5, so ctx['shift'] stays %uint_5 in both cases)."""
+        for i, ln in enumerate(mod.lines):
+            m = re.match(r'\s*(%\d+)\s*=\s*OpShiftRightLogical %uint (%\d+) (%\w+)\s*$', ln)
+            if m and m.group(3) == '%uint_5':
+                yield m.group(2)
+        for i, ln in enumerate(mod.lines):
+            m = re.match(r'\s*(%\d+)\s*=\s*OpBitwiseAnd %uint (%\d+) %uint_4294967264\s*$', ln)
+            if m:
+                yield m.group(2)
+
+    for ex_id in candidates():
         _, exd = mod.find_def(ex_id)
         me = re.match(r'OpCompositeExtract %uint (%\d+) 1\s*$', exd or '')
+        if not me:
+            # dxil-spirv frontier lifting: the masked value may be an OpPhi
+            # whose operands include the extract. Look one level through.
+            mp = re.match(r'OpPhi %uint((?:\s+%\w+)+)\s*$', exd or '')
+            if mp:
+                for op in mp.group(1).split():
+                    _, od = mod.find_def(op)
+                    me = re.match(r'OpCompositeExtract %uint (%\d+) 1\s*$',
+                                  od or '')
+                    if me:
+                        break
         if not me:
             continue
         fetch_id = me.group(1)
@@ -220,7 +239,7 @@ def find_class_fetch(mod):
         if not mc:
             continue
         ctx = dict(imgty=imgty, ptrty=ptrty, arr=arr, lod=lod,
-                   x=mc.group(1), y=mc.group(2), shift=shift_const,
+                   x=mc.group(1), y=mc.group(2), shift='%uint_5',
                    line=fline, slot=slot, slot_chain=None)
         # The SRV slot is normally push-constant relative; capture the pieces
         # so it can be recomputed. If it is some other (already dominating)

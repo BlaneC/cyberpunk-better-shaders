@@ -20,12 +20,16 @@ KERNEL_FLAG="$PLUGIN_DIR/disable.flag"
 # its swap dirs next to its own .so via dladdr:
 INSTALL_DIR="$HOME/.local/lib/callisto"
 
-tier=1 kernel=on hair=on skinray=on shadowcull=on
+# ptreg defaults OFF: unlike the other three it is a deliberate look trade
+# (indirect gloss goes softer in exchange for less noise), so it is opt-in.
+tier=1 kernel=on hair=on skinray=on shadowcull=on shadowset=full-shadow
+ptreg=off ptclamp=on ptbounce=on ptrefl=on
 if [[ -f "$PARAMS" ]]; then
     while IFS='=' read -r k v; do
         v="${v%$'\r'}"
         case "$k" in
-            tier|kernel|hair|skinray|shadowcull) printf -v "$k" '%s' "$v" ;;
+            tier|kernel|hair|skinray|shadowcull|shadowset) printf -v "$k" '%s' "$v" ;;
+            ptreg|ptclamp|ptbounce|ptrefl) printf -v "$k" '%s' "$v" ;;
         esac
     done < "$PARAMS"
 fi
@@ -53,12 +57,48 @@ else
     rm -f "$INSTALL_DIR/shadowcull.disable"
 fi
 
+# shadowset -- WHICH build of that overlay is served. Names come from
+# dev/build_shadow_sets.sh; the CET selector offers the same list.
+#
+#   full-shadow  THE SHIPPING BUILD, and the default. Flags 28 -> 12 in place
+#                (back-face culling off) on the 10 rgs_shadow modules only.
+#                Closes the hairline seam; leaves a reduced amount of flicker
+#                on flat props at LOD transitions.
+#   full         the same edit on all 18 modules, i.e. full-shadow plus the 8
+#                rgs_restirgi_* GI modules. Kept because it is the original
+#                proven build, but the GI half adds flicker and contributes
+#                nothing visible to the seam -- prefer full-shadow.
+#
+# Everything else was a diagnostic and has been removed; the recipes stay in
+# dev/build_shadow_sets.sh with their results. The short version (`26` §7a-d):
+# the two-ray splice never executed -- `sctrl`, a control built so that a
+# working splice MUST look like full-shadow, came back vanilla -- so no cull
+# mask experiment was ever interpretable, and ray flags cannot separate hair
+# from flat props because they apply to the whole ray.
+#
+# Only acts when dev/install_shadow_sets.sh has parked the sets; an older
+# install with a single fixed swaps.shadowcull/ is left untouched. An unknown
+# or retired name falls back to full-shadow rather than serving nothing.
+shadow_set=fixed
+want_set="$shadowset"
+case "$want_set" in off|'') want_set=full-shadow ;; esac
+if [[ ! -d "$INSTALL_DIR/shadowcull.set/$want_set" && -d "$INSTALL_DIR/shadowcull.set/full-shadow" ]]; then
+    echo "[CallistoSSS] shadowset='$want_set' is retired or not installed; using full-shadow" >&2
+    want_set=full-shadow
+fi
+if [[ -d "$INSTALL_DIR/shadowcull.set/$want_set" ]]; then
+    mkdir -p "$INSTALL_DIR/swaps.shadowcull"
+    rm -f "$INSTALL_DIR/swaps.shadowcull/"*.spv
+    cp -pf "$INSTALL_DIR/shadowcull.set/$want_set/"*.spv \
+          "$INSTALL_DIR/swaps.shadowcull/" 2>/dev/null && shadow_set=$want_set
+fi
+
 # skinray -- the tier-1 raygen sampling (eval-invisible skin BRDF). The
 # pristine copies live in swaps.prehunt/; off removes them from swaps/.
 if [[ "$skinray" == "off" ]]; then
     rm -f "$INSTALL_DIR/swaps/"*.rgs_reference_main.spv
 elif [[ "$tier" != "off" ]]; then
-    cp -f "$INSTALL_DIR/swaps.prehunt/"*.rgs_reference_main.spv \
+    cp -pf "$INSTALL_DIR/swaps.prehunt/"*.rgs_reference_main.spv \
           "$INSTALL_DIR/swaps/" 2>/dev/null || true
 fi
 
@@ -70,11 +110,53 @@ else
     for f in "$INSTALL_DIR/swaps.prehunt/"*.rgs_reference_main.spv; do
         [[ -f "$f" ]] || continue
         base="$(basename "$f")"
-        [[ -f "$INSTALL_DIR/swaps/$base" ]] || cp -f "$f" "$INSTALL_DIR/swaps/"
+        [[ -f "$INSTALL_DIR/swaps/$base" ]] || cp -pf "$f" "$INSTALL_DIR/swaps/"
     done
 fi
 
-echo "[CallistoSSS] synced: tier=$tier kernel=$kernel hair=$hair skinray=$skinray shadowcull=$shadowcull"
+# ptreg / ptclamp / ptbounce -- the tier-1 path-tracing edits (handoff/23).
+# All three splice the same twelve rgs_reference_main permutations, and the
+# layer serves the FIRST file it finds for an id, so they cannot be three
+# overlays. dev/build_ptq.sh pre-builds the seven non-empty combinations; this
+# picks one and materializes it into the single swaps.ptq/ overlay.
+#
+# The combo letters are in r,c,b order to match the built directory names.
+combo=""
+[[ "$ptreg"    != "off" ]] && combo+="r"
+[[ "$ptclamp"  != "off" ]] && combo+="c"
+[[ "$ptbounce" != "off" ]] && combo+="b"
+
+PTQ="$INSTALL_DIR/swaps.ptq"
+mkdir -p "$PTQ"
+rm -f "$PTQ/"*.spv
+if [[ "$tier" != "off" && -n "$combo" && -d "$INSTALL_DIR/ptq/$combo/base" ]]; then
+    cp -pf "$INSTALL_DIR/ptq/$combo/base/"*.spv "$PTQ/" 2>/dev/null
+    # skinray ships its own patched copies of two of the twelve permutations in
+    # the base swaps/ dir. Every overlay outranks that dir, so a vanilla-based
+    # ptq module would silently un-patch them; the matrix carries skin-based
+    # builds of exactly those two for this case.
+    if [[ "$skinray" != "off" ]]; then
+        cp -pf "$INSTALL_DIR/ptq/$combo/skin/"*.spv "$PTQ/" 2>/dev/null
+    fi
+    rm -f "$INSTALL_DIR/ptq.disable"
+    ptq_state="$combo$([[ "$skinray" != "off" ]] && echo "+skin")"
+else
+    # An empty overlay dir still reads as "enabled" in the layer's log, which
+    # would be a lie in the status page. Flag it off explicitly.
+    echo 1 > "$INSTALL_DIR/ptq.disable"
+    ptq_state=off
+fi
+
+# ptrefl -- the same cullMask widening on the three reflection raygens. Nothing
+# else patches those modules, so it is an ordinary independent overlay.
+if [[ "$ptrefl" == "off" || "$tier" == "off" ]]; then
+    echo 1 > "$INSTALL_DIR/ptrefl.disable"
+else
+    rm -f "$INSTALL_DIR/ptrefl.disable"
+fi
+
+echo "[CallistoSSS] synced: tier=$tier kernel=$kernel hair=$hair skinray=$skinray shadowcull=$shadowcull/$shadow_set"
+echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce) ptrefl=$ptrefl"
 
 # --- pipeline cache gate ---------------------------------------------------
 # Flag files alone are not enough. Once a pipeline is cached, the game never
@@ -101,13 +183,18 @@ STAMP="$PLUGIN_DIR/.cache_stamp"
 # can sit unchanged while the swap payload underneath them is regenerated
 # (a patcher re-run), which is the same silent no-op in a different costume.
 # Hashing the installed .spv set and the layer .so catches both.
+# -p on every materializing copy above is what makes this stable: mtime comes
+# from the parked source, so an unchanged selection hashes the same next launch
+# and the caches survive. Without it every launch recompiled every shader.
 payload="$(stat -c '%n %s %Y' \
               "$INSTALL_DIR"/swaps/*.spv \
               "$INSTALL_DIR"/swaps.hair/*.spv \
               "$INSTALL_DIR"/swaps.shadowcull/*.spv \
+              "$INSTALL_DIR"/swaps.ptq/*.spv \
+              "$INSTALL_DIR"/swaps.ptrefl/*.spv \
               "$INSTALL_DIR"/libVkLayer_callisto_spvswap.so 2>/dev/null \
            | sort | sha256sum | cut -c1-16)"
-want="tier=$tier kernel=$kernel hair=$hair skinray=$skinray shadowcull=$shadowcull payload=$payload"
+want="tier=$tier kernel=$kernel hair=$hair skinray=$skinray shadowcull=$shadowcull shadowset=$shadow_set ptq=$ptq_state ptrefl=$ptrefl payload=$payload"
 have="$(cat "$STAMP" 2>/dev/null || true)"
 if [[ "$want" != "$have" || "${CALLISTO_FORCE_CLEAR:-0}" == "1" ]]; then
     [[ -d "$GLCACHE" ]] && rm -rf "${GLCACHE:?}/"* 2>/dev/null
@@ -120,6 +207,21 @@ else
     cache_action=kept
     echo "[CallistoSSS] settings unchanged -- pipeline caches kept"
 fi
+
+# --- launch journal ----------------------------------------------------------
+# The layer log records each swap's FILE NAME and SIZE, which cannot tell two
+# variants apart when they differ only in a constant's value: in binary SPIR-V
+# an OpConstant is the same size whatever it holds, so m1/m2/m4/m6/m16/m32 are
+# byte-size-identical and so are m118/m119. Attributing an observation to a
+# variant from the log alone is therefore impossible for 6 of the 13 sets, and
+# a result was once credited to a set that had never been launched at all
+# (`26` §7). This journal is the fix: one append-only line per launch, keyed on
+# the CONTENT hash of what was actually served.
+sc_sha="$(cat "$INSTALL_DIR/swaps.shadowcull/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
+printf '%s shadowset=%s sc_sha=%s ptq=%s ptrefl=%s hair=%s tier=%s cache=%s payload=%s\n' \
+    "$(date -Is)" "$shadow_set" "${sc_sha:-none}" "$ptq_state" "$ptrefl" \
+    "$hair" "$tier" "${cache_action:-kept}" "$payload" \
+    >> "$HOME/callisto_launches.log" 2>/dev/null || true
 
 # --- status feedback loop --------------------------------------------------
 # The settings page renders brdf_params.txt -- the REQUEST. Nothing ever told
@@ -147,6 +249,13 @@ jnum() { grep -o "\"$1\": *[0-9]*" "$LAST_RUN" 2>/dev/null | grep -o '[0-9]*$' |
     echo "want_hair=$hair"
     echo "want_skinray=$skinray"
     echo "want_shadowcull=$shadowcull"
+    echo "want_shadowset_req=$shadowset"
+    echo "want_shadowset=$shadow_set"
+    echo "want_ptreg=$ptreg"
+    echo "want_ptclamp=$ptclamp"
+    echo "want_ptbounce=$ptbounce"
+    echo "want_ptrefl=$ptrefl"
+    echo "want_ptq=$ptq_state"
     echo "cache=${cache_action:-kept}"
     # What the PREVIOUS launch asked for, straight off the stamp. Without it
     # the page would compare this launch's intent against last launch's result
@@ -165,6 +274,7 @@ jnum() { grep -o "\"$1\": *[0-9]*" "$LAST_RUN" 2>/dev/null | grep -o '[0-9]*$' |
         echo "last_resolve=$(jnum resolve)"
         echo "last_shadow=$(jnum shadow)"
         echo "last_raygen=$(jnum raygen)"
+        echo "last_refl=$(jnum refl)"
         echo "last_gi=$(jnum gi)"
         echo "last_failed=$(jnum failed)"
     elif [[ -f "$LOADED" ]]; then

@@ -79,12 +79,42 @@ def find_shadow_traces(mod):
     return out
 
 
-def process(path, outdir, do_rt=True):
+def tmin_of(mod, tok):
+    """The literal value of a trace's tMin operand, or None if computed."""
+    m = re.match(r'%float_(\d+)$', tok)
+    if m:
+        return float(m.group(1))
+    _, d = mod.find_def(tok)
+    m = re.match(r'OpConstant %float (\S+)\s*$', d or '')
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None          # hex-float / exponent forms: treat as non-zero
+
+
+def process(path, outdir, opts, do_rt=True):
     target_env = detect_target_env(path) or 'spv1.4'
     mod, _ = load_lenient(path)
     if not mod.ident:
         die(f"{mod.name}: no dxil identity in OpString")
     traces = find_shadow_traces(mod)
+    # Site classes. The 20 sites in the rgs_shadow_main family split cleanly in
+    # two: 17 are bounded (tMin 1e-6, tMax = distance to the light) and 3 are
+    # unbounded with tMin exactly 0 -- the directional/sun rays. Those three are
+    # the acne risk: with no bias at all, back-face culling IS the game's
+    # self-intersection guard, so unculling them lets a surface shadow itself at
+    # t~=0. That is the standard mechanism for the flat-prop flicker.
+    if opts.tmin_sites != 'all':
+        keep = []
+        for line, flg, val in traces:
+            toks = mod.lines[line].split()
+            t = tmin_of(mod, toks[toks.index('OpTraceRayKHR') + 8])
+            zero = (t == 0.0)
+            if (opts.tmin_sites == 'zero') == zero:
+                keep.append((line, flg, val))
+        traces = keep
     if not traces:
         die(f"{mod.name}: no back-face-culling shadow ray found")
     if do_rt:
@@ -92,6 +122,7 @@ def process(path, outdir, do_rt=True):
 
     consts, changed = [], []
     newids = {}
+    bias_id = [None]
     for line, flg, val in traces:
         nv = val & ~CULL_BACK
         if nv not in newids:
@@ -103,8 +134,22 @@ def process(path, outdir, do_rt=True):
         toks = mod.lines[line].split()
         idx = toks.index('OpTraceRayKHR') + 2
         toks[idx] = newids[nv]
+        rec = {"line": line + 1, "from": val, "to": nv}
+        # Replace the culling guard we just removed with a real ray bias, for
+        # the zero-tMin sites only. A bounded ray already has 1e-6 and is left
+        # alone; rewriting it would change nothing and risk the light-distance
+        # relationship.
+        if opts.set_zero_tmin is not None:
+            ti = toks.index('OpTraceRayKHR') + 8
+            if tmin_of(mod, toks[ti]) == 0.0:
+                if bias_id[0] is None:
+                    bias_id[0] = mod.new_id()
+                    consts.append(f"    {bias_id[0]} = OpConstant %float "
+                                  f"{opts.set_zero_tmin!r}")
+                toks[ti] = bias_id[0]
+                rec["tmin"] = opts.set_zero_tmin
         mod.lines[line] = '               ' + ' '.join(toks)
-        changed.append({"line": line + 1, "from": val, "to": nv})
+        changed.append(rec)
 
     apply_edits(mod, consts, [])
     os.makedirs(outdir, exist_ok=True)
@@ -133,8 +178,17 @@ def main():
     ap.add_argument('modules', nargs='+')
     ap.add_argument('--outdir', required=True)
     ap.add_argument('--no-roundtrip-check', action='store_true')
+    ap.add_argument('--tmin-sites', choices=('all', 'zero', 'nonzero'),
+                    default='all',
+                    help="which sites to patch by their tMin: 'zero' = only the "
+                         "unbounded directional rays (tMin exactly 0), "
+                         "'nonzero' = only the bounded ones. Default all.")
+    ap.add_argument('--set-zero-tmin', type=float, default=None, metavar='T',
+                    help='rewrite tMin on the zero-tMin sites to T metres, to '
+                         'replace the self-intersection guard that clearing '
+                         'CullBackFacingTriangles removes.')
     a = ap.parse_args()
-    print(json.dumps([process(p, a.outdir, do_rt=not a.no_roundtrip_check)
+    print(json.dumps([process(p, a.outdir, a, do_rt=not a.no_roundtrip_check)
                       for p in a.modules], indent=1))
 
 

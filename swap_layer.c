@@ -257,7 +257,11 @@ static uint32_t *load_swap_from(const char *dir, const char *name,
  * swapdir_init has filled g_layerdir. */
 static void overlay_init(void) {
     const char *list = getenv("CALLISTO_OVERLAYS");
-    if (!list || !*list) list = "hair,shadowcull";
+    /* ptq carries the path-tracing quality matrix that sync_settings.sh
+     * materializes per launch; it must precede the base swaps/ dir (all
+     * overlays do) so its reference raygens win over the skinray copies
+     * there -- which is why the matrix also ships skin-based variants. */
+    if (!list || !*list) list = "hair,shadowcull,ptq,ptrefl";
     const char *base = g_layerdir[0] ? g_layerdir : ".";
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", list);
@@ -299,7 +303,7 @@ static void overlay_init(void) {
 static pthread_mutex_t g_status_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_statuspath[4608];
 static struct {
-    unsigned resolve, shadow, raygen, gi, other, failed;
+    unsigned resolve, shadow, raygen, refl, gi, other, failed;
 } g_hits;
 
 static void status_init(void) {
@@ -349,12 +353,12 @@ static void status_write(void) {
         "  \"overlays\": [%s],\n"
         "  \"passthrough\": %s,\n"
         "  \"hits\": { \"resolve\": %u, \"shadow\": %u, \"raygen\": %u,"
-        " \"gi\": %u, \"other\": %u, \"failed\": %u }\n"
+        " \"refl\": %u, \"gi\": %u, \"other\": %u, \"failed\": %u }\n"
         "}\n",
         (int)getpid(), (unsigned long long)g_seq, g_swapdir, ovl,
         g_disabled ? "true" : "false",
-        g_hits.resolve, g_hits.shadow, g_hits.raygen, g_hits.gi,
-        g_hits.other, g_hits.failed);
+        g_hits.resolve, g_hits.shadow, g_hits.raygen, g_hits.refl,
+        g_hits.gi, g_hits.other, g_hits.failed);
     pthread_mutex_unlock(&g_status_mu);
     fclose(f);
     if (rename(tmp, g_statuspath) != 0) remove(tmp);
@@ -369,6 +373,10 @@ static void status_hit(const char *id, int ok) {
     else if (strstr(id, ".dxil")) g_hits.resolve++;
     else if (strstr(id, "rgs_shadow_main")) g_hits.shadow++;
     else if (strstr(id, "rgs_reference_main")) g_hits.raygen++;
+    /* The reflection raygens get their own bucket: they are the only thing in
+     * the ptrefl overlay, so "did ptrefl do anything" has to be answerable
+     * without reading the jsonl. Lumped into `other` it was unanswerable. */
+    else if (strstr(id, "rgs_reflection")) g_hits.refl++;
     else if (strstr(id, "rgs_restirgi")) g_hits.gi++;
     else g_hits.other++;
     pthread_mutex_unlock(&g_status_mu);

@@ -1,34 +1,194 @@
--- CallistoSSS settings (CET mod) -- release build.
--- The release exposes only the SSS kernel toggle: the Callisto BRDF shader
--- swaps ship pre-built at tuned defaults and need no settings. CET sandboxes
--- each mod's file I/O to its own folder, so brdf_params.txt lives next to
--- this file; sync_settings.sh (in red4ext/plugins/CallistoSSS, run via the
--- Steam launch options shown by install.sh) reads it and syncs kernel=on/off
--- to the RED4ext plugin's disable.flag. Applies on the NEXT GAME LAUNCH.
+-- CallistoSSS settings (CET mod). CET sandboxes each mod's file I/O to its
+-- own folder, so every file this mod touches lives here under a plain relative
+-- name.
+--
+-- OUT: brdf_params.txt -- what the user asked for. sync_settings.sh (host
+--      side, run before each launch by the Steam launch options) reads it,
+--      materializes the swap/flag state from it, and evicts the pipeline
+--      caches if it changed. Everything in this tab applies NEXT LAUNCH.
+-- IN:  status.txt -- what actually happened. The swap layer records its real
+--      hit counts, sync_settings.sh copies them in here at the next launch.
+--      Rendered at the top of the tab, because a switch position is a request
+--      and was never evidence of anything (handoff/09-SETTINGS-AUDIT.md, I6).
 local PARAMS = "brdf_params.txt"
+local STATUS = "status.txt"
 
-local settings = { kernel = "on" }
+local brdf = { tier = "1", kernel = "on", hair = "on", skinray = "on", shadowcull = "on",
+               -- Path tracing (handoff/23 tier 1). ptreg is the only one that
+               -- trades look for noise, so it is the only one defaulting off.
+               shadowset = "full-shadow",
+               ptreg = "off", ptclamp = "on", ptbounce = "on", ptrefl = "on",
+               rho_f = 1.35, rho_r = 1.25,
+               n_f = 0.75, m_f = 0.75, n_r = 0.75, m_r = 0.75 }
+
+-- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
+-- switch means adding one word, not editing a chain of `or` comparisons.
+local SWITCHES = { "tier", "kernel", "hair", "skinray", "shadowcull",
+                   "shadowset",
+                   "ptreg", "ptclamp", "ptbounce", "ptrefl" }
+local isSwitch = {}
+for _, k in ipairs(SWITCHES) do isSwitch[k] = true end
+
+-- Which build of the shadow-leak fix is served. Every entry patches the same
+-- 18 modules and differs only in the edit, so switching between two of them
+-- attributes cleanly. The ids must match dev/build_shadow_sets.sh's VARIANTS
+-- and the dirs dev/install_shadow_sets.sh parks in shadowcull.set/.
+--
+-- `full` is first and is the default because it is the one build that
+-- demonstrably closes the hairline seam; everything after it is a live
+-- experiment (handoff/25-SHADOW-FLICKER.md §9).
+local SHADOW_SETS = {
+    { id = "full-shadow", label = "Direct shadow rays (recommended)" },
+    { id = "full",        label = "Direct + GI rays (more flicker)" },
+}
+local SHADOW_LABELS, SHADOW_INDEX = {}, {}
+for i, e in ipairs(SHADOW_SETS) do
+    SHADOW_LABELS[i] = e.label
+    SHADOW_INDEX[e.id] = i
+end
 
 local function loadParams()
     local f = io.open(PARAMS, "r")
     if not f then return end
     for line in f:lines() do
-        -- NB: %w excludes '_'; keep the explicit class for future keys.
+        -- NB: %w excludes '_', so rho_f/n_f/... need the explicit class here;
+        -- without it every numeric knob silently failed to load and the
+        -- defaults were written straight back over the file on launch.
         local k, v = line:match("^([%w_]+)=([%w%.%-]+)")
-        if k == "kernel" then settings.kernel = v end
+        if isSwitch[k] then brdf[k] = v
+        elseif k and brdf[k] then brdf[k] = tonumber(v) or brdf[k] end
     end
     f:close()
+    -- A params file left over from the bisect can name a set that no longer
+    -- exists. sync_settings.sh already falls back, but normalise here too so
+    -- the selector does not silently disagree with what is being served.
+    if not SHADOW_INDEX[brdf.shadowset] then brdf.shadowset = SHADOW_SETS[1].id end
 end
 
 local function saveParams()
     local f = io.open(PARAMS, "w")
     if not f then print("[CallistoSSS] cannot write brdf_params.txt") return end
-    f:write("kernel=" .. settings.kernel .. "\n")
+    for _, k in ipairs(SWITCHES) do f:write(k .. "=" .. brdf[k] .. "\n") end
+    for _, k in ipairs({"rho_f", "rho_r", "n_f", "m_f", "n_r", "m_r"}) do
+        f:write(string.format("%s=%.3f\n", k, brdf[k]))
+    end
     f:close()
+end
+
+-- Engine hair BRDF panel (live CVars, not shader swaps). Loaded defensively:
+-- if the file is missing or CET's require differs, the rest of the tab still
+-- registers.
+local hairEngine
+do
+    local ok, m = pcall(require, "hair_engine")
+    if not ok then ok, m = pcall(dofile, "hair_engine.lua") end
+    if ok and type(m) == "table" then hairEngine = m
+    else print("[CallistoSSS] hair_engine.lua not loaded: " .. tostring(m)) end
+end
+
+local status, haveStatus = {}, false
+
+local function loadStatus()
+    local f = io.open(STATUS, "r")
+    if not f then return false end
+    for line in f:lines() do
+        -- values stay [alnum . - + _] so this stays a one-line pattern
+        local k, v = line:match("^([%w_]+)=([%w%.%-%+]*)")
+        if k then status[k] = v end
+    end
+    f:close()
+    return true
+end
+
+local function num(k) return tonumber(status[k] or "") or 0 end
+
+-- The headline. Deliberately says "last launch": this launch's totals do not
+-- exist yet, and claiming otherwise is the exact failure this file is fixing.
+local function statusLine()
+    if not haveStatus then
+        return "Last launch: no record -- launch once via the launch options"
+    end
+    if status.last_layer == "unknown" then
+        return "Last launch: no record yet -- relaunch once to populate this"
+    end
+    if status.last_layer == "loaded_noswap" then
+        return "Last launch: layer loaded but swapped NOTHING -- check the "
+            .. "swap files are installed"
+    end
+    if status.last_layer ~= "loaded" then
+        return "Last launch: LAYER DID NOT LOAD -- no shader swap took effect"
+    end
+    return string.format(
+        "Last launch: %s | resolve %d, shadow %d, raygen %d, refl %d, GI %d "
+        .. "| caches %s",
+        status.last_overlays or "none", num("last_resolve"), num("last_shadow"),
+        num("last_raygen"), num("last_refl"), num("last_gi"), status.cache or "?")
+end
+
+-- Compare last launch's INTENT against last launch's RESULT. Comparing against
+-- the current switch positions would cry wolf every time one was just flipped.
+local function warnLine()
+    if not haveStatus or status.last_layer ~= "loaded" then return nil end
+    if num("last_failed") > 0 then
+        return string.format("WARNING: %d swap(s) failed to create last launch",
+                             num("last_failed"))
+    end
+    if status.last_want_hair == "on" and num("last_resolve") == 0 then
+        return "WARNING: hair BRDF was on last launch but 0 compute-resolve "
+            .. "swaps applied -- every visible effect lives there. Usually a "
+            .. "stale pipeline cache: relaunch, or add CALLISTO_FORCE_CLEAR=1."
+    end
+    if status.last_want_shadowcull == "on" and num("last_shadow") == 0 then
+        return "WARNING: shadow leak fix was on last launch but 0 shadow "
+            .. "swaps applied."
+    end
+    -- "fixed" means sync_settings.sh found no parked sets, so the switch
+    -- below the fix did nothing -- a silent no-op the page must not hide.
+    if status.last_want_shadowcull == "on" and status.last_want_shadowset == "fixed" then
+        return "NOTE: the shadow-ray build selector is inert -- no shadow sets "
+            .. "are installed. Run dev/install_shadow_sets.sh to enable it."
+    end
+    -- The request and what was actually served differ only when the named set
+    -- is not parked; sync_settings.sh falls back to `full` and says so on the
+    -- terminal, but only here does the person who moved the selector find out.
+    -- Both keys describe THIS launch: the set is materialized before the game
+    -- starts, so unlike the hit counts they do not lag by one run.
+    local req = status.want_shadowset_req
+    if req and status.want_shadowset ~= "fixed" and status.want_shadowset ~= req then
+        return string.format("NOTE: shadow build '%s' is not installed -- this "
+            .. "launch is running '%s'. Build it with dev/build_shadow_sets.sh.",
+            req, tostring(status.want_shadowset))
+    end
+    -- The selector disagreeing with the frame at session START means the sync
+    -- never ran for this launch -- the game was started outside the Steam
+    -- launch options. Cost a whole session once: the menu read "Uncull
+    -- everything" while m112 was in the pipeline (`25` §9).
+    if status.want_shadowset and status.want_shadowset ~= "fixed"
+       and brdf.shadowset ~= status.want_shadowset then
+        return string.format("WARNING: this session is running shadow build "
+            .. "'%s', but the selector says '%s'. The launch did not go through "
+            .. "the Steam launch options, so sync_settings.sh never ran.",
+            tostring(status.want_shadowset), tostring(brdf.shadowset))
+    end
+    -- last_want_ptq is the MATERIALIZED combo ("rcb+skin"), not a request, so
+    -- "not off" here means sync_settings.sh really did fill the overlay.
+    local ptq = status.last_want_ptq
+    if ptq and ptq ~= "off" and num("last_raygen") == 0 then
+        return "WARNING: path-tracing quality (" .. ptq .. ") was live last "
+            .. "launch but 0 raygen swaps applied -- the path tracer may not "
+            .. "have run at all (RT: Overdrive off?)."
+    end
+    if status.last_want_ptrefl == "on" and num("last_refl") == 0 then
+        return "NOTE: reflection bounce mask was on last launch but 0 "
+            .. "reflection raygen swaps applied -- standalone RT reflections "
+            .. "are not used in every render mode."
+    end
+    return nil
 end
 
 registerForEvent("onInit", function()
     loadParams()
+    haveStatus = loadStatus()
     saveParams() -- ensure the file exists with current values
     local nativeSettings = GetMod("nativeSettings")
     if not nativeSettings then
@@ -36,10 +196,152 @@ registerForEvent("onInit", function()
         return
     end
     nativeSettings.addTab("/callistoSSS", "Callisto SSS")
+    -- Status first, so the first thing read is what happened, not what was
+    -- asked for. Subcategory headers are the only plain-text surface
+    -- nativeSettings offers, so the status rides in their labels.
+    nativeSettings.addSubcategory("/callistoSSS/status", statusLine())
+    -- Written once, not refreshed as switches move: nativeSettings has no label
+    -- setter, and its removeSubcategory nils a slot in data[tab].keys instead of
+    -- table.remove-ing it, so a remove/re-add cycle leaves a hole that the next
+    -- indexed table.insert silently corrupts. The live signal is the running set
+    -- in the selector's own label below, which needs no rebuild to stay true.
+    local warn = warnLine()
+    if warn then nativeSettings.addSubcategory("/callistoSSS/warn", warn) end
     nativeSettings.addSubcategory("/callistoSSS/main", "Skin subsurface scattering")
-    nativeSettings.addSwitch("/callistoSSS/main", "Callisto skin kernel",
+    nativeSettings.addSwitch("/callistoSSS/main", "Callisto skin kernel (next launch)",
         "Replace the engine's SSS diffusion kernel with the Callisto-reshaped one. "
         .. "Applies on next game launch.",
-        settings.kernel ~= "off", true,
-        function(state) settings.kernel = state and "on" or "off" saveParams() end)
+        brdf.kernel ~= "off", true,
+        function(state) brdf.kernel = state and "on" or "off" saveParams() end)
+    local function slider(label, desc, key, min, max, dflt)
+        nativeSettings.addRangeFloat("/callistoSSS/brdf", label,
+            desc .. " INERT: nothing reads this value. It is consumed by "
+                 .. "regen_and_clear.sh, which is not in the Steam launch "
+                 .. "options; sync_settings.sh does not parse it. Moving this "
+                 .. "changes nothing, now or after a relaunch.",
+            min, max, 0.05, "%.2f", brdf[key], dflt,
+            function(v) brdf[key] = v saveParams() end)
+    end
+    nativeSettings.addSubcategory("/callistoSSS/hair", "Hair")
+    nativeSettings.addSwitch("/callistoSSS/hair", "Callisto hair BRDF (next launch)",
+        "The full hair specular package: strand-anisotropic (Kajiya-Kay) "
+        .. "highlight, a shifted dual-lobe (sharp white R + wide tinted TRT "
+        .. "glint), roughness reshape, grazing sheen and diffuse wrap. The "
+        .. "strand direction is estimated per pixel from the normal buffer. "
+        .. "Off restores vanilla hair. Applies on next launch."
+        .. string.format(" [last launch: %d compute-resolve swaps applied]",
+                         num("last_resolve")),
+        brdf.hair ~= "off", true,
+        function(state) brdf.hair = state and "on" or "off" saveParams() end)
+    nativeSettings.addSwitch("/callistoSSS/hair", "Hair shadow leak fix (next launch)",
+        "Stop shadow rays from culling back-facing triangles, so thin "
+        .. "double-sided hair cards cast shadows from either side. Closes the "
+        .. "overlit gap at the hairline. Turn off if you see self-shadow "
+        .. "artifacts on other surfaces. Applies on next launch."
+        .. string.format(" [last launch: %d shadow swaps applied]",
+                         num("last_shadow")),
+        brdf.shadowcull ~= "off", true,
+        function(state) brdf.shadowcull = state and "on" or "off" saveParams() end)
+    nativeSettings.addSelectorString("/callistoSSS/hair",
+        -- The running set goes in the LABEL: a tooltip you have to hover is
+        -- not where you look when the picture is wrong.
+        string.format("Shadow-ray build [running: %s]",
+                      status.want_shadowset or "?"),
+        "Moving this changes NOTHING until you relaunch through Steam -- "
+        .. "reloading a save keeps the build named in the label above, because "
+        .. "the shaders were compiled at startup.\n"
+        .. "WHICH rays the fix above applies to. Both drop back-face culling "
+        .. "so hair casts a shadow from either side; they differ only in "
+        .. "reach.\n"
+        .. "\"Direct shadow rays\" is the recommended build: it closes the "
+        .. "hairline seam and is the cheaper of the two. Some flat props "
+        .. "still flash for a frame during LOD transitions.\n"
+        .. "\"Direct + GI rays\" also unculls the bounce-lighting rays. It "
+        .. "closes the same seam but flickers noticeably more, so pick it "
+        .. "only if you see a difference the first option misses.\n"
+        .. "Neither costs an extra ray. Needs the switch above ON. "
+        .. "Applies on next launch."
+        -- "running now", not "last launch": sync_settings.sh materializes the
+        -- set before the game starts, so this one is not a lagging report.
+        .. string.format(" [running now: %s]",
+                         status.want_shadowset or "unknown"),
+        SHADOW_LABELS, SHADOW_INDEX[brdf.shadowset] or 1, 1,
+        function(i)
+            brdf.shadowset = (SHADOW_SETS[i] or SHADOW_SETS[1]).id
+            saveParams()
+        end)
+    nativeSettings.addSwitch("/callistoSSS/hair", "Callisto skin raygen sampling (next launch)",
+        "Restore the original tier-1 raygen build (sampling-side skin BRDF). "
+        .. "Applies on next launch.",
+        brdf.skinray ~= "off", true,
+        function(state) brdf.skinray = state and "on" or "off" saveParams() end)
+    -- Path tracing. All four apply to the RT raygens, so they only do
+    -- anything in a path-traced render mode; the warning line above says so
+    -- when last launch swapped none.
+    nativeSettings.addSubcategory("/callistoSSS/pt",
+        "Path tracing (RT Overdrive)")
+    nativeSettings.addSwitch("/callistoSSS/pt", "Bounce rays see hair (next launch)",
+        "Bounce rays are traced with cull mask 1, which skips whole instance "
+        .. "classes the primary ray hits -- hair among them. Widening it to "
+        .. "255 lets indirect light actually bounce off hair (and off "
+        .. "everything else the mask was hiding), so hair picks up colour "
+        .. "from its surroundings and casts light back into the scene. Also "
+        .. "the honest failure mode: a wider mask can let bounce rays hit "
+        .. "proxy geometry the mask was there to hide. Applies on next launch."
+        .. string.format(" [last launch: %d raygen swaps applied]",
+                         num("last_raygen")),
+        brdf.ptbounce ~= "off", true,
+        function(state) brdf.ptbounce = state and "on" or "off" saveParams() end)
+    nativeSettings.addSwitch("/callistoSSS/pt", "Bounce rays see hair (reflections) (next launch)",
+        "The same cull mask widening on the standalone RT reflection raygens. "
+        .. "Separate switch because those passes are not used in every render "
+        .. "mode, so this one can be inert while the one above works. "
+        .. "Applies on next launch."
+        .. string.format(" [last launch: %d reflection swaps applied]",
+                         num("last_refl")),
+        brdf.ptrefl ~= "off", true,
+        function(state) brdf.ptrefl = state and "on" or "off" saveParams() end)
+    nativeSettings.addSwitch("/callistoSSS/pt", "Firefly clamp (indirect) (next launch)",
+        "Cap what a single indirect path segment may contribute (16 units, "
+        .. "well above any plausible surface and ~64x below where the pass's "
+        .. "own half-float accumulator saturates). Kills the isolated bright "
+        .. "specks a path tracer leaves on hair and wet surfaces. Slightly "
+        .. "darkens genuinely extreme highlights. Applies on next launch.",
+        brdf.ptclamp ~= "off", true,
+        function(state) brdf.ptclamp = state and "on" or "off" saveParams() end)
+    nativeSettings.addSwitch("/callistoSSS/pt", "Path regularization (next launch)",
+        "Force a minimum roughness (0.25) on surfaces reached by a bounce, "
+        .. "never on what you see directly. Standard path-tracer trick "
+        .. "(Blender's Filter Glossy, UE's r.PathTracing.Regularization): "
+        .. "trades a little sharpness in reflections-of-reflections for much "
+        .. "less noise in caustic-ish light. Off by default because it is a "
+        .. "deliberate look change, not just a cleanup. Applies on next launch.",
+        brdf.ptreg ~= "off", true,
+        function(state) brdf.ptreg = state and "on" or "off" saveParams() end)
+    nativeSettings.addSubcategory("/callistoSSS/brdf",
+        "Callisto skin BRDF -- SLIDERS BELOW ARE NOT WIRED UP")
+    nativeSettings.addSwitch("/callistoSSS/brdf", "Callisto BRDF enabled (next launch)",
+        "Off removes the shader swaps entirely on next restart.",
+        brdf.tier ~= "off", true,
+        function(state) brdf.tier = state and "1" or "off" saveParams() end)
+    slider("Diffuse Fresnel strength (rho_f)",
+        "Grazing-angle diffuse boost; 1.0 = off.", "rho_f", 1.0, 2.0, 1.35)
+    slider("Fresnel lobe tightness (n_f)",
+        "Lower = tighter/stronger falloff lobe.", "n_f", 0.3, 1.0, 0.75)
+    slider("Fresnel view exponent (m_f)",
+        "View-angle counterpart of n_f.", "m_f", 0.3, 1.0, 0.75)
+    slider("Retroreflection strength (rho_r)",
+        "Front-lit glow; 1.0 = off.", "rho_r", 1.0, 2.0, 1.25)
+    slider("Retro lobe tightness (n_r)",
+        "Lower = tighter/stronger retro lobe.", "n_r", 0.3, 1.0, 0.75)
+    slider("Retro view exponent (m_r)",
+        "View-angle counterpart of n_r.", "m_r", 0.3, 1.0, 0.75)
+    if hairEngine then
+        local ok, err = pcall(hairEngine.register, nativeSettings)
+        if not ok then print("[CallistoSSS] engine hair panel failed: " .. tostring(err)) end
+    end
+end)
+
+registerForEvent("onUpdate", function(dt)
+    if hairEngine then pcall(hairEngine.onUpdate, dt) end
 end)
