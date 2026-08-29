@@ -82,6 +82,19 @@ says how to avoid re-learning what is already known.
     refraction. The channel you assume is a weight may not be one: that
     buffer's alpha is a depth.
 
+12. **A detector must run before any pass that rewrites uses.** The patchers
+    apply their edits at the very end (`apply_edits`), but `replace_all_uses`
+    rewrites `mod.lines` *immediately* — so between the two, the module names
+    ids whose defining instruction does not exist yet. Any later pass that
+    walks definitions backwards dead-ends there, and dead-ends **silently**:
+    it reports "I could not find my anchor" and emits nothing, which from the
+    chair is identical to the feature not working. Tier-4 hit exactly this —
+    its detector finds the diffuse image write by walking back to a Disney
+    diffuse scalar, and Tier-1's c1 rewrite had already pointed that chain at
+    a pending id (`30` §5). Order every read-only detector ahead of every
+    rewriting emitter, and say why in the code, because the constraint is
+    invisible at the call site.
+
 ## Mechanics
 
 - **Env vars do not reach the game.** Proton/Steam launch layering eats them.

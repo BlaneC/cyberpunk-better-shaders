@@ -32,13 +32,18 @@ INSTALL_DIR="$HOME/.local/lib/callisto"
 # when the two disagree the effect appears to switch itself off on any launch
 # where CET has not yet written brdf_params.txt.
 tier=1 kernel=on skin=on skinray=on shadowcull=on shadowset=full-shadow
+# skintrans (Callisto Tier-4 backlit skin transmission) defaults OFF: it has
+# never been seen on screen, and unlike skinspec it changes light where the
+# engine currently puts none, so it is opt-in until an A/B says otherwise.
 ptreg=off ptclamp=on ptbounce=on ptrefl=on ptmsggx=on skinspec=strong
+skintrans=off
 if [[ -f "$PARAMS" ]]; then
     while IFS='=' read -r k v; do
         v="${v%$'\r'}"
         case "$k" in
             tier|kernel|skin|skinray|shadowcull|shadowset) printf -v "$k" '%s' "$v" ;;
             ptreg|ptclamp|ptbounce|ptrefl|ptmsggx|skinspec) printf -v "$k" '%s' "$v" ;;
+            skintrans) printf -v "$k" '%s' "$v" ;;
         esac
     done < "$PARAMS"
 fi
@@ -86,13 +91,39 @@ fi
 # swaps.skin/ is left untouched and reports skinspec=fixed rather than
 # pretending the request was honoured. An unknown or unbuilt level falls back
 # to off rather than silently serving a different strength than the one named.
+#
+# skintrans -- the Tier-4 backlit transmission ladder (handoff/29). It splices
+# the SAME 84 compute modules as the gloss, so for the same first-file-wins
+# reason it cannot be a second overlay either: the combinations are pre-built
+# by `dev/patch_compute_skin.sh --sets --trans` and parked under the composed
+# name "<skinspec>+t<skintrans>". off/subtle/medium/strong/extreme, where
+# extreme is the diagnostic rung (fires on all lit skin, ignoring geometry --
+# it answers "does the splice reach the screen", not "does it look right").
+#
+# A combination that was never built falls back to the gloss-only set of the
+# same strength, NOT to off: dropping silently to off would change the gloss
+# as well, and the next A/B would be attributing a difference to transmission
+# that was really the gloss moving underneath it.
 skin_set=fixed
 want_skin="$skinspec"
 case "$want_skin" in
     on)  want_skin=strong ;;
     ''|0) want_skin=off ;;
 esac
+want_gloss="$want_skin"
+case "$skintrans" in
+    off|''|0) ;;
+    *) want_skin="$want_skin+t$skintrans" ;;
+esac
 if [[ -d "$INSTALL_DIR/skin.set" ]]; then
+    if [[ ! -d "$INSTALL_DIR/skin.set/$want_skin" \
+          && -d "$INSTALL_DIR/skin.set/$want_gloss" \
+          && "$want_skin" != "$want_gloss" ]]; then
+        echo "[CallistoSSS] skintrans='$skintrans' has no built set for" >&2
+        echo "[CallistoSSS]   skinspec=$want_gloss; using $want_gloss (no" >&2
+        echo "[CallistoSSS]   transmission). Run: ./dev/patch_compute_skin.sh --sets --trans" >&2
+        want_skin="$want_gloss"
+    fi
     if [[ ! -d "$INSTALL_DIR/skin.set/$want_skin" ]]; then
         echo "[CallistoSSS] skinspec='$skinspec' is not a built level; using off" >&2
         want_skin=off
@@ -215,7 +246,7 @@ else
     rm -f "$INSTALL_DIR/ptrefl.disable"
 fi
 
-echo "[CallistoSSS] synced: tier=$tier kernel=$kernel skin=$skin/skinspec=$skin_set skinray=$skinray shadowcull=$shadowcull/$shadow_set"
+echo "[CallistoSSS] synced: tier=$tier kernel=$kernel skin=$skin/skinspec=$skin_set (skintrans=$skintrans) skinray=$skinray shadowcull=$shadowcull/$shadow_set"
 echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce msggx=$ptmsggx) ptrefl=$ptrefl"
 
 # --- pipeline cache gate ---------------------------------------------------
@@ -314,6 +345,7 @@ jnum() { grep -o "\"$1\": *[0-9]*" "$LAST_RUN" 2>/dev/null | grep -o '[0-9]*$' |
     echo "want_shadowset_req=$shadowset"
     echo "want_shadowset=$shadow_set"
     echo "want_skinspec_req=$skinspec"
+    echo "want_skintrans_req=$skintrans"
     echo "want_skinspec=$skin_set"
     echo "want_ptreg=$ptreg"
     echo "want_ptclamp=$ptclamp"

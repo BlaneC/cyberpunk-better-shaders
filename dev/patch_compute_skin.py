@@ -40,13 +40,13 @@ the Fresnel group finder and the Tier-3 splice. The roughness ceiling is the
 one part that was rewritten: it used to compose into the hair pass's alpha
 reshape, and is now standalone (build_skin_alpha_cap).
 """
-import argparse, json, os, re, subprocess, sys, hashlib
+import argparse, itertools, json, os, re, subprocess, sys, hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import patch_skin_brdf as P
 from patch_skin_brdf import (apply_edits, roundtrip_check, die,
                              KNOBS, VANILLA, HUNT_PALETTE, HUNT_DEFAULT)
-from patch_chs_brdf import load_lenient
+from patch_chs_brdf import load_lenient, uses_of
 from patch_shadow_brdf import CFG
 from patch_compute_brdf import find_image_writes, detect_target_env
 
@@ -697,8 +697,857 @@ def build_hunt_writes(mod, cfg, writes, classes):
     return consts, edits, {"legend": legend, "writes": done, "skipped": skipped}
 
 
+# =====================================================================
+# Tier-4: skin transmission (ear/nose backlight).  handoff/29.
+#
+# WHY IT CANNOT GO WHERE THE OTHER SKIN PASSES GO.  c1 and the Tier-3 gloss
+# splice inside the per-light lighting arm.  That whole arm -- in every
+# evaluator inspected -- sits under a runtime gate of the form
+#
+#       %s   = NClamp(cbv.y + shadowMaskTexel, 0, 1)      ; the sun shadow
+#       %g   = (dot(lightCol,lightCol) * %s) > 0
+#       OpBranchConditional %g <lighting> <merge>
+#
+# so when the surface is shadowed the arm does not execute and its outputs
+# phi in as zero.  A backlit ear IS shadowed at the front face -- that is
+# what "the light is behind it" means -- so a transmission term spliced into
+# the arm would be multiplied by zero at exactly the pixels it exists for.
+# That is the single likeliest way this feature ships as a silent no-op and
+# gets written off as "the splice does not work" (the handoff/27 7.5 failure
+# class, one layer deeper).
+#
+# So Tier-4 splices at the LIGHT-GATE MERGE instead: the predecessor of the
+# block holding the diffuse OpImageWrite, which is reached whether or not the
+# light arm ran.  Everything it needs is either defined above the gate (the
+# normal, the view vector, the albedo, the light colour, the shadow scalar,
+# the material class) or re-emitted from the module's own uniform access
+# chain (the light direction, which is loaded inside the gate).
+#
+# It also lands UPSTREAM of the module's own output scale and its NMin
+# clamp, which is what GOTCHAS' "scale before a clamp, never after" asks for
+# -- the term cannot push the fp16 store to inf.
+#
+# THE MATHS (Barre-Brisebois & Bouchard, GDC 2011, "Approximating
+# Translucency" -- the form every shipping engine uses):
+#
+#       H     = normalize(L + N*distortion)
+#       back  = saturate(-dot(V, H)) ^ power
+#       mask  = lerp(1, 1-S,      shadow_w)      ; S = the sun shadow scalar
+#             * lerp(1, blockMask, blocker_w)    ; the engine's light blocker
+#       T     = back * thickness * mask
+#       out_c += lightCol_c * lerp(1, albedo_c, albedo_w) * tint_c * T
+#
+# `mask` is the part that is not in the textbook and is the whole reason this
+# can be more than a uniform wax glow:
+#
+#   (1-S) is "this pixel is in shadow", which is TRUE on a backlit ear and
+#   FALSE on a sunlit forehead -- so it suppresses the term exactly where
+#   the surface is directly lit and the effect would be wrong.
+#
+#   blockMask is the engine's own CharacterLightBlockers term, re-derived
+#   here rather than read (the value the shader computes is inside the gate).
+#   It is nonzero only when the character's own blocker volume says the sun
+#   is on the far side, so it separates "in my own head's shadow" from "in a
+#   building's shadow" -- which no purely local term can do.  Its product
+#   with (1-S) is the closest thing to a thickness signal available without
+#   binding the engine's skin back-depth target (handoff/29 A4 route 3).
+#
+# thickness is a build constant.  There is no per-pixel thickness at this
+# site: GBuffer3.w is fully allocated (bit 7 a flag, bit 6 a skin-profile
+# bit, bits 0-5 the light-blocker intensity), which is the skin case of
+# handoff/11 2's "no free channel".
+#
+# IDENTITY: thickness = 0 emits nothing at all, so a Tier-4-off build is
+# byte-identical to one built without the pass.
+
+TRANS_CONE = "-0.258819044"      # cos(105 deg): the light-blocker cone
+TRANS_RAMP = "-2.23071027"       # its 1/(1-cos) ramp
+
+
+def _zero_const(tok):
+    return tok in ("%float_0", "%float_n0", "%float_0_0")
+
+
+def _is_const(tok):
+    return tok.startswith("%float_") or tok.startswith("%uint_") or \
+           tok.startswith("%int_")
+
+
+def unwind_output_scrub(mod, cid, max_hops=12):
+    """Unwind one written channel back toward its accumulator.
+
+    Every evaluator ends the same way -- scale, NaN-scrub through a double
+    negation, clamp:
+
+        v = OpFMul acc S ; w = 0-v ; z = NMin(w,0) ; y = 0-z
+        x = NMax(y,0)    ; c = NMin(x, 65000)
+
+    Walks back through NMin/NMax-against-a-constant and FSub-from-zero and
+    stops at the first instruction that is neither.  Written loosely on
+    purpose: the clamp constants differ between permutations, and GOTCHAS 4
+    says to anchor on the mode-independent half of a signature.
+    """
+    cur = cid
+    for _ in range(max_hops):
+        _, d = mod.find_def(cur)
+        if not d:
+            return cur
+        m = re.match(r'OpExtInst %float %\w+ (NMin|NMax) (%\w+) (%\w+)\s*$', d)
+        if m:
+            a, b = m.group(2), m.group(3)
+            if _is_const(a) and not _is_const(b):
+                cur = b; continue
+            if _is_const(b) and not _is_const(a):
+                cur = a; continue
+            return cur
+        m = re.match(r'OpFSub %float (%\w+) (%\w+)\s*$', d)
+        if m and _zero_const(m.group(1)):
+            cur = m.group(2); continue
+        return cur
+    return cur
+
+
+def find_radiance_writes(mod):
+    """Every OpImageWrite whose three colour channels scrub back to a shared
+    accumulator triple.  Returns [dict(line, img, accs, scale)].
+
+    The scale is identified as the operand the three channels' final FMul
+    have in common -- it is the pass's own output multiplier, and being able
+    to name it is what proves the three channels really are one triple and
+    not three unrelated values.
+    """
+    out = []
+    for w in find_image_writes(mod):
+        if not w["comps"]:
+            continue
+        ends = [unwind_output_scrub(mod, c) for c in w["comps"][:3]]
+        defs = [mod.find_def(e)[1] or "" for e in ends]
+        muls = [re.match(r'OpFMul %float (%\w+) (%\w+)\s*$', d) for d in defs]
+        accs, scale = None, None
+        if all(muls):
+            ops = [set(m.groups()) for m in muls]
+            common = ops[0] & ops[1] & ops[2]
+            if len(common) == 1:
+                scale = next(iter(common))
+                accs = [next(iter(o - {scale})) for o in ops]
+        if accs is None:
+            accs, scale = ends, None
+        out.append(dict(line=w["line"], img=w["img"], accs=accs, scale=scale,
+                        texel_line=w["texel_line"]))
+    return out
+
+
+def _back_reachable(mod, start, targets, max_nodes=4000):
+    """Is any id in `targets` reachable walking definitions backwards?"""
+    seen, stack = set(), list(start)
+    while stack and len(seen) < max_nodes:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        if cur in targets:
+            return True
+        _, d = mod.find_def(cur)
+        if not d or d.startswith("OpImage") or d.startswith("OpLoad"):
+            continue
+        stack += [t for t in re.findall(r'%\w+', d)
+                  if t not in seen and not _is_const(t)]
+    return False
+
+
+def dot_operand_triples(mod, cos_id, unwrap):
+    """From a clamped cosine, recover the two v3 operand component triples.
+
+    `unwrap` walks off the clamp: 'nclamp' for NClamp(x,0,1), 'eps' for the
+    NMin(NMax(x,1e-5),1) pair the NoV sites use.  Returns (a3, b3, dot_id, raw)
+    where raw is the unclamped OpDot result -- the value that still carries
+    the sign, i.e. the one that knows the light is BEHIND the surface.
+    """
+    cur = cos_id
+    for _ in range(3):
+        _, d = mod.find_def(cur)
+        if not d:
+            return None
+        m = re.match(r'OpExtInst %float %\w+ (NClamp|NMin|NMax) (%\w+)', d)
+        if m:
+            cur = m.group(2); continue
+        break
+    _, d = mod.find_def(cur)
+    m = re.match(r'OpDot %float (%\w+) (%\w+)\s*$', d or "")
+    if not m:
+        return None
+    trip = []
+    for cid in m.groups():
+        _, cd = mod.find_def(cid)
+        cm = re.match(r'OpCompositeConstruct %v3float (%\w+) (%\w+) (%\w+)\s*$',
+                      cd or "")
+        if not cm:
+            return None
+        trip.append(tuple(cm.groups()))
+    return trip[0], trip[1], cur
+
+
+def vectors_from_c1_site(mod, site):
+    """N, V and L as component triples, recovered from a c1 site's two dots.
+
+    The site hands back NoL and NoV; each is a clamp over an OpDot over two
+    OpCompositeConstructs.  The triple that appears in BOTH dots is the
+    normal -- comparison is on the component ids, not the composite ids,
+    because dxil-spirv rebuilds the vector at every use.
+    """
+    a = dot_operand_triples(mod, site["nol"], "nclamp")
+    b = dot_operand_triples(mod, site["nov"], "eps")
+    if not a or not b:
+        return None
+    (a0, a1, raw_nol), (b0, b1, _) = a, b
+    for n in (a0, a1):
+        for m in (b0, b1):
+            if n == m:
+                L = a1 if n == a0 else a0
+                V = b1 if m == b0 else b0
+                return dict(N=n, L=L, V=V, raw_nol=raw_nol)
+    return None
+
+
+def _flatten_product(mod, root, max_leaves=64):
+    """Leaves of a chain of OpFMul, multiplicities kept.
+
+    dxil-spirv associates the per-channel diffuse product differently in
+    different permutations -- ((c*a)*NoL)*fd here, (c*a)*(fd*NoL) there, and
+    the shadow folded into the colour in a third.  Matching a fixed nesting
+    is what made the first cut of this detector miss 33 of 84 libs.  The
+    factors themselves are the same set in every permutation, so flatten and
+    compare sets: that is the mode-independent half of the signature
+    (GOTCHAS 4).
+    """
+    out, stack = [], [root]
+    while stack and len(out) < max_leaves:
+        cur = stack.pop()
+        _, d = mod.find_def(cur)
+        m = re.match(r'OpFMul %float (%\w+) (%\w+)\s*$', d or "")
+        if m:
+            stack += list(m.groups())
+        else:
+            out.append(cur)
+    return out
+
+
+def _vec_source(mod, comps, want, max_nodes=1200):
+    """Do these three scalars come from components 0,1,2 of one v4 value?
+
+    `want` is 'uniform' (an OpLoad through an OpAccessChain -- a constant
+    buffer slot) or 'image' (an OpImageFetch/Read/Sample -- a G-buffer
+    texel).  This is both the identification AND the ordering check: leaf i
+    must be component i of the SAME source, so a decomposition that
+    recovered the channels out of order is rejected rather than silently
+    tinting the term wrong.
+
+    Every matching source is collected before deciding, never just the first
+    one reached.  The diffuse albedo is basecolour*(1-metalness), so walking
+    back from its red channel reaches component 0 of the basecolour texel
+    AND component 0 of the metal/roughness texel; stopping at whichever the
+    traversal happened to pop first made this disagree with the green and
+    blue channels and reject a perfectly good albedo.  Intersecting the
+    three channels' candidate sets is what picks the basecolour out.
+
+    Returns the access-chain instruction text for 'uniform' (so the load can
+    be reissued at a splice point) or the source id for 'image'.
+    """
+    per, texts = [], {}
+    for i, c in enumerate(comps):
+        found, seen, stack = set(), set(), [c]
+        while stack and len(seen) < max_nodes:
+            cur = stack.pop()
+            if cur in seen or _is_const(cur):
+                continue
+            seen.add(cur)
+            _, d = mod.find_def(cur)
+            if not d:
+                continue
+            m = re.match(r'OpCompositeExtract %float (%\w+) (\d+)\s*$', d)
+            if m and int(m.group(2)) == i:
+                src = m.group(1)
+                _, sd = mod.find_def(src)
+                sd = sd or ""
+                if want == 'uniform':
+                    lm = re.match(r'OpLoad %v4float (%\w+)\s*$', sd)
+                    if lm:
+                        _, ad = mod.find_def(lm.group(1))
+                        if ad and ad.startswith("OpAccessChain"):
+                            found.add(src)
+                            texts[src] = ad
+                elif sd.startswith("OpImage"):
+                    found.add(src)
+                    texts[src] = src
+            stack += [t for t in re.findall(r'%\w+', d) if t not in seen]
+        if not found:
+            return None
+        per.append(found)
+    shared = per[0] & per[1] & per[2]
+    return texts[sorted(shared)[0]] if len(shared) == 1 else None
+
+
+def _pick_triple(mod, cands, want):
+    """Choose one leaf per channel forming a v4 of the requested kind."""
+    for combo in itertools.product(*cands):
+        if len(set(combo)) != 3:
+            continue
+        src = _vec_source(mod, list(combo), want)
+        if src:
+            return list(combo), src
+    return None, None
+
+
+def _looks_like_shadow(mod, sid):
+    """NClamp(bias + <a texel>, 0, 1) -- the sun shadow mask's signature.
+
+    The bias comes from a constant buffer and the texel from the ray-traced
+    shadow target, so the FAdd of a uniform and an image read under a 0..1
+    clamp is the shape.  Only used to enrich the mask; a module where it is
+    not found still gets a transmission term.
+    """
+    _, d = mod.find_def(sid)
+    m = re.match(r'OpExtInst %float %\w+ NClamp (%\w+) %float_0 %float_1\s*$',
+                 d or "")
+    if not m:
+        return False
+    _, ad = mod.find_def(m.group(1))
+    am = re.match(r'OpFAdd %float (%\w+) (%\w+)\s*$', ad or "")
+    if not am:
+        return False
+    for side in am.groups():
+        seen, stack = set(), [side]
+        while stack and len(seen) < 40:
+            cur = stack.pop()
+            if cur in seen or _is_const(cur):
+                continue
+            seen.add(cur)
+            _, dd = mod.find_def(cur)
+            if not dd:
+                continue
+            if dd.startswith("OpImage"):
+                return True
+            stack += re.findall(r'%\w+', dd)
+    return False
+
+
+def light_terms_from_c1_site(mod, site):
+    """Split the per-channel diffuse product into light colour and albedo.
+
+    The diffuse scalar is used exactly three times, once per channel.  Each
+    use flattens to a set of factors; the intersection of the three is the
+    shared part (NoL, the shadow, the scalar itself) and what is left over
+    is per-channel -- the light colour and the surface albedo.  They are
+    told apart by where they come from rather than by position: the colour
+    is a constant-buffer load, the albedo a G-buffer texel.
+
+    Returns dict(colour, colour_src, albedo, albedo_src, common, shadow).
+    albedo may be None -- some permutations fold it in earlier -- in which
+    case the albedo weight has nothing to apply and is dropped.
+    """
+    uses = [j for j in uses_of(mod, site["scalar"]) if "= OpFMul" in mod.lines[j]]
+    if len(uses) != 3:
+        return None
+    chans = []
+    for j in uses:
+        lhs = re.match(r'\s*(%\w+)\s*=', mod.lines[j]).group(1)
+        chans.append(set(_flatten_product(mod, lhs)))
+    common = chans[0] & chans[1] & chans[2]
+    uniq = [sorted(c - common) for c in chans]
+    if not all(uniq):
+        return None
+    colour, csrc = _pick_triple(mod, uniq, 'uniform')
+    if not colour:
+        return None
+    rest = [[x for x in u if x not in colour] for u in uniq]
+    albedo, asrc = (None, None)
+    if all(rest):
+        albedo, asrc = _pick_triple(mod, rest, 'image')
+    shadow = next((c for c in sorted(common) if _looks_like_shadow(mod, c)), None)
+    return dict(colour=colour, colour_src=csrc, albedo=albedo,
+                albedo_src=asrc, common=sorted(common), shadow=shadow)
+
+
+def uniform_source_of(mod, comps):
+    """The constant-buffer access chain three scalars come from, or None.
+
+    Needed because the light direction is loaded inside the runtime light
+    gate, so its ids do not dominate the splice point -- but the access
+    chain's own operands are a module-scope variable and constants, so
+    reissuing the load anywhere is always legal.
+    """
+    ad = _vec_source(mod, list(comps), 'uniform')
+    return dict(access=ad, load_type='%v4float') if ad else None
+
+
+def find_light_blocker(mod):
+    """The engine's CharacterLightBlockers term, as inputs rather than as a
+    value.
+
+    Shape, from the class-1 arm of the clustered evaluators:
+
+        d = OpDot   blockerDir  L
+        a = OpFAdd  d           +cos(105)
+        r = OpFMul  a           -1/(1-cos(105))
+        k = NClamp  r  0 1                       <- "sun is behind me", 0..1
+        m = OpFMul  k           blockerIntensity <- GBuffer3.w bits 0-5
+        b = OpFSub  1           m                <- what the engine SUBTRACTS
+
+    Anchored on the ramp constant, which is the mode-independent half of the
+    signature (GOTCHAS 4): the direction and intensity ids differ between
+    class arms and permutations, the constant does not.  The value `b` is
+    computed inside the light gate and so does not dominate the splice
+    point -- this returns the INPUTS, for recomputation, not `b`.
+
+    Of the dot's two operands, the light direction is the one that traces
+    back to a uniform load; the blocker direction is the one that does not,
+    because it is decoded from a G-buffer texel.  A module with no light
+    blockers is not an error -- the mask degrades to 1.
+    """
+    ramp = mod.fconst.get(P.f32(float(TRANS_RAMP)))
+    if not ramp:
+        return None
+    for i, ln in enumerate(mod.lines):
+        m = re.match(r'\s*(%\w+)\s*=\s*OpFMul %float (%\w+) '
+                     + re.escape(ramp) + r'\s*$', ln)
+        if not m:
+            continue
+        ramp_id, add_id = m.group(1), m.group(2)
+        _, ad = mod.find_def(add_id)
+        am = re.match(r'OpFAdd %float (%\w+) %\w+\s*$', ad or "")
+        if not am:
+            continue
+        _, dd = mod.find_def(am.group(1))
+        dm = re.match(r'OpDot %float (%\w+) (%\w+)\s*$', dd or "")
+        if not dm:
+            continue
+        trips = []
+        for cid in dm.groups():
+            _, cd = mod.find_def(cid)
+            cm = re.match(r'OpCompositeConstruct %v3float (%\w+) (%\w+) (%\w+)\s*$',
+                          cd or "")
+            trips.append(tuple(cm.groups()) if cm else None)
+        if not all(trips):
+            continue
+        gbuf = [t for t in trips if uniform_source_of(mod, t) is None]
+        if len(gbuf) != 1:
+            continue
+        clamp_id = None
+        for l2 in mod.lines:
+            mm = re.match(r'\s*(%\w+)\s*=\s*OpExtInst %float %\w+ NClamp '
+                          + re.escape(ramp_id) + r' %float_0 %float_1\s*$', l2)
+            if mm:
+                clamp_id = mm.group(1)
+                break
+        if not clamp_id:
+            continue
+        inten = None
+        for l2 in mod.lines:
+            mm = re.match(r'\s*%\w+\s*=\s*OpFMul %float (%\w+) (%\w+)\s*$', l2)
+            if mm and clamp_id in mm.groups():
+                inten = [g for g in mm.groups() if g != clamp_id][0]
+                break
+        if not inten:
+            continue
+        return dict(dir=gbuf[0], intensity=inten, ramp=ramp, add=add_id)
+    return None
+
+
+def _pre_terminator(mod, blk):
+    """The apply_edits position that lands a value just before the branch.
+
+    A block's last instruction is its terminator, but a structured block
+    puts OpSelectionMerge / OpLoopMerge immediately before it, and SPIR-V
+    requires that pair to stay adjacent -- inserting between them is a
+    validation error ("OpSelectionMerge must be the second-to-last
+    instruction in its block"), which is exactly what 47 of the anchored
+    libs did on the first cut of this pass.  apply_edits inserts AFTER the
+    position it is given, so return the line before the first merge.
+    """
+    i = blk["end"]
+    while i - 1 > blk["start"]:
+        head = mod.lines[i - 1].strip().split(' ')[0]
+        if head in ("OpSelectionMerge", "OpLoopMerge"):
+            i -= 1
+            continue
+        break
+    return i - 1
+
+
+def _after_phis(mod, blk, floor_line):
+    """Where a non-phi instruction may first be inserted in a block.
+
+    SPIR-V requires every OpPhi to sit at the top of its block, so a value
+    added into a phi's result has to be defined after ALL of them, not just
+    after the phi it reads (GOTCHAS: "OpPhi must be at block top").  Also
+    respects `floor_line` so the point is never above a definition we need.
+    """
+    i = blk["start"] + 1
+    last = blk["start"]
+    while i < len(mod.lines) and (blk["end"] is None or i < blk["end"]):
+        body = mod.lines[i].split('=', 1)[-1].strip()
+        if body.startswith("OpPhi") or body.startswith("OpLine") or \
+           mod.lines[i].strip().startswith("OpLine"):
+            last = i
+            i += 1
+            continue
+        break
+    return max(last, floor_line)
+
+
+def find_transmission_site(mod, cfg):
+    """Everything Tier-4 needs, or (None, reason).
+
+    Returns the diffuse OpImageWrite, the inputs, and a list of TARGETS --
+    the places the term has to be added so that every path that produces
+    light gets it.  Nothing here emits; the survey and the patcher share the
+    detector so the anchor is written once, which is what makes the sibling
+    sweep (GOTCHAS 3) evidence about the patch rather than about a
+    second, similar-looking piece of code.
+
+    There are two shapes, and getting the difference wrong is how this pass
+    would half-work:
+
+      * The accumulators are OpPhis at the top of the write block.  The
+        write block is then reached both from the lighting path AND from an
+        early-out (failed depth test / sky), and on the early-out the phi
+        operand is a literal zero.  Adding the term inside the write block
+        would light up the sky.  So the term is spliced into each incoming
+        block that actually carries light -- identified as the ones where
+        the G-buffer inputs dominate, which the early-out path by
+        construction does not.
+
+      * The accumulators are ordinary values in the write block.  Then
+        there is one path, and one target: just after the block's phis.
+    """
+    sites, _ = find_c1_sites(mod)
+    if not sites:
+        return None, "no c1 sites"
+    writes = find_radiance_writes(mod)
+    if not writes:
+        return None, "no radiance image writes"
+
+    # Which write is the diffuse one?  The one whose accumulators reach a
+    # Disney diffuse scalar walking backwards.  Naming it this way rather
+    # than by slot index is what keeps the pass off the specular target.
+    scalars = {s["scalar"] for s in sites}
+    diff = [w for w in writes if _back_reachable(mod, w["accs"], scalars)]
+    if not diff:
+        return None, f"no diffuse write among {len(writes)} radiance writes"
+    if len(diff) > 1:
+        return None, f"{len(diff)} writes reach a diffuse scalar -- ambiguous"
+    w = diff[0]
+
+    wb = cfg.block_of(w["line"])
+    if wb is None:
+        return None, "write is in no basic block"
+
+    phi_defs = []
+    for a in w["accs"]:
+        dl, d = mod.find_def(a)
+        phi_defs.append((dl, d or ""))
+    as_phis = all(d.startswith("OpPhi") and cfg.block_of(dl) is wb
+                  for dl, d in phi_defs)
+
+    for site in sites:
+        vec = vectors_from_c1_site(mod, site)
+        if not vec:
+            continue
+        lt = light_terms_from_c1_site(mod, site)
+        if not lt:
+            continue
+        src = uniform_source_of(mod, vec["L"])
+        if not src:
+            continue
+        # Only what the term actually reads must dominate.  The albedo and
+        # the sun-shadow mask are optional enrichments, so a module that
+        # hides either still gets a term -- with that weight dropped rather
+        # than the whole feature skipped.
+        need = list(vec["N"]) + list(vec["V"]) + lt["colour"]
+        opt = dict(albedo=lt["albedo"],
+                   shadow=[lt["shadow"]] if lt["shadow"] else None)
+
+        targets, uncovered = [], []
+        if as_phis:
+            for b in cfg.blocks:
+                if b["end"] is None or b["label"] not in cfg.reachable:
+                    continue
+                if wb["label"] not in (b.get("succ") or []):
+                    continue
+                vals = [_phi_incoming(mod, a, b["label"]) for a in w["accs"]]
+                if not all(vals):
+                    continue
+                if all(cfg.dominates_line(x, b["end"]) for x in need):
+                    targets.append(dict(pred=b["label"],
+                                        line=_pre_terminator(mod, b),
+                                        accs=vals,
+                                        phi_lines=[d[0] for d in phi_defs]))
+                elif any(not _is_const(v) for v in vals):
+                    # A light-carrying edge we cannot reach: worth saying so
+                    # out loud rather than shipping a term that only appears
+                    # on some pixels.
+                    uncovered.append(b["label"])
+        else:
+            floor = max(dl for dl, _ in phi_defs if dl is not None)
+            line = _after_phis(mod, wb, floor)
+            if all(cfg.dominates_line(x, line) for x in need):
+                targets.append(dict(pred=None, line=line, accs=w["accs"]))
+        if not targets:
+            continue
+
+        line0 = targets[0]["line"]
+        have = {k: v for k, v in opt.items()
+                if v and all(cfg.dominates_line(x, t["line"])
+                             for t in targets for x in v)}
+        blk = find_light_blocker(mod)
+        if blk and not all(cfg.dominates_line(x, t["line"])
+                           for t in targets
+                           for x in list(blk["dir"]) + [blk["intensity"]]):
+            blk = None
+        return dict(kind="phi" if as_phis else "write", block=wb["label"],
+                    line=line0, write_line=w["line"], targets=targets,
+                    uncovered=uncovered, vec=vec, light=lt, lsrc=src,
+                    site=site, scale=w["scale"], blocker=blk,
+                    has_albedo="albedo" in have, has_shadow="shadow" in have,
+                    accs=w["accs"]), None
+    return None, "no splice point where the inputs dominate"
+
+
+def _succs(b):
+    """Successor labels, already recorded by build_blocks()."""
+    return b.get("succ") or []
+
+
+def _insert_line(b):
+    """The line to insert a definition at: the block's terminator.
+
+    Inserting BEFORE the terminator puts the new instructions after every
+    OpPhi -- SPIR-V requires phis at block top -- and after every other
+    definition in the block, so anything defined in the block is available.
+    """
+    return b["end"]
+
+
+def _phi_incoming(mod, phi_id, pred_label):
+    """The value an OpPhi takes on the edge from `pred_label`, or None."""
+    _, d = mod.find_def(phi_id)
+    if not d or not d.startswith("OpPhi"):
+        return None
+    pairs = re.findall(r'(%\w+) (%\w+)', d[len("OpPhi %float"):])
+    for val, lab in pairs:
+        if lab == pred_label:
+            return val
+    return None
+
+
+def _rewrite_phi_operand(mod, phi_line, pred_label, old, new):
+    """Point one incoming edge of an OpPhi at a new value.
+
+    Only the (value, label) pair for `pred_label` is touched.  The other
+    edges -- the early-out that phis in a literal zero -- keep theirs, which
+    is what stops the transmission term from being added to the sky.
+    """
+    ln = mod.lines[phi_line]
+    pat = re.compile(r'(\s)' + re.escape(old) + r'(\s+)'
+                     + re.escape(pred_label) + r'(\s|$)')
+    out, n = pat.subn(r'\g<1>' + new + r'\g<2>' + pred_label + r'\g<3>', ln, count=1)
+    if not n:
+        die(f"{mod.name}: phi edge {pred_label} -> {old} not found @line "
+            f"{phi_line + 1}")
+    mod.lines[phi_line] = out
+
+
+def build_skin_transmission(mod, cfg, dom_id, skin_gate, knobs):
+    """Tier-4: add Barre-Brisebois translucency to the skin diffuse.
+
+    See the block comment above TRANS_CONE for why this cannot splice where
+    Tier-1 and Tier-3 do.  Emitted per light-carrying edge into the diffuse
+    write's accumulator phis:
+
+        L    = normalize(cbv sun direction)          ; reissued, see lsrc
+        H    = normalize(L + N * distort)
+        back = saturate(-dot(V, H)) ^ power
+        mask = back * thick
+             * lerp(1, saturate(-dot(N, L)), wback)   ; light is behind me
+             * lerp(1, 1 - shadow,           wshadow) ; and I am in shadow
+             * lerp(1, blockerMask,          wblock)  ; ...my own shadow
+        T_c  = lightColour_c * lerp(1, albedo_c, walbedo) * tint_c * mask
+        acc_c = acc_c * lerp(1, 1 - damp, skin) + select(skin, T_c, 0)
+
+    The lerp weights are build constants, so they are folded here: weight 0
+    drops the factor entirely and weight 1 uses the term directly.  That
+    keeps the emitted code proportional to what is actually switched on, and
+    makes "the knob is off" and "the instruction was never emitted" the same
+    thing rather than two states that can disagree.
+
+    saturate(-dot(N, L)) is recomputed rather than read.  The site's own raw
+    N.L lives inside the light gate and does not dominate the splice point --
+    the whole reason this pass exists is that the gate is closed exactly
+    where the effect belongs.
+    """
+    from patch_skin_brdf import replace_all_uses
+    thick = float(knobs.get('t_thick', 0.0))
+    damp = float(knobs.get('t_damp', 0.0))
+    if thick <= 0.0:
+        return [], [], dict(inactive='t_thick=0 -- nothing emitted')
+    if not any(ln.strip().startswith('%v3float =') or ' %v3float ' in ln
+               for ln in mod.lines):
+        return [], [], dict(skipped='module has no %v3float type')
+
+    site, why = find_transmission_site(mod, cfg)
+    if not site:
+        return [], [], dict(skipped=why)
+    if not cfg.dominates_line(dom_id, site['line']):
+        return [], [], dict(skipped='class value does not dominate the splice')
+
+    gl, consts = mod.glsl, []
+
+    def C(v):
+        i, d = mod.const(v)
+        if d:
+            consts.append(d)
+        return i
+
+    one, zero = C(1.0), C(0.0)
+    eps = C(1e-6)
+    c_thick, c_pow, c_dist = C(thick), C(knobs['t_power']), C(knobs['t_distort'])
+    c_tint = [C(knobs['t_r']), C(knobs['t_g']), C(knobs['t_b'])]
+    c_damp = C(1.0 - damp) if damp > 0.0 else None
+    lt, vec = site['light'], site['vec']
+    blocker = site['blocker']
+    w_back = float(knobs['t_wback'])
+    w_shad = float(knobs['t_wshadow']) if site['has_shadow'] else 0.0
+    w_blk = float(knobs['t_wblock']) if blocker else 0.0
+    w_alb = float(knobs['t_walbedo']) if site['has_albedo'] else 0.0
+
+    def mix1(ins, x, w):
+        """lerp(1, x, w), folded at build time; None means "factor is 1"."""
+        if w <= 0.0:
+            return None
+        if w >= 1.0:
+            return x
+        d, m, r = mod.new_id(), mod.new_id(), mod.new_id()
+        ins += [f"        {d} = OpFSub %float {x} {one}",
+                f"        {m} = OpFMul %float {d} {C(w)}",
+                f"        {r} = OpFAdd %float {one} {m}"]
+        return r
+
+    def mul(ins, acc, f):
+        """Multiply, unless the factor is the identity.
+
+        Same principle as the folded lerp weights: a knob left at its
+        identity value emits no instruction at all, so "the knob is off" and
+        "there is nothing there" cannot end up as two different states.
+        """
+        if f is None or f == one:
+            return acc
+        r = mod.new_id()
+        ins.append(f"        {r} = OpFMul %float {acc} {f}")
+        return r
+
+    edits = []
+    for tgt in site['targets']:
+        I = mod.new_id
+        ac, ld, lx, ly, lz, lv, ln_ = [I() for _ in range(7)]
+        nv, vv, nd, hs, hn, dvh, ndvh, sat = [I() for _ in range(8)]
+        be, lg, pm, bk = [I() for _ in range(4)]
+        ins = [
+            # The sun direction is loaded inside the light gate, so its ids
+            # do not dominate here; the access chain's operands are module
+            # scope, so reissuing the load is always legal.
+            f"        {ac} = {site['lsrc']['access']}",
+            f"        {ld} = OpLoad %v4float {ac}",
+            f"        {lx} = OpCompositeExtract %float {ld} 0",
+            f"        {ly} = OpCompositeExtract %float {ld} 1",
+            f"        {lz} = OpCompositeExtract %float {ld} 2",
+            f"        {lv} = OpCompositeConstruct %v3float {lx} {ly} {lz}",
+            # the constant buffer holds .w = angular size, and the arm
+            # renormalises the xyz itself, so do the same rather than assume
+            f"        {ln_} = OpExtInst %v3float {gl} Normalize {lv}",
+            f"        {nv} = OpCompositeConstruct %v3float "
+            f"{vec['N'][0]} {vec['N'][1]} {vec['N'][2]}",
+            f"        {vv} = OpCompositeConstruct %v3float "
+            f"{vec['V'][0]} {vec['V'][1]} {vec['V'][2]}",
+            f"        {nd} = OpVectorTimesScalar %v3float {nv} {c_dist}",
+            f"        {hs} = OpFAdd %v3float {ln_} {nd}",
+            f"        {hn} = OpExtInst %v3float {gl} Normalize {hs}",
+            f"        {dvh} = OpDot %float {vv} {hn}",
+            f"        {ndvh} = OpFNegate %float {dvh}",
+            f"        {sat} = OpExtInst %float {gl} NClamp {ndvh} {zero} {one}",
+            # pow() as exp2(p*log2(x)) with an eps floor -- the same idiom
+            # Tier-1 uses, and the reason the base is clamped: log2(0) is -inf
+            f"        {be} = OpExtInst %float {gl} NMax {sat} {eps}",
+            f"        {lg} = OpExtInst %float {gl} Log2 {be}",
+            f"        {pm} = OpFMul %float {lg} {c_pow}",
+            f"        {bk} = OpExtInst %float {gl} Exp2 {pm}",
+        ]
+        t = mul(ins, bk, c_thick)
+
+        if w_back > 0.0:
+            rnl, nrl, bf = I(), I(), I()
+            ins += [f"        {rnl} = OpDot %float {nv} {ln_}",
+                    f"        {nrl} = OpFNegate %float {rnl}",
+                    f"        {bf} = OpExtInst %float {gl} NClamp {nrl} "
+                    f"{zero} {one}"]
+            t = mul(ins, t, mix1(ins, bf, w_back))
+
+        if w_shad > 0.0:
+            inv = I()
+            ins.append(f"        {inv} = OpFSub %float {one} {lt['shadow']}")
+            t = mul(ins, t, mix1(ins, inv, w_shad))
+
+        if w_blk > 0.0:
+            bv, bd, ba, br, bc, bm = [I() for _ in range(6)]
+            ins += [
+                f"        {bv} = OpCompositeConstruct %v3float "
+                f"{blocker['dir'][0]} {blocker['dir'][1]} {blocker['dir'][2]}",
+                f"        {bd} = OpDot %float {bv} {ln_}",
+                f"        {ba} = OpFAdd %float {bd} {C(-float(TRANS_CONE))}",
+                f"        {br} = OpFMul %float {ba} {C(float(TRANS_RAMP))}",
+                f"        {bc} = OpExtInst %float {gl} NClamp {br} {zero} {one}",
+                f"        {bm} = OpFMul %float {bc} {blocker['intensity']}",
+            ]
+            t = mul(ins, t, mix1(ins, bm, w_blk))
+
+        for c in range(3):
+            p = I()
+            ins.append(f"        {p} = OpFMul %float {lt['colour'][c]} {t}")
+            if w_alb > 0.0:
+                p = mul(ins, p, mix1(ins, lt['albedo'][c], w_alb))
+            p = mul(ins, p, c_tint[c])
+            g, out = I(), I()
+            ins.append(f"        {g} = OpSelect %float {skin_gate} {p} {zero}"
+                       if skin_gate is not None else
+                       f"        {g} = OpFMul %float {p} {one}")
+            base = tgt['accs'][c]
+            if c_damp is not None and skin_gate is not None:
+                dsel, dmul = I(), I()
+                ins += [f"        {dsel} = OpSelect %float {skin_gate} "
+                        f"{c_damp} {one}",
+                        f"        {dmul} = OpFMul %float {base} {dsel}"]
+                base = dmul
+            ins.append(f"        {out} = OpFAdd %float {base} {g}")
+            if tgt['pred'] is not None:
+                _rewrite_phi_operand(mod, tgt['phi_lines'][c], tgt['pred'],
+                                     tgt['accs'][c], out)
+            else:
+                replace_all_uses(mod, tgt['accs'][c], out, tgt['line'])
+        edits.append((tgt['line'], ins))
+
+    rep = dict(targets=len(site['targets']), block=site['block'],
+               write_line=site['write_line'] + 1,
+               albedo=bool(w_alb), shadow=bool(w_shad),
+               blocker=bool(w_blk), blocker_present=bool(blocker),
+               uncovered=site['uncovered'],
+               params={k: knobs[k] for k in
+                       ('t_thick', 't_power', 't_distort', 't_r', 't_g', 't_b',
+                        't_wback', 't_wshadow', 't_wblock', 't_walbedo',
+                        't_damp')})
+    return consts, edits, rep
+
+
 def process(path, outdir, tier, knobs, hunt_classes, do_rt=True,
-            tint=None, with_skinspec=False):
+            tint=None, with_skinspec=False, with_translucency=False):
     target_env = detect_target_env(path) or 'spv1.3'
     mod, problems = load_lenient(path)
     if not mod.ident:
@@ -732,6 +1581,31 @@ def process(path, outdir, tier, knobs, hunt_classes, do_rt=True,
         # &31-variant modules) so the gate inherits that line's dominance.
         edits = [(ins_line, pre_ins
                   + [f"        {skin_gate} = OpIEqual %bool {shift} {u1}"])]
+
+        # Tier-4 transmission runs FIRST, and the order is load-bearing.
+        #
+        # Its detector identifies the diffuse image write by walking the write
+        # backwards to a Disney diffuse scalar. build_skin_c1() rewrites every
+        # use of that scalar to point at a NEW id whose defining instruction
+        # is still sitting in `edits` and has not been spliced into mod.lines
+        # yet -- so once c1 has run, the backwards walk dead-ends on an id
+        # with no definition and the diffuse write cannot be found. The
+        # failure is silent: the pass reports "no diffuse write" and emits
+        # nothing, which from the chair is indistinguishable from the feature
+        # not working.
+        #
+        # Running it first also protects its own output: the later passes use
+        # replace_all_uses(), which only ever touches mod.lines, and Tier-4's
+        # instructions live in `edits` until apply_edits() splices them in.
+        #
+        # Emission order does not change the dataflow either way -- c1 scales
+        # the diffuse scalar inside the product chain that feeds the
+        # accumulator, and Tier-4 adds to that accumulator afterwards.
+        if with_translucency:
+            cT, eT, rep['translucency'] = build_skin_transmission(
+                mod, cfg, dom_id, skin_gate, knobs)
+            consts += cT
+            edits += eT
 
         c1, e1, rep['diffuse'] = build_skin_c1(mod, cfg, dom_id, skin_gate, knobs)
         consts += c1
@@ -795,6 +1669,13 @@ def main():
                          '(alpha_max). Without this flag those knobs are '
                          'forced to identity and nothing is emitted, so the '
                          'build stays byte-exact against a c1-only build.')
+    ap.add_argument('--with-translucency', action='store_true',
+                    help='add the Callisto tier-4 skin transmission: light '
+                         'through thin skin (ears, nose, nostrils) where the '
+                         'sun is behind the surface. Without this flag '
+                         't_thick is forced to 0 and nothing is emitted, so '
+                         'the build stays byte-exact against a build from '
+                         'before the pass existed.')
     ap.add_argument('--outdir', required=True)
     ap.add_argument('--vanilla', action='store_true',
                     help='identity params (regression)')
@@ -807,6 +1688,10 @@ def main():
     a = ap.parse_args()
 
     knobs = dict(VANILLA if a.vanilla else KNOBS)
+    if not a.vanilla and not a.with_translucency:
+        # Same rule as Tier-3: the knob is inert without its flag, so a build
+        # without it is byte-exact against a pre-Tier-4 one.
+        knobs.update(t_thick=0.0, t_damp=0.0)
     if not a.vanilla and not a.with_skinspec:
         # Tier-3 knobs are inert without the flag: force identity so a plain
         # c1 build is byte-exact against a pre-Tier-3 one.
@@ -827,7 +1712,8 @@ def main():
 
     reports = [process(p, a.outdir, a.tier, knobs, hunt,
                        do_rt=not a.no_roundtrip_check,
-                       tint=tint, with_skinspec=a.with_skinspec)
+                       tint=tint, with_skinspec=a.with_skinspec,
+                       with_translucency=a.with_translucency)
                for p in a.modules]
     print(json.dumps(reports, indent=1))
 

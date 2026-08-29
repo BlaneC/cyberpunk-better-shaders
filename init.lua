@@ -28,13 +28,18 @@ local brdf = { tier = "1", kernel = "on", skin = "on", skinray = "on", shadowcul
                -- not produce this look at all (`27` §4), so this is the only
                -- route to it and it has never been observed.
                skinspec = "strong",
+               -- Callisto Tier-4 backlit skin transmission (handoff/29).
+               -- Off until it has been seen on screen: unlike the gloss it
+               -- ADDS light where the engine currently puts none, so the
+               -- ledger rule (handoff/19, /28) says it stays opt-in.
+               skintrans = "off",
                rho_f = 1.35, rho_r = 1.25,
                n_f = 0.75, m_f = 0.75, n_r = 0.75, m_r = 0.75 }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
 local SWITCHES = { "tier", "kernel", "skin", "skinray", "shadowcull",
-                   "shadowset", "skinspec",
+                   "shadowset", "skinspec", "skintrans",
                    "ptreg", "ptclamp", "ptbounce", "ptrefl", "ptmsggx" }
 local isSwitch = {}
 for _, k in ipairs(SWITCHES) do isSwitch[k] = true end
@@ -64,6 +69,26 @@ local SKIN_LABELS, SKIN_INDEX = {}, {}
 for i, e in ipairs(SKIN_LEVELS) do
     SKIN_LABELS[i] = e.label
     SKIN_INDEX[e.id] = i
+end
+
+-- How much light comes through thin skin from behind. Same baked-constant
+-- problem as the gloss, so the same answer: a ladder of pre-built sets, not a
+-- slider. The ids must match dev/patch_compute_skin.sh's TLEVELS, and the
+-- dirs it parks are named "<skinspec>+t<skintrans>" -- the two ladders splice
+-- the same modules, so the combinations have to be built, not composed at
+-- launch. That is also why picking a transmission level with no built
+-- combination falls back to the gloss-only set rather than to off.
+local TRANS_LEVELS = {
+    { id = "off",     label = "Off -- no transmission (A/B control)" },
+    { id = "subtle",  label = "Subtle -- a hint at the silhouette" },
+    { id = "medium",  label = "Medium -- ears read warm against the sun" },
+    { id = "strong",  label = "Strong -- the whole backlit side glows" },
+    { id = "extreme", label = "Extreme -- diagnostic, ignores geometry" },
+}
+local TRANS_LABELS, TRANS_INDEX = {}, {}
+for i, e in ipairs(TRANS_LEVELS) do
+    TRANS_LABELS[i] = e.label
+    TRANS_INDEX[e.id] = i
 end
 
 local SHADOW_SETS = {
@@ -97,6 +122,7 @@ local function loadParams()
     -- actually being served.
     if brdf.skinspec == "on" then brdf.skinspec = "strong" end
     if not SKIN_INDEX[brdf.skinspec] then brdf.skinspec = "off" end
+    if not TRANS_INDEX[brdf.skintrans] then brdf.skintrans = "off" end
 end
 
 local function saveParams()
@@ -248,6 +274,20 @@ local function warnLine()
             .. "the Steam launch options, so sync_settings.sh never ran.",
             tostring(status.want_skinspec), tostring(brdf.skinspec))
     end
+    -- Transmission has a third way to be inert that the gloss does not: the
+    -- combination sets only exist if --trans was passed, so a perfectly
+    -- healthy skin.set/ can still have nothing to serve for this switch.
+    if brdf.skintrans ~= "off" and status.want_skinspec ~= nil
+       and status.want_skinspec ~= "fixed"
+       and not string.find(tostring(status.want_skinspec), "+t", 1, true) then
+        return "NOTE: backlit skin transmission is inert -- the combination "
+            .. "sets are not built. Run dev/patch_compute_skin.sh --sets "
+            .. "--trans (it crosses the two ladders)."
+    end
+    if brdf.skintrans ~= "off" and brdf.skin == "off" then
+        return "NOTE: backlit skin transmission is off because the Callisto "
+            .. "skin BRDF is off -- it rides that overlay."
+    end
     return nil
 end
 
@@ -261,6 +301,19 @@ local function skinspecNote()
     end
     return string.format(" [this launch is serving: %s]",
                          tostring(status.want_skinspec))
+end
+
+-- The served name is composed ("strong+tmedium"), so the transmission half
+-- has to be read back out of it rather than reported on its own.
+local function skintransNote()
+    if not haveStatus then return "" end
+    local served = tostring(status.want_skinspec)
+    if status.want_skinspec == "fixed" or status.want_skinspec == nil then
+        return " [INERT: no skin.set/ parked -- run "
+            .. "dev/patch_compute_skin.sh --sets --trans]"
+    end
+    local t = string.match(served, "%+t([%w]+)$")
+    return string.format(" [this launch is serving: %s]", t or "off")
 end
 
 registerForEvent("onInit", function()
@@ -328,6 +381,35 @@ registerForEvent("onInit", function()
         SKIN_LABELS, SKIN_INDEX[brdf.skinspec] or 1, 1,
         function(i)
             brdf.skinspec = (SKIN_LEVELS[i] or SKIN_LEVELS[1]).id
+            saveParams()
+        end)
+    nativeSettings.addSelectorString("/callistoSSS/main",
+        string.format("Backlit skin transmission [running: %s]",
+                      (haveStatus and status.want_skinspec
+                       and string.match(tostring(status.want_skinspec),
+                                        "%+t([%w]+)$")) or "off"),
+        "Light passing THROUGH thin skin: ears, nostrils and the bridge of "
+        .. "the nose go red when the sun is behind the head. The engine has "
+        .. "this -- CharacterSubsurfaceTranslucency and the character light "
+        .. "blockers -- but none of it reaches the path-traced frame, which "
+        .. "is why faces go flat and opaque against a low sun. This adds it "
+        .. "back at the skin diffuse, gated on the skin material class and on "
+        .. "the light actually being behind the surface, so nothing "
+        .. "front-lit and nothing that is not skin changes. "
+        .. "NOT a live slider and cannot be one: the values are compiled into "
+        .. "the shader, so these are pre-built strengths and moving this "
+        .. "changes NOTHING until you relaunch through Steam. "
+        .. "It shares its overlay with the oily/wet skin ladder above, so the "
+        .. "combinations are pre-built: needs "
+        .. "dev/patch_compute_skin.sh --sets --trans, and a combination that "
+        .. "was never built falls back to the gloss alone. "
+        .. "Extreme is a diagnostic, not a look -- it drops the "
+        .. "light-is-behind-me gate so it fires on all lit skin, which "
+        .. "answers whether the splice reaches the screen at all."
+        .. skintransNote(),
+        TRANS_LABELS, TRANS_INDEX[brdf.skintrans] or 1, 1,
+        function(i)
+            brdf.skintrans = (TRANS_LEVELS[i] or TRANS_LEVELS[1]).id
             saveParams()
         end)
     local function slider(label, desc, key, min, max, dflt)

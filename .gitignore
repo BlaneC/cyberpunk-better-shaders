@@ -23,6 +23,10 @@ swaps.skin.subtle/
 swaps.skin.medium/
 swaps.skin.strong/
 swaps.skin.extreme/
+# The transmission ladder crosses the gloss ladder (--sets --trans), so the
+# build dirs are named <gloss>+t<trans>. One glob covers every rung, present
+# and future, which the enumerated names above do not.
+swaps.skin.*/
 swaps.shadowcull/
 swaps.prehunt/
 swaps.huntall/

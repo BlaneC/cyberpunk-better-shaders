@@ -58,7 +58,44 @@ LEVELS=(
     "extreme:n_s=0.90,spec_gain=2.0,alpha_max=0.0200"
 )
 
-TIER=skin; EXTRA=(); SETS=0; SKINSPEC=0
+# --- Tier-4 skin transmission (handoff/29-FACE-TRANSLUCENCY-AND-RAYS.md) -----
+# Light through thin skin: ears, nostrils, the bridge of the nose go red when
+# the sun is behind the head. The engine has a whole raster-side subsystem for
+# this (CharacterSubsurfaceTranslucency + the light blockers) that never
+# reaches the traced path, which is why it is invisible in this game with path
+# tracing on -- see `29` A1 for the evidence.
+#
+# t_thick is the strength; t_power is the view falloff (higher = a tighter rim
+# right at the silhouette, lower = a broader glow across the whole backlit
+# side); t_distort bends the transmission half-vector toward the normal, which
+# is what makes the light appear to spread inside the surface rather than
+# shine straight through it.
+#
+#   level    thick  power  what it is for
+#   subtle    0.25    16   a hint at the silhouette only
+#   medium    0.55    12   the intended look: ears read warm against the sun
+#   strong    1.00     8   pushed; the whole backlit side glows
+#   extreme   2.50     2   DIAGNOSTIC. t_wback=0 drops the "light is behind
+#                          me" gate, so it fires on all lit skin regardless of
+#                          geometry. It answers "does this splice reach the
+#                          screen at all", not "does it look right" -- the
+#                          handoff/27 7.5 question, asked before the aesthetic
+#                          one. Expect it to look wrong.
+#
+# The two mask experiments are NOT rungs, because they are not strengths:
+#   --set t_wshadow=1   also require the pixel to be in sun shadow
+#   --set t_wblock=1    also require the engine's own light blocker to say the
+#                       sun is behind this character (present in 40 of the 84
+#                       anchored libs; dev/survey_translucency.py reports which)
+# Both are forwarded verbatim to every rung, so either is one command.
+TLEVELS=(
+    "subtle:t_thick=0.25,t_power=16.0,t_distort=0.30"
+    "medium:t_thick=0.55,t_power=12.0,t_distort=0.35"
+    "strong:t_thick=1.00,t_power=8.0,t_distort=0.40"
+    "extreme:t_thick=2.50,t_power=2.0,t_distort=0.50,t_wback=0.0"
+)
+
+TIER=skin; EXTRA=(); SETS=0; SKINSPEC=0; TRANS=0
 while (( $# )); do
     case "$1" in
         --hunt) TIER=hunt ;;
@@ -68,11 +105,20 @@ while (( $# )); do
         --set) EXTRA+=(--set "${2:?--set needs K=V}"); shift ;;
         --with-skinspec) SKINSPEC=1 ;;
         --sets) SETS=1 ;;
+        # Cross the gloss ladder with the transmission ladder. Both splice the
+        # same 84 modules and the layer serves the FIRST file it finds for an
+        # id, so they cannot be two overlays -- the combinations have to be
+        # pre-built, exactly as dev/build_ptq.sh does for the four PT splices.
+        # 5x5 sets at ~40s each, so it is opt-in rather than the default.
+        --trans) TRANS=1 ;;
         -*) echo "unknown flag: $1" >&2; exit 2 ;;
         *)  DUMP_DIR="$1" ;;
     esac
     shift
 done
+if (( TRANS && ! SETS )); then
+    echo "--trans needs --sets (it crosses the two ladders)" >&2; exit 2
+fi
 if (( SETS )) && [[ "$TIER" != skin ]]; then
     echo "--sets only applies to the skin tier" >&2; exit 2
 fi
@@ -143,6 +189,13 @@ if (( SETS )); then
     build_into "$MOD_DIR/swaps.skin.off"
     off_n=$BUILT
     BUILT_SETS=(off)
+    prev_gloss=off
+    # PARENT[name] is the set this one must differ from: one step down its own
+    # axis. Comparing every rung only against `off` would pass a ladder whose
+    # top three rungs were identical to each other, which is precisely the
+    # "two rungs are the same build under two names" failure the check exists
+    # to catch.
+    declare -A PARENT=()
     for spec in "${LEVELS[@]}"; do
         lvl="${spec%%:*}"; kv="${spec#*:}"
         setargs=(--with-skinspec)
@@ -150,8 +203,39 @@ if (( SETS )); then
         for one in "${kvs[@]}"; do setargs+=(--set "$one"); done
         echo "--- set '$lvl' (c1 + gloss: $kv) ---"
         build_into "$MOD_DIR/swaps.skin.$lvl" "${setargs[@]}"
+        PARENT[$lvl]="$prev_gloss"
+        prev_gloss="$lvl"
         BUILT_SETS+=("$lvl")
     done
+
+    if (( TRANS )); then
+        # The cross product. Each transmission rung is built on top of EVERY
+        # gloss rung, so moving one selector never silently moves the other --
+        # which is what would happen if transmission could only be had with
+        # the gloss forced off.
+        for gspec in "off:" "${LEVELS[@]}"; do
+            glvl="${gspec%%:*}"; gkv="${gspec#*:}"
+            gargs=()
+            if [[ "$glvl" != off ]]; then
+                gargs=(--with-skinspec)
+                IFS=',' read -ra gkvs <<< "$gkv"
+                for one in "${gkvs[@]}"; do gargs+=(--set "$one"); done
+            fi
+            prev_t="$glvl"
+            for tspec in "${TLEVELS[@]}"; do
+                tlvl="${tspec%%:*}"; tkv="${tspec#*:}"
+                name="$glvl+t$tlvl"
+                targs=("${gargs[@]}" --with-translucency)
+                IFS=',' read -ra tkvs <<< "$tkv"
+                for one in "${tkvs[@]}"; do targs+=(--set "$one"); done
+                echo "--- set '$name' (gloss $glvl + transmission: $tkv) ---"
+                build_into "$MOD_DIR/swaps.skin.$name" "${targs[@]}"
+                PARENT[$name]="$prev_t"
+                prev_t="$name"
+                BUILT_SETS+=("$name")
+            done
+        done
+    fi
 
     # Equal coverage across every set is what makes the ladder attributable: if
     # one level patched a module another did not, moving the selector would also
@@ -170,20 +254,19 @@ if (( SETS )); then
     # two rungs are the same build under two names and the selector would
     # silently compare nothing. This is what catches a knob that turned out not
     # to reach the shader at all.
-    prev=off
     for lvl in "${BUILT_SETS[@]}"; do
         [[ "$lvl" == off ]] && continue
+        prev="${PARENT[$lvl]:-off}"
         d_base=0; d_prev=0
         for f in "$MOD_DIR/swaps.skin.off"/*.spv; do
             b="$(basename "$f")"
             cmp -s "$f" "$MOD_DIR/swaps.skin.$lvl/$b" || d_base=$((d_base+1))
             cmp -s "$MOD_DIR/swaps.skin.$prev/$b" "$MOD_DIR/swaps.skin.$lvl/$b" || d_prev=$((d_prev+1))
         done
-        printf '  %-8s %3d module(s) differ from off, %3d from %s\n' \
+        printf '  %-16s %3d module(s) differ from off, %3d from %s\n' \
                "$lvl" "$d_base" "$d_prev" "$prev"
         (( d_base > 0 )) || { echo "'$lvl' is byte-identical to 'off'" >&2; exit 1; }
         (( d_prev > 0 )) || { echo "'$lvl' is byte-identical to '$prev'" >&2; exit 1; }
-        prev="$lvl"
     done
     SWAPS="$MOD_DIR/swaps.skin.off"      # what lands in swaps.skin/ as the default
 else
@@ -222,7 +305,8 @@ if (( SETS )); then
         cp -pf "$MOD_DIR/swaps.skin.$v"/*.spv "$vd/"
     done
     echo "parked ${#BUILT_SETS[@]} sets -> $INSTALL_DIR/skin.set: ${BUILT_SETS[*]}"
-    echo "  the CET selector 'Oily / wet skin' (skinspec) picks between them"
+    echo "  the CET selectors 'Oily / wet skin' (skinspec) and"
+    echo "  'Backlit skin transmission' (skintrans) pick between them"
 fi
 
 if [[ -f "$INSTALL_DIR/skin.disable" ]]; then
