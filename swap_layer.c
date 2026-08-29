@@ -253,7 +253,7 @@ static uint32_t *load_swap_from(const char *dir, const char *name,
 }
 
 /* Resolve <layerdir>/swaps.<name> and its <layerdir>/<name>.disable flag.
- * Name comes from CALLISTO_OVERLAY (default "hair"). Called once, after
+ * Name comes from CALLISTO_OVERLAYS (default "skin,..."). Called once, after
  * swapdir_init has filled g_layerdir. */
 static void overlay_init(void) {
     const char *list = getenv("CALLISTO_OVERLAYS");
@@ -261,7 +261,12 @@ static void overlay_init(void) {
      * materializes per launch; it must precede the base swaps/ dir (all
      * overlays do) so its reference raygens win over the skinray copies
      * there -- which is why the matrix also ships skin-based variants. */
-    if (!list || !*list) list = "hair,shadowcull,ptq,ptrefl";
+    /* "skin" replaced "hair" on 2026-08-28 when the hair BRDF was removed
+     * (handoff/27 section 8). Deliberately NOT listed alongside it: overlays are
+     * first-file-wins, so a leftover swaps.hair/ from an older install would
+     * shadow the skin modules for the same shader ids and silently serve the
+     * retired build. Dropping the name makes any stale dir inert. */
+    if (!list || !*list) list = "skin,shadowcull,ptq,ptrefl";
     const char *base = g_layerdir[0] ? g_layerdir : ".";
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", list);

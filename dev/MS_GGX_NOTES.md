@@ -1,8 +1,9 @@
 # Upload survey + MS-GGX energy compensation — working notes
 
 Branch `ms-ggx-energy-comp`. Two pieces of work: a generalized texture-upload
-survey (complete), and multi-scatter GGX energy compensation (located, blocked
-on verification — nothing spliced).
+survey (complete), and multi-scatter GGX energy compensation (spliced,
+launched, and **confirmed on screen 2026-08-28** — the feature doc is
+`handoff/28-MS-GGX-ENERGY.md`).
 
 ## 1. Upload survey — DONE
 
@@ -66,7 +67,7 @@ requires the DLL's `CopyTextureRegion` logging.
 No classic split-sum DFG/environment-BRDF LUT appeared, and no texture with an
 obvious blue-noise signature was confirmed. Do not assume either exists.
 
-## 2. MS-GGX energy compensation — located, NOT implemented
+## 2. MS-GGX energy compensation — implemented, launched, confirmed
 
 Goal: recover the energy single-scattering GGX loses at high roughness, via
 `comp = 1 + strength * F0 * (1/E_ss - 1)`, applied to every material (no skin
@@ -231,7 +232,9 @@ darkens below vanilla.
 
 #### Authored 2026-08-28 — `dev/patch_ms_ggx.py`
 
-Built and validated offline; **never launched**. What exists:
+Built 2026-08-28, validated offline, and **launched the same evening —
+confirmed on screen** by a single-variable A/B (one launch with `m` on
+against four with it off; `handoff/28-MS-GGX-ENERGY.md` §6). What exists:
 
 | | |
 |---|---|
@@ -240,7 +243,7 @@ Built and validated offline; **never launched**. What exists:
 | install | `dev/install_ptq.sh` (unchanged mechanism, wider `COMBOS`) |
 | gate | `sync_settings.sh` — `ptmsggx`, combo letter `m` (order `r,c,b,m`) |
 | toggle | CET → Callisto SSS → Path tracing → "Rough-metal energy compensation" |
-| default | **off** — it is a real brightness change, so it ships opt-in |
+| default | **on** — flipped after the on-screen confirmation; shipped initially off pending it |
 
 `m` cannot be its own overlay: it splices the same twelve `rgs_reference_main`
 permutations as T1.1/T1.2/T1.4, and the layer serves the first file it finds
@@ -264,13 +267,15 @@ compensation. Nothing is un-patched.
 Per module: 6 blocks (3 punctual + 3 area), 18 uses rewritten, `spirv-val`
 clean. Cost is ~8 ALU shared per block plus 3 per channel.
 
-**Still open — what a launch has to answer:**
-1. Does it change a pixel at all? Rough metal under direct light is the place
-   to look; smooth surfaces are mathematically untouched.
-2. Is patching the area arm right? Argued from the maths (the fit is
-   alpha-only, so it does not depend on what fills the NoL slot) but **not
-   verified on screen**. `--arms punctual` builds the other half of the A/B.
-3. Does the deliberate exclusion of the grazing error read as inconsistent?
+**Answered by the launch (2026-08-28, `handoff/28-MS-GGX-ENERGY.md` §6):**
+
+1. *Does it change a pixel?* **Yes** — rough metal under direct light visibly
+   gains the predicted energy; smooth surfaces are untouched, as constructed.
+2. *Is patching the area arm right?* The confirmed build patches **both**
+   arms and read correct on screen. Not A/B'd arm-by-arm; `--arms punctual` /
+   `--arms area` rebuild the halves if the split is ever wanted.
+3. *Does the grazing exclusion read as inconsistent?* Nothing to see on
+   screen; the exclusion stands.
 
 #### Splice site (punctual arm)
 

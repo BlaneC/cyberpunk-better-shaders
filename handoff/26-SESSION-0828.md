@@ -20,10 +20,15 @@ the session's ledger and the resume point.
 | `m6`, `m112` | **both regress.** Explained by §3 — not a splice bug. |
 | `m1`, `m118`, `m119` | built, installed, **never launched**. `m1` is staged. |
 | PT tier-1 (`24`) | **NO REGRESSION.** Retracted 2026-08-28: hair is correct with `ptbounce` and `ptrefl` both on. §4.2 was a false alarm. |
+| MS-GGX energy compensation (`23` T2.1) | **launched, CONFIRMED on screen.** Single-variable A/B, §7e. Now default-on. |
 | The six numeric skin-BRDF sliders | **found inert.** Not fixed — see §5. |
 
 Staged for the next launch: `shadowset=m1`, PT held at the last proven-good
 state (`ptreg=on ptclamp=on ptbounce=off ptrefl=off`).
+*(Both staging notes are void: §7d deleted `m1` with the other mask sets —
+`full-shadow` shipped — and §4.3 retracted the "proven-good" PT constraint.
+The §7e launches ran `rcb` with `ptrefl=on`. Defaults now: `ptreg` off;
+`ptclamp`, `ptbounce`, `ptrefl`, `ptmsggx` on.)*
 
 ---
 
@@ -426,6 +431,42 @@ to the pre-prune copies, and two consecutive syncs of the same selection report
   Either fold `regen_and_clear.sh` into `sync_settings.sh` or drop them.
 - **The residual flicker.** Not fixable on the ray-flag axis; needs either the
   second trace to work, or an entirely different lever.
+- **MS-GGX arms A/B** (optional, low priority): the confirmed build patches
+  both GGX arms together; `--arms punctual` / `--arms area` in
+  `dev/patch_ms_ggx.py` rebuild the halves if anyone ever wants the split.
+
+## 7e. Coda: the MS-GGX build launched and confirmed
+
+The session's last build was tier 2's first item — diffuse metal energy
+restoration (`23` T2.1, the commit "Diffuse metal energy restoration"). The
+blocker story, the fit, and the splice mechanics are `dev/MS_GGX_NOTES.md`
+§2's; the feature doc is `28-MS-GGX-ENERGY.md`. What belongs here is the
+launch record, because it is the first A/B run under the §7 discipline
+end-to-end.
+
+Built 18:25–18:26 — `m` joins the ptq matrix, now 15 combos, with
+`patch_ms_ggx.py` chained over the tier-1 output. Then five launches, every
+journalled variable fixed except `m` (`shadowset=full-shadow`,
+`sc_sha=57ef80ee1f72f54a`, `ptrefl=on`, `hair=off`, `tier=1` throughout):
+
+| time | ptq | `m` |
+|---|---|---|
+| 18:39:37 | `rcb+skin` | off |
+| 18:45:10 | `rcb+skin` | off |
+| 18:47:16 | `rcb+skin` | off |
+| **18:50:11** | **`rcbm+skin`** | **on** |
+| 18:59:57 | `rcb+skin` | off |
+
+(An 18:44:47 double sync — `rcb` then `rcbm` in the same second — staged the
+m-combo but no launch consumed it: the swap log holds exactly one complete
+rcbm-sized module set, twelve files at +2152 B each, against four complete
+m-off sets.)
+
+Verdict from screen: **it completely worked** — rough metal visibly gains the
+predicted energy, and reverts exactly with `m` off. The default was flipped
+on afterwards (`init.lua` ×2, `sync_settings.sh`). One variable per launch,
+provenance read back before believing the observation — §7's discipline,
+working.
 
 ## 8. Files touched
 
@@ -439,6 +480,12 @@ to the pre-prune copies, and two consecutive syncs of the same selection report
 | `handoff/25-SHADOW-FLICKER.md` | §8 marked falsified; §9 added (falsification, class-1 hole, variant table, results) |
 | `handoff/24-PT-TIER1.md` | the hair regression, with the per-launch fingerprint table |
 | `handoff/GOTCHAS.md` | 5 entries (see below) |
+| `dev/patch_ms_ggx.py` (new) | the T2.1 energy-compensation splice: both GGX arms, per-channel F0, loud scalar-specular skips |
+| `dev/build_ptq.sh` / `dev/install_ptq.sh` | `m` joins the matrix — 15 combos, MS-GGX chained over the tier-1 output |
+| `dev/fit_ms_ggx.py` | the `E_ss` blocker resolved (wrong arm + doubled NoL); α-only fit against the lobe's own mirror limit |
+| `dev/MS_GGX_NOTES.md` | the working notes: upload survey + the full MS-GGX derivation |
+| `sync_settings.sh` / `init.lua` (+ mirrors) | the `ptmsggx` gate and CET switch; default flipped on after §7e |
+| `handoff/28-MS-GGX-ENERGY.md` | the feature doc, carrying the A/B evidence |
 
 ## 9. Evidence index
 
@@ -447,6 +494,9 @@ to the pre-prune copies, and two consecutive syncs of the same selection report
   record of what was actually in the frame on a given day.** `brdf_params.txt`
   is the *request*, is rewritten by CET during play, and drifted twice this
   session without anyone meaning to.
+- MS-GGX A/B: the 18:39–18:59 lines of `~/callisto_launches.log` and the
+  +2152 B `swaps.ptq` size signatures in `~/callisto_swap.jsonl` (§7e,
+  `28` §6).
 - Mask enumeration: all 28 patched sites across 18 modules, §3.
 - `full` structural check: 4 traces, all `%uint_12`, no added ray, no
   `OpBitwiseAnd` — vanilla is 4× `%uint_28`.

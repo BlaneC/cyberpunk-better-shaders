@@ -20,16 +20,25 @@ KERNEL_FLAG="$PLUGIN_DIR/disable.flag"
 # its swap dirs next to its own .so via dladdr:
 INSTALL_DIR="$HOME/.local/lib/callisto"
 
-# ptreg defaults OFF: unlike the other three it is a deliberate look trade
+# ptreg defaults OFF: unlike the other four it is a deliberate look trade
 # (indirect gloss goes softer in exchange for less noise), so it is opt-in.
-tier=1 kernel=on hair=on skinray=on shadowcull=on shadowset=full-shadow
-ptreg=off ptclamp=on ptbounce=on ptrefl=on ptmsggx=off
+# ptmsggx defaults ON since it was confirmed on screen 2026-08-28 (handoff/28).
+# skinspec (Callisto Tier-3 skin gloss) defaults to 'strong' on explicit
+# request (2026-08-29: "make it very obviously oily to start"). This is NOT a
+# confirmed-on-screen default -- the ledger rule (handoff/19, /28) still
+# applies and it has never been A/B'd -- it is an author's choice that the
+# feature be visible when enabled rather than invisible. Drop to off/subtle
+# here if that turns out wrong. Must stay in step with init.lua's own default:
+# when the two disagree the effect appears to switch itself off on any launch
+# where CET has not yet written brdf_params.txt.
+tier=1 kernel=on skin=on skinray=on shadowcull=on shadowset=full-shadow
+ptreg=off ptclamp=on ptbounce=on ptrefl=on ptmsggx=on skinspec=strong
 if [[ -f "$PARAMS" ]]; then
     while IFS='=' read -r k v; do
         v="${v%$'\r'}"
         case "$k" in
-            tier|kernel|hair|skinray|shadowcull|shadowset) printf -v "$k" '%s' "$v" ;;
-            ptreg|ptclamp|ptbounce|ptrefl|ptmsggx) printf -v "$k" '%s' "$v" ;;
+            tier|kernel|skin|skinray|shadowcull|shadowset) printf -v "$k" '%s' "$v" ;;
+            ptreg|ptclamp|ptbounce|ptrefl|ptmsggx|skinspec) printf -v "$k" '%s' "$v" ;;
         esac
     done < "$PARAMS"
 fi
@@ -43,11 +52,60 @@ else
     rm -f "$KERNEL_FLAG"
 fi
 
-# hair -- the compute-resolve hair overlay (aniso + dual lobe + sheen + wrap).
-if [[ "$hair" == "off" ]]; then
-    echo 1 > "$INSTALL_DIR/hair.disable"
+# skin -- the compute-resolve skin overlay (tier-1 c1, plus the Tier-3 gloss
+# when skinspec selects it). Replaced the `hair` overlay on 2026-08-28 when the
+# hair BRDF was removed: c1 used to ride swaps.skin/, so hair=off silently
+# disabled a shipping, confirmed feature as well as the unconfirmed one.
+if [[ "$skin" == "off" ]]; then
+    echo 1 > "$INSTALL_DIR/skin.disable"
 else
-    rm -f "$INSTALL_DIR/hair.disable"
+    rm -f "$INSTALL_DIR/skin.disable"
+fi
+
+# skinspec -- WHICH build of the skin overlay is served, i.e. how oily. The
+# Tier-3 gloss (handoff/27 Phase 2) is spliced into the same compute-resolve
+# modules as the tier-1 c1, so it cannot be its own overlay -- the layer serves
+# the first file it finds for an id -- and its knobs are OpConstants baked in
+# at build time, so no runtime slider can move them. Strength is therefore a
+# LADDER of pre-built sets, exactly like shadowset below.
+#
+# dev/patch_compute_skin.sh --sets parks them in skin.set/<level>/:
+#
+#   off       tier-1 c1 only -- the gloss-free baseline, and the A/B control
+#   subtle    roughness capped at 0.40 -- a damp sheen, barely past vanilla
+#   medium    0.30 -- clearly wet, still plausible skin
+#   strong    0.21 -- unmistakably oily
+#   extreme   0.14 -- diagnostic. Answers "is the splice working at all",
+#             not "does this look right"; expect it to read as wet plastic.
+#
+# Every set carries an IDENTICAL c1, so moving this changes the gloss and
+# nothing else. `on` is accepted as a legacy alias for `strong` so an existing
+# brdf_params.txt keeps working.
+#
+# Only acts once --sets has been run; an install with a single fixed
+# swaps.skin/ is left untouched and reports skinspec=fixed rather than
+# pretending the request was honoured. An unknown or unbuilt level falls back
+# to off rather than silently serving a different strength than the one named.
+skin_set=fixed
+want_skin="$skinspec"
+case "$want_skin" in
+    on)  want_skin=strong ;;
+    ''|0) want_skin=off ;;
+esac
+if [[ -d "$INSTALL_DIR/skin.set" ]]; then
+    if [[ ! -d "$INSTALL_DIR/skin.set/$want_skin" ]]; then
+        echo "[CallistoSSS] skinspec='$skinspec' is not a built level; using off" >&2
+        want_skin=off
+    fi
+    if [[ -d "$INSTALL_DIR/skin.set/$want_skin" ]]; then
+        mkdir -p "$INSTALL_DIR/swaps.skin"
+        rm -f "$INSTALL_DIR/swaps.skin/"*.spv
+        cp -pf "$INSTALL_DIR/skin.set/$want_skin/"*.spv \
+              "$INSTALL_DIR/swaps.skin/" 2>/dev/null && skin_set=$want_skin
+    fi
+elif [[ "$want_skin" != "off" ]]; then
+    echo "[CallistoSSS] skinspec=$want_skin but no skin.set/ is parked --" >&2
+    echo "[CallistoSSS]   run: ./dev/patch_compute_skin.sh --sets" >&2
 fi
 
 # shadowcull -- the hair shadow leak fix overlay.
@@ -157,7 +215,7 @@ else
     rm -f "$INSTALL_DIR/ptrefl.disable"
 fi
 
-echo "[CallistoSSS] synced: tier=$tier kernel=$kernel hair=$hair skinray=$skinray shadowcull=$shadowcull/$shadow_set"
+echo "[CallistoSSS] synced: tier=$tier kernel=$kernel skin=$skin/skinspec=$skin_set skinray=$skinray shadowcull=$shadowcull/$shadow_set"
 echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce msggx=$ptmsggx) ptrefl=$ptrefl"
 
 # --- pipeline cache gate ---------------------------------------------------
@@ -190,13 +248,13 @@ STAMP="$PLUGIN_DIR/.cache_stamp"
 # and the caches survive. Without it every launch recompiled every shader.
 payload="$(stat -c '%n %s %Y' \
               "$INSTALL_DIR"/swaps/*.spv \
-              "$INSTALL_DIR"/swaps.hair/*.spv \
+              "$INSTALL_DIR"/swaps.skin/*.spv \
               "$INSTALL_DIR"/swaps.shadowcull/*.spv \
               "$INSTALL_DIR"/swaps.ptq/*.spv \
               "$INSTALL_DIR"/swaps.ptrefl/*.spv \
               "$INSTALL_DIR"/libVkLayer_callisto_spvswap.so 2>/dev/null \
            | sort | sha256sum | cut -c1-16)"
-want="tier=$tier kernel=$kernel hair=$hair skinray=$skinray shadowcull=$shadowcull shadowset=$shadow_set ptq=$ptq_state ptrefl=$ptrefl payload=$payload"
+want="tier=$tier kernel=$kernel skin=$skin skinspec=$skin_set skinray=$skinray shadowcull=$shadowcull shadowset=$shadow_set ptq=$ptq_state ptrefl=$ptrefl payload=$payload"
 have="$(cat "$STAMP" 2>/dev/null || true)"
 if [[ "$want" != "$have" || "${CALLISTO_FORCE_CLEAR:-0}" == "1" ]]; then
     [[ -d "$GLCACHE" ]] && rm -rf "${GLCACHE:?}/"* 2>/dev/null
@@ -220,9 +278,11 @@ fi
 # (`26` §7). This journal is the fix: one append-only line per launch, keyed on
 # the CONTENT hash of what was actually served.
 sc_sha="$(cat "$INSTALL_DIR/swaps.shadowcull/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
-printf '%s shadowset=%s sc_sha=%s ptq=%s ptrefl=%s hair=%s tier=%s cache=%s payload=%s\n' \
+skin_sha="$(cat "$INSTALL_DIR/swaps.skin/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
+printf '%s shadowset=%s sc_sha=%s ptq=%s ptrefl=%s skin=%s skinspec=%s skin_sha=%s tier=%s cache=%s payload=%s\n' \
     "$(date -Is)" "$shadow_set" "${sc_sha:-none}" "$ptq_state" "$ptrefl" \
-    "$hair" "$tier" "${cache_action:-kept}" "$payload" \
+    "$skin" "$skin_set" "${skin_sha:-none}" \
+    "$tier" "${cache_action:-kept}" "$payload" \
     >> "$HOME/callisto_launches.log" 2>/dev/null || true
 
 # --- status feedback loop --------------------------------------------------
@@ -248,11 +308,13 @@ jnum() { grep -o "\"$1\": *[0-9]*" "$LAST_RUN" 2>/dev/null | grep -o '[0-9]*$' |
     echo "synced_at=$(date +%s)"
     echo "want_tier=$tier"
     echo "want_kernel=$kernel"
-    echo "want_hair=$hair"
+    echo "want_skin=$skin"
     echo "want_skinray=$skinray"
     echo "want_shadowcull=$shadowcull"
     echo "want_shadowset_req=$shadowset"
     echo "want_shadowset=$shadow_set"
+    echo "want_skinspec_req=$skinspec"
+    echo "want_skinspec=$skin_set"
     echo "want_ptreg=$ptreg"
     echo "want_ptclamp=$ptclamp"
     echo "want_ptbounce=$ptbounce"

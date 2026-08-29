@@ -47,7 +47,7 @@ for id in "${mods[@]}"; do
     spirv-dis "$spv" -o "$asm" 2>/dev/null || { echo "DIS   $id"; fail=$((fail+1)); continue; }
     # the patcher names its output after the module's dxil ident, which is
     # already "<id>.dxil" -- so it lands as <id>.dxil.spv with no renaming.
-    if python3 "$MOD_DIR/dev/patch_compute_hair.py" "$asm" --tier hunttint \
+    if python3 "$MOD_DIR/dev/patch_compute_skin.py" "$asm" --tier tint \
            --tint "$TINT" --outdir "$OUT" > "$OUT/$id.tint.json" 2>"$OUT/$id.err"; then
         rm -f "$OUT/$id.err"
         n=$(python3 -c "import json;d=json.load(open('$OUT/$id.tint.json'));print(len(d[0]['tint']['writes']))" 2>/dev/null || echo '?')

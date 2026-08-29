@@ -10,7 +10,9 @@ screen, and the shadow-ray narrowing is mid-bisect. Updated once more at the
 close of 2026-08-28: the narrowing **finished**. `full-shadow` (the direct
 shadow rays only) ships as the default; the two-ray splice was proven not to
 execute and all 19 experimental sets were deleted. `26-SESSION-0828.md` is
-that session's record and the resume point.
+that session's record and the resume point. The MS-GGX energy compensation
+(T2.1) launched the same evening and is **confirmed on screen** — the ledger
+row below — and now ships default-on (`28-MS-GGX-ENERGY.md`).
 
 This file is the **ledger**, not the argument. Each row points at the document
 that carries the evidence. Where a claim is weaker than it sounds, the
@@ -32,12 +34,14 @@ treating "built", "loaded" or "swapped" as "working".
 | **AgX tonemapper (SDR)** | **ships, works** | confirmed on screen by the user, 2026-08-28 ("decent, serviceable") | `21` |
 | **AgX over the authored per-area grade** | **ships, works** | on screen in both modes; the area LUTs survive the tone curve replacement | `21` |
 | Engine hair CVar panel (`hair_engine.lua`, 40 CVars) | deployed, applies live | panel works; its *visual* effect never A/B'd against a controlled scene | `16` |
-| Hair BRDF / anisotropy net (70 modules) | **not confirmed** | loaded (70/70 swaps resolve) but **never shown to change a pixel** | `00`, `10`, README |
+| **Engine skin specular/sheen CVar panel** (`skin_engine.lua`, 17 CVars) | deployed, default off | panel verified against stubs; **A/B'd 2026-08-28 — no gloss possible from this surface** (rim = edge glow, tint = recolor; no skin CVar touches the GGX lobe's F0/roughness). CVar track closed for the glossy ask; Tier-3 splice is the go (`27` §4) | `27` |
+| **Callisto Tier-3 skin gloss** (`skinspec`, the oily/wet skin splice) | **built + wired, NEVER LAUNCHED** | 284 Fresnel groups / 852 channels across 74 modules, `spirv-val` clean, byte-exact when off, parked as an A/B pair against an identical hair BRDF, CET **strength ladder** (off/subtle/medium/strong/extreme, default strong) + three silent-no-op warnings. Strength is launch-gated by design: the knobs are OpConstants, so a live slider is impossible (`27` §9). Zero evidence it changes a pixel | `27` §7, §9 |
+| ~~Hair BRDF / anisotropy net (70 modules)~~ | **REMOVED 2026-08-28** | never shown to change a pixel in 70 modules of trying; deleted with `dev/patch_compute_hair.py`. The skin tiers it shared a file with became `dev/patch_compute_skin.py`, which patches **more** modules (77 vs 74) because the hair tangent anchor no longer gates them | `27` §8 |
 | **PT bounce-ray cullMask 1→255** (T1.4) | **ships, works** | the suspected hair regression was retracted: hair is correct with it on | `26` §4.3 |
 | **PT reflection cullMask** (`ptrefl`) | **ships, works** | as above | `26` §4.3 |
 | **PT indirect firefly clamp** (T1.2) | **launched, clean** | on screen in Launch A with hair correct | `26` §4.2 |
 | **PT path regularization** (T1.1) | **launched, clean** | on screen in Launch A with hair correct | `26` §4.2 |
-| **MS-GGX energy compensation** (T2.1) | **built + installed, NEVER LAUNCHED** | `E_ss` resolved (blocker was two misreadings); 10/12 permutations patched, `spirv-val` clean, CET toggle wired, default off. Zero evidence it changes a pixel | `dev/MS_GGX_NOTES.md` §2 |
+| **MS-GGX energy compensation** (T2.1) | **ships, works** | confirmed on screen by the user, 2026-08-28 ("completely worked"): single-variable A/B — one launch with `m` on against four with it off, same shadow set and `ptrefl` throughout (`28` §6); default flipped on after the confirmation | `28` |
 | Numeric skin-BRDF sliders (`rho_f`, `n_f`, …) | **INERT** | nothing reads them: their only consumer `regen_and_clear.sh` is not in the launch options and has never run; `sync_settings.sh` does not parse the keys | `26` §5 |
 
 The two features that are genuinely irreplaceable — the ones no CVar can
@@ -154,7 +158,9 @@ And a third, from the colour bug:
 | `dev/build_tintnet.sh`, `dev/bisect_tint.sh`, `dev/bisect_hunt.sh` | tint-net build + bisection | **no** |
 | `hair_engine.lua` | CET panel over 40 engine hair CVars | deployed |
 | `dev/patch_pt_quality.py` | the three tier-1 PT splices; `--report` prints anchor coverage per module | yes (offline) |
-| `dev/build_ptq.sh` | the 7-combo `{reg,clamp,bounce}` matrix + the reflection overlay | yes |
+| `dev/patch_ms_ggx.py` | the T2.1 energy-compensation splice (both GGX arms, per-channel F0); `--report` prints arm classification and the scalar-specular skips | yes (offline) |
+| `dev/patch_compute_skin.py` / `.sh` | the skin BRDF patcher (tier-1 c1 + Tier-3 gloss + hunt/tint diagnostics); `--sets` builds the overlay twice and parks the A/B pair | yes |
+| `dev/build_ptq.sh` | the 15-combo `{reg,clamp,bounce,msggx}` matrix + the reflection overlay; chains `patch_ms_ggx.py` over the tier-1 output | yes |
 | `dev/install_ptq.sh` | install / remove / status for the matrix | yes |
 | `dev/patch_shadow_opacity.py` | the opacity-split shadow ray (`28` + `76`, min-combined) | yes (offline) |
 | `dev/build_shadow_sets.sh`, `dev/install_shadow_sets.sh` | both shadowcull builds, parked for the CET switch | yes |
@@ -177,11 +183,11 @@ And a third, from the colour bug:
 5. **Decide the hair track.** `16` says the engine already does the shading.
    The honest question is whether the 70-module net is worth any further
    effort, or whether the CVar panel plus the shadow-leak fix is the product.
-6. **Launch the PT tier-1 build** (`24` §8) — built and validated offline,
-   never dispatched. Two things to get: `swapped:1` on the ptq raygens, and an
-   on-screen A/B of the cullMask widening at a framing where hair is a visible
-   indirect contributor. This subsumes the old "bounce-ray `cullMask` lever"
-   item (`17` §3), which is now code rather than a plan.
+ 6. **Launch the PT tier-1 build** (`24` §8) — ~~built and validated offline,
+    never dispatched~~ **done 2026-08-28**: on screen and clean, the suspected
+    hair regression retracted (`26` §4.2–4.3); the MS-GGX confirmation launch
+    (`28` §6) is the template A/B. The old "bounce-ray `cullMask` lever"
+    item (`17` §3) this subsumed is code that ships.
 6a. **Launch the opacity-split shadow build** (`25` §8) — two things to check
    in one session: the hairline seam is still closed, and cardboard/ground
    clutter no longer flashes black on LOD transitions. The switch flips

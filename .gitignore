@@ -6,13 +6,27 @@ __pycache__/
 # Generated build artifacts: patched SPIR-V and disassembly.
 # These are derivative copies of the game's own shader bytecode, so they are
 # NOT redistributed here. Regenerate them locally from your own game dump:
-#   ./dev/patch_compute_hair.sh --hunt      # find the hair material class
-#   ./dev/patch_compute_hair.sh --hair <N>  # build + install the hair swaps
+#   ./dev/patch_compute_skin.sh             # build + install the skin swaps
+#   ./dev/patch_compute_skin.sh --sets      # + the oily-skin strength ladder
 #   ./dev/patch_shadow_flags.sh             # build + install the shadow fix
 swaps/
 swaps.hair/
+swaps.skin/
+swaps.skin.build/
+# --sets builds one dir per rung of the strength ladder (see the LEVELS table
+# in dev/patch_compute_skin.sh); they are parked in ~/.local/lib/callisto/
+# skin.set/<level>/ and picked at launch by the CET selector. swaps.skin.on/ is
+# the old two-set A/B name, kept ignored so stale copies never get committed.
+swaps.skin.off/
+swaps.skin.on/
+swaps.skin.subtle/
+swaps.skin.medium/
+swaps.skin.strong/
+swaps.skin.extreme/
 swaps.shadowcull/
 swaps.prehunt/
+swaps.huntall/
+swaps.tintall/
 swaps_smoke/
 dev/disasm/
 *.spv

@@ -86,6 +86,15 @@ KNOBS = {
     "trt_r": 1.0,     # TRT tint, red
     "trt_g": 0.85,    # TRT tint, green
     "trt_b": 0.55,    # TRT tint, blue
+    # Callisto Tier-3 skin specular (27-SKIN-SPECULAR.md). n_s reshapes the
+    # Schlick Fresnel: r = 2(1-n_s), F' = f0 + g*saturate(2-r)*(1-f0)*
+    # (1-VoH)^(5r). Identity at n_s=0.5 (r=1 -> standard Schlick) with g=1;
+    # n_s>0.5 widens+strengthens (the "wet/oily" direction). alpha_max is a
+    # GGX-alpha ceiling for skin (BRDF_HANDOFF Tier 3: min(alpha, 0.45^2));
+    # identity at >= 1 (no clamp).
+    "n_s": 0.65,        # specular Fresnel falloff reshape
+    "spec_gain": 1.0,   # extra amplitude on the Fresnel boost
+    "alpha_max": 0.2025,  # skin GGX-alpha ceiling (0.45 perceptual)^2
     # GI-resolver dual-lobe variants: wider lobes (many indirect samples make
     # a tight lobe read as noise), TRT-weighted (the coloured glint shows in
     # bounce light). m_dual_gi defaults to m_dual (shared on/off).
@@ -96,7 +105,8 @@ KNOBS = {
 }
 VANILLA = dict(KNOBS, tint=(1.0, 1.0, 1.0), rho_f=1.0, rho_r=1.0,
                s_h=1.0, a_min=0.0, k_sheen=0.0, w_wrap=0.0, m_aniso=0.0,
-               trt_r=1.0, trt_g=1.0, trt_b=1.0)
+               trt_r=1.0, trt_g=1.0, trt_b=1.0,
+               n_s=0.5, spec_gain=1.0, alpha_max=1.0)
 
 # gbuffer material class for hair -- NOT yet identified; see HAIR_HANDOFF.md
 # section 1 for the discovery procedure. Skin is 1.

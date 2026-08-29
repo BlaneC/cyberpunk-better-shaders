@@ -340,3 +340,26 @@ A block that renders no specular for a point light is not the point-light path.
   right." Defining the compensation against the lobe's *own* alpha->0 limit
   makes any constant scale error cancel exactly. Before chasing an absolute,
   check whether the feature actually needs one.
+
+---
+
+### One knob, two defaults, in two files that never see each other
+
+`skinspec` has a default in `init.lua` (what the CET selector shows) and a
+default in `sync_settings.sh` (what is served when `brdf_params.txt` is
+missing or has no such line). They were `strong` and `off` respectively for
+one commit, which produces a specific and very confusing symptom: the settings
+UI reads "Strong" while the shader served is the unpatched control, on exactly
+the launches where CET has not yet written the file — a fresh install, a
+wiped mod folder, or a CET load failure. The UI is not lying about what it
+will request; it is lying about what is running.
+
+This is the same shape as the `hair=off` accident (`27` §8): a value read from
+one file, defaulted in another, with nothing comparing the two.
+
+- The status/selector mismatch warning (`init.lua`) is the thing that catches
+  this at runtime, which is why it now compares the **level**, not just
+  on-vs-off. `subtle` running under a selector reading `extreme` is the same
+  bug and just as easy to stare past.
+- When adding a launch-gated setting, grep for every file that names it and
+  make the defaults agree in the same edit. Two files, one grep.

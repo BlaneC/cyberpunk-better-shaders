@@ -13,22 +13,28 @@
 local PARAMS = "brdf_params.txt"
 local STATUS = "status.txt"
 
-local brdf = { tier = "1", kernel = "on", hair = "on", skinray = "on", shadowcull = "on",
+local brdf = { tier = "1", kernel = "on", skin = "on", skinray = "on", shadowcull = "on",
                -- Path tracing (handoff/23 tier 1). ptreg is the only one that
                -- trades look for noise, so it is the only one defaulting off.
                shadowset = "full-shadow",
                ptreg = "off", ptclamp = "on", ptbounce = "on", ptrefl = "on",
-               -- T2.1 energy compensation. Off by default: it is a real
-               -- brightness change on rough metal, so it ships opt-in until
-               -- it has been looked at on screen.
-               ptmsggx = "off",
+               -- T2.1 energy compensation. On by default since 2026-08-28,
+               -- when it was confirmed on screen (handoff/28): it restores
+               -- energy the lobe was always meant to have, so it is a fix,
+               -- not a look trade. Off stays available for A/B.
+               ptmsggx = "on",
+               -- Callisto Tier-3 skin gloss (handoff/27 Phase 2). Off until it
+               -- has been confirmed on screen; the CET skin CVar panel could
+               -- not produce this look at all (`27` §4), so this is the only
+               -- route to it and it has never been observed.
+               skinspec = "strong",
                rho_f = 1.35, rho_r = 1.25,
                n_f = 0.75, m_f = 0.75, n_r = 0.75, m_r = 0.75 }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
-local SWITCHES = { "tier", "kernel", "hair", "skinray", "shadowcull",
-                   "shadowset",
+local SWITCHES = { "tier", "kernel", "skin", "skinray", "shadowcull",
+                   "shadowset", "skinspec",
                    "ptreg", "ptclamp", "ptbounce", "ptrefl", "ptmsggx" }
 local isSwitch = {}
 for _, k in ipairs(SWITCHES) do isSwitch[k] = true end
@@ -41,6 +47,25 @@ for _, k in ipairs(SWITCHES) do isSwitch[k] = true end
 -- `full` is first and is the default because it is the one build that
 -- demonstrably closes the hairline seam; everything after it is a live
 -- experiment (handoff/25-SHADOW-FLICKER.md §9).
+-- How oily. The Tier-3 knobs are OpConstants baked into the SPIR-V at build
+-- time, so this CANNOT be a live slider -- moving one would change nothing,
+-- which is the inert-slider trap of 26-SESSION-0828.md section 5. Strength is
+-- a ladder of pre-built sets instead, picked at launch like the shadow build.
+-- The ids must match dev/patch_compute_skin.sh's LEVELS and the dirs it parks
+-- in skin.set/.
+local SKIN_LEVELS = {
+    { id = "off",     label = "Off -- tier-1 skin only (A/B control)" },
+    { id = "subtle",  label = "Subtle -- damp sheen (roughness cap 0.40)" },
+    { id = "medium",  label = "Medium -- clearly wet (0.30)" },
+    { id = "strong",  label = "Strong -- unmistakably oily (0.21)" },
+    { id = "extreme", label = "Extreme -- diagnostic, reads as wet plastic (0.14)" },
+}
+local SKIN_LABELS, SKIN_INDEX = {}, {}
+for i, e in ipairs(SKIN_LEVELS) do
+    SKIN_LABELS[i] = e.label
+    SKIN_INDEX[e.id] = i
+end
+
 local SHADOW_SETS = {
     { id = "full-shadow", label = "Direct shadow rays (recommended)" },
     { id = "full",        label = "Direct + GI rays (more flicker)" },
@@ -67,6 +92,11 @@ local function loadParams()
     -- exists. sync_settings.sh already falls back, but normalise here too so
     -- the selector does not silently disagree with what is being served.
     if not SHADOW_INDEX[brdf.shadowset] then brdf.shadowset = SHADOW_SETS[1].id end
+    -- "on" was the old boolean value; sync_settings.sh still accepts it as an
+    -- alias for strong, but normalise here so the selector agrees with what is
+    -- actually being served.
+    if brdf.skinspec == "on" then brdf.skinspec = "strong" end
+    if not SKIN_INDEX[brdf.skinspec] then brdf.skinspec = "off" end
 end
 
 local function saveParams()
@@ -88,6 +118,15 @@ do
     if not ok then ok, m = pcall(dofile, "hair_engine.lua") end
     if ok and type(m) == "table" then hairEngine = m
     else print("[CallistoSSS] hair_engine.lua not loaded: " .. tostring(m)) end
+end
+
+-- Engine skin specular / sheen panel (live CVars, same pattern).
+local skinEngine
+do
+    local ok, m = pcall(require, "skin_engine")
+    if not ok then ok, m = pcall(dofile, "skin_engine.lua") end
+    if ok and type(m) == "table" then skinEngine = m
+    else print("[CallistoSSS] skin_engine.lua not loaded: " .. tostring(m)) end
 end
 
 local status, haveStatus = {}, false
@@ -137,8 +176,8 @@ local function warnLine()
         return string.format("WARNING: %d swap(s) failed to create last launch",
                              num("last_failed"))
     end
-    if status.last_want_hair == "on" and num("last_resolve") == 0 then
-        return "WARNING: hair BRDF was on last launch but 0 compute-resolve "
+    if status.last_want_skin == "on" and num("last_resolve") == 0 then
+        return "WARNING: the skin BRDF was on last launch but 0 compute-resolve "
             .. "swaps applied -- every visible effect lives there. Usually a "
             .. "stale pipeline cache: relaunch, or add CALLISTO_FORCE_CLEAR=1."
     end
@@ -187,7 +226,41 @@ local function warnLine()
             .. "reflection raygen swaps applied -- standalone RT reflections "
             .. "are not used in every render mode."
     end
+    -- The oily-skin switch has two ways to be a silent no-op, and both look
+    -- exactly like "the effect does not work" from the chair.
+    if brdf.skinspec ~= "off" and status.want_skinspec == "fixed" then
+        return "NOTE: oily/wet skin is inert -- no skin.set/ is parked, so "
+            .. "there is nothing to switch to. Build it with "
+            .. "dev/patch_compute_skin.sh --sets."
+    end
+    if brdf.skinspec ~= "off" and brdf.skin == "off" then
+        return "NOTE: oily/wet skin is off because the Callisto skin BRDF is "
+            .. "off -- the gloss rides that overlay."
+    end
+    -- Same trap as the shadow selector: the switch says one thing while the
+    -- frame runs another, because the launch bypassed sync_settings.sh.
+    -- A level mismatch, not just on-vs-off: running "subtle" while the
+    -- selector reads "extreme" is the same trap and just as easy to misread.
+    if status.want_skinspec and status.want_skinspec ~= "fixed"
+       and status.want_skinspec ~= brdf.skinspec then
+        return string.format("WARNING: this session is running skin gloss "
+            .. "'%s', but the selector says '%s'. The launch did not go through "
+            .. "the Steam launch options, so sync_settings.sh never ran.",
+            tostring(status.want_skinspec), tostring(brdf.skinspec))
+    end
     return nil
+end
+
+-- What the switch label admits about itself. A switch position is a request;
+-- this is the only place the page says what was actually served (`09` I6).
+local function skinspecNote()
+    if not haveStatus then return "" end
+    if status.want_skinspec == "fixed" or status.want_skinspec == nil then
+        return " [INERT: no skin.set/ parked -- run "
+            .. "dev/patch_compute_skin.sh --sets]"
+    end
+    return string.format(" [this launch is serving: %s]",
+                         tostring(status.want_skinspec))
 end
 
 registerForEvent("onInit", function()
@@ -217,6 +290,46 @@ registerForEvent("onInit", function()
         .. "Applies on next game launch.",
         brdf.kernel ~= "off", true,
         function(state) brdf.kernel = state and "on" or "off" saveParams() end)
+    nativeSettings.addSwitch("/callistoSSS/main", "Callisto skin BRDF (next launch)",
+        "The tier-1 skin shading in the compute resolvers: a diffuse Fresnel "
+        .. "and retroreflection term at every Disney-diffuse site, gated on "
+        .. "the skin material class. This is the base layer the oily/wet "
+        .. "highlight below builds on. Off restores vanilla skin shading. "
+        .. "Applies on next launch."
+        .. string.format(" [last launch: %d compute-resolve swaps applied]",
+                         num("last_resolve")),
+        brdf.skin ~= "off", true,
+        function(state) brdf.skin = state and "on" or "off" saveParams() end)
+    nativeSettings.addSelectorString("/callistoSSS/main",
+        -- The running level goes in the LABEL, not a tooltip: a tooltip you
+        -- have to hover is not where you look when the picture is wrong.
+        string.format("Oily / wet skin [running: %s]",
+                      status.want_skinspec or "?"),
+        "A glossier specular response on skin, faces most of all: the "
+        .. "Fresnel curve is broadened so the highlight builds earlier off "
+        .. "straight-on angles, and skin's roughness is capped so the "
+        .. "highlight stays a tight wet-looking spot instead of smearing "
+        .. "into a dull sheen. Gated on the skin material class, so nothing "
+        .. "else in the frame changes. "
+        .. "This is the only thing that produces the look -- the engine's own "
+        .. "skin CVars in the panel below cannot: they are an edge glow and a "
+        .. "tint, and none of them touch the specular lobe. "
+        .. "Roughness cap is the lever that matters; vanilla skin is authored "
+        .. "around 0.40-0.60, so anything above ~0.40 barely bites. "
+        .. "NOT a live slider and cannot be one: the values are compiled into "
+        .. "the shader, so these are pre-built strengths and moving this "
+        .. "changes NOTHING until you relaunch through Steam. For a value off "
+        .. "the ladder, rebuild with "
+        .. "dev/patch_compute_skin.sh --sets --set alpha_max=<n>. "
+        .. "Needs the Callisto skin BRDF switch above on -- the gloss rides "
+        .. "that overlay. Every level carries an identical tier-1 c1, so this "
+        .. "changes the gloss and nothing else."
+        .. skinspecNote(),
+        SKIN_LABELS, SKIN_INDEX[brdf.skinspec] or 1, 1,
+        function(i)
+            brdf.skinspec = (SKIN_LEVELS[i] or SKIN_LEVELS[1]).id
+            saveParams()
+        end)
     local function slider(label, desc, key, min, max, dflt)
         nativeSettings.addRangeFloat("/callistoSSS/brdf", label,
             desc .. " INERT: nothing reads this value. It is consumed by "
@@ -226,17 +339,11 @@ registerForEvent("onInit", function()
             min, max, 0.05, "%.2f", brdf[key], dflt,
             function(v) brdf[key] = v saveParams() end)
     end
-    nativeSettings.addSubcategory("/callistoSSS/hair", "Hair")
-    nativeSettings.addSwitch("/callistoSSS/hair", "Callisto hair BRDF (next launch)",
-        "The full hair specular package: strand-anisotropic (Kajiya-Kay) "
-        .. "highlight, a shifted dual-lobe (sharp white R + wide tinted TRT "
-        .. "glint), roughness reshape, grazing sheen and diffuse wrap. The "
-        .. "strand direction is estimated per pixel from the normal buffer. "
-        .. "Off restores vanilla hair. Applies on next launch."
-        .. string.format(" [last launch: %d compute-resolve swaps applied]",
-                         num("last_resolve")),
-        brdf.hair ~= "off", true,
-        function(state) brdf.hair = state and "on" or "off" saveParams() end)
+    -- The Callisto hair BRDF was removed on 2026-08-28: 70 modules of
+    -- anisotropy, dual lobes, sheen and wrap that were never shown to change
+    -- a pixel (19-STATUS.md). What is left under "Hair" is the shadow-leak
+    -- fix, which is confirmed on screen, and the engine CVar panel below.
+    nativeSettings.addSubcategory("/callistoSSS/hair", "Hair (shadows)")
     nativeSettings.addSwitch("/callistoSSS/hair", "Hair shadow leak fix (next launch)",
         "Stop shadow rays from culling back-facing triangles, so thin "
         .. "double-sided hair cards cast shadows from either side. Closes the "
@@ -359,8 +466,13 @@ registerForEvent("onInit", function()
         local ok, err = pcall(hairEngine.register, nativeSettings)
         if not ok then print("[CallistoSSS] engine hair panel failed: " .. tostring(err)) end
     end
+    if skinEngine then
+        local ok, err = pcall(skinEngine.register, nativeSettings)
+        if not ok then print("[CallistoSSS] engine skin panel failed: " .. tostring(err)) end
+    end
 end)
 
 registerForEvent("onUpdate", function(dt)
     if hairEngine then pcall(hairEngine.onUpdate, dt) end
+    if skinEngine then pcall(skinEngine.onUpdate, dt) end
 end)
