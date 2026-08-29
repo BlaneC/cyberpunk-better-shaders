@@ -33,10 +33,11 @@ treating "built", "loaded" or "swapped" as "working".
 | **AgX over the authored per-area grade** | **ships, works** | on screen in both modes; the area LUTs survive the tone curve replacement | `21` |
 | Engine hair CVar panel (`hair_engine.lua`, 40 CVars) | deployed, applies live | panel works; its *visual* effect never A/B'd against a controlled scene | `16` |
 | Hair BRDF / anisotropy net (70 modules) | **not confirmed** | loaded (70/70 swaps resolve) but **never shown to change a pixel** | `00`, `10`, README |
-| **PT bounce-ray cullMask 1→255** (T1.4) | **launched; SUSPECT for a hair regression** | one of T1.4/`ptrefl` regressed hair on screen; `ptreg`+`ptclamp` cleared by A/B; not yet isolated | `24`, `26` §4.2 |
-| **PT reflection cullMask** (`ptrefl`) | **launched; SUSPECT, same pair** | as above | `24`, `26` §4.2 |
+| **PT bounce-ray cullMask 1→255** (T1.4) | **ships, works** | the suspected hair regression was retracted: hair is correct with it on | `26` §4.3 |
+| **PT reflection cullMask** (`ptrefl`) | **ships, works** | as above | `26` §4.3 |
 | **PT indirect firefly clamp** (T1.2) | **launched, clean** | on screen in Launch A with hair correct | `26` §4.2 |
 | **PT path regularization** (T1.1) | **launched, clean** | on screen in Launch A with hair correct | `26` §4.2 |
+| **MS-GGX energy compensation** (T2.1) | **built + installed, NEVER LAUNCHED** | `E_ss` resolved (blocker was two misreadings); 10/12 permutations patched, `spirv-val` clean, CET toggle wired, default off. Zero evidence it changes a pixel | `dev/MS_GGX_NOTES.md` §2 |
 | Numeric skin-BRDF sliders (`rho_f`, `n_f`, …) | **INERT** | nothing reads them: their only consumer `regen_and_clear.sh` is not in the launch options and has never run; `sync_settings.sh` does not parse the keys | `26` §5 |
 
 The two features that are genuinely irreplaceable — the ones no CVar can
@@ -56,7 +57,7 @@ distinction is the whole point of `10-DISPATCH-TRUTH.md`.
 | Tint net — `swaps.tintall/` (15 spv) | unconditional-tint patch over the 22 indirect-light candidates; `dev/build_tintnet.sh`, bisect via `dev/bisect_tint.sh` | needs a launch; superseded in priority by AgX | 
 | Hunt net — `swaps.huntall/` (29 spv) | the dispatch-driven fresh hunt net | `12` |
 | rim-three Phase 0 | the `spec_add` probe at the proven 22:34 direct-sun framing | both prior attempts were shot at the Panam scene, out of scope; carried forward unrun since `12` |
-| Bounce-ray `cullMask=1` → `255` | **launched** — `swaps.ptq/` + `swaps.ptrefl/`, four CET switches | no longer stalled: it ran, and regressed hair (`26` §4.2) |
+| Bounce-ray `cullMask=1` → `255` | **launched, clean** — `swaps.ptq/` + `swaps.ptrefl/`, four CET switches | ran, and the reported hair regression was retracted (`26` §4.3) |
 | Shadow-ray variants `m1`, `m118`, `m119` | the three sets that close the class-1 hole | `m1` staged; needs one launch each (`26` §3) |
 | Blue-noise LUT | **killed** — the only 128x256 R16_UNORM upload in the survey is 58% exact zeros, i.e. not noise | investigated, not built (`24` §4) |
 
@@ -100,6 +101,8 @@ falsified, and the pattern is more useful than the individual errors.
 | `20`: "the reflection-vs-transmission weight already exists" | **wrong** — that Schlick `F0` is the *hit surface's*, unpacked from the CHS payload; the glass module has no interface Fresnel | `20` §1 |
 | `20`: "an epsilon-pulled origin … everything a refracted ray needs" | **wrong sign** — the origin sits outside the surface; a transmitted ray fired from it self-hits the glass | `20` §1, §5b |
 | `20`: blend `F·reflected + (1−F)·refracted` | **wrong model for that buffer** — its alpha is the gate *depth*, not a weight, and if the consumer adds, the maths ghosts instead of refracting | `20` §5b |
+| `MS_GGX_NOTES` §2: "the as-read lobe discards 60-75% of its specular energy" | **false — a misreading, as suspected** — the block read was the *area/tube* arm, not the punctual BRDF, and the integrand carried an extra `NoL` the shader never applies. `E_ss(α→0) = 0.5` exactly | `dev/MS_GGX_NOTES.md` §2 |
+| `MS_GGX_NOTES` §2: "`comp` needs `1/E_ss` in absolute terms, so the normalization must be right" | **wrong framing** — normalizing against the lobe's own α→0 limit cancels any constant scale error; the absolute never needed solving | `dev/MS_GGX_NOTES.md` §2(c) |
 | `20`: "here the engine ships nothing" | **too broad** — true for transmission; false for reflection, where a `RayTracing/Reflection` CVar group exists and the reflection tmax is cbv-driven | `20` §3, §5a |
 
 ## 5. The recurring failure mode

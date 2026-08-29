@@ -18,6 +18,10 @@ local brdf = { tier = "1", kernel = "on", hair = "on", skinray = "on", shadowcul
                -- trades look for noise, so it is the only one defaulting off.
                shadowset = "full-shadow",
                ptreg = "off", ptclamp = "on", ptbounce = "on", ptrefl = "on",
+               -- T2.1 energy compensation. Off by default: it is a real
+               -- brightness change on rough metal, so it ships opt-in until
+               -- it has been looked at on screen.
+               ptmsggx = "off",
                rho_f = 1.35, rho_r = 1.25,
                n_f = 0.75, m_f = 0.75, n_r = 0.75, m_r = 0.75 }
 
@@ -25,7 +29,7 @@ local brdf = { tier = "1", kernel = "on", hair = "on", skinray = "on", shadowcul
 -- switch means adding one word, not editing a chain of `or` comparisons.
 local SWITCHES = { "tier", "kernel", "hair", "skinray", "shadowcull",
                    "shadowset",
-                   "ptreg", "ptclamp", "ptbounce", "ptrefl" }
+                   "ptreg", "ptclamp", "ptbounce", "ptrefl", "ptmsggx" }
 local isSwitch = {}
 for _, k in ipairs(SWITCHES) do isSwitch[k] = true end
 
@@ -309,6 +313,21 @@ registerForEvent("onInit", function()
         .. "darkens genuinely extreme highlights. Applies on next launch.",
         brdf.ptclamp ~= "off", true,
         function(state) brdf.ptclamp = state and "on" or "off" saveParams() end)
+    nativeSettings.addSwitch("/callistoSSS/pt", "Rough-metal energy compensation (next launch)",
+        "Single-scatter GGX throws away the light that bounces off a second "
+        .. "microfacet, so rough metal renders darker than it should. This "
+        .. "puts it back, scaled by how reflective the material is: up to "
+        .. "+66% on rough bare metal, ~+3% on skin, cloth and plastic, and "
+        .. "exactly nothing on smooth surfaces. The amount is measured from "
+        .. "this game's own specular lobe rather than borrowed from a "
+        .. "textbook fit -- the engine's cheap visibility term already "
+        .. "recovers about half the loss by accident, so a standard fit "
+        .. "would roughly double-compensate and blow out every rough metal "
+        .. "surface. Deliberately does NOT touch the separate grazing-angle "
+        .. "error in the same term, which is larger but is a different bug. "
+        .. "Applies on next launch.",
+        brdf.ptmsggx ~= "off", true,
+        function(state) brdf.ptmsggx = state and "on" or "off" saveParams() end)
     nativeSettings.addSwitch("/callistoSSS/pt", "Path regularization (next launch)",
         "Force a minimum roughness (0.25) on surfaces reached by a bounce, "
         .. "never on what you see directly. Standard path-tracer trick "

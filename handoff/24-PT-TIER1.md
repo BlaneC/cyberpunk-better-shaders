@@ -267,6 +267,8 @@ no PT overlays. Launch 1240949 — after `full` was rebuilt — served a
 **byte-identical** payload to those eight, which clears the rebuild and the
 shadow patcher entirely.
 
+**RETRACTED 2026-08-28 — no regression; hair is correct with both on. See `26` §4.3. The rest of this section is void.**
+
 **Suspects, in order.** `ptbounce` (T1.4, cullMask 1→255 on the bounce raygens)
 and `ptrefl` (the same widening on the three reflection raygens) change *what
 geometry a ray can hit* near hair — T1.4's own tooltip warns it can reveal

@@ -99,7 +99,200 @@ Downstream, specular takes weight `%7581` (`= %9016 * %9007`), *not* the
 diffuse's `%7583` (`= NoL * %9006`), then light colour `%5650..%5652` and a
 byte-encoded intensity `%7604`.
 
+### The blocker — RESOLVED 2026-08-28
+
+The blocker recorded here was **two independent misreadings**, both now fixed
+in `dev/fit_ms_ggx.py`. Its old text is preserved below the fold for the
+pattern; the conclusion is superseded.
+
+#### (a) The block analysed above is the AREA-light arm, not the BRDF
+
+`spv_0170` carries **two structurally identical GGX evaluators**, selected at
+line 8557 by `%5654 = (flags & 2) == 0`:
+
+| block | lines | selected when |
+|---|---|---|
+| `%12540` — **punctual** | 8558–8613 | `(flags & 2) == 0` |
+| `%12539` — area / tube | 8623–9998 | otherwise |
+
+Everything in §2 above (`%9980`, `%9986`, `%9948`, `%7576/78/80`) is the
+**area** arm. Hypothesis 1 was right, and provably so — the area arm is a
+textbook tube+sphere light evaluator:
+
+- `%5407 ± %5404` are the two **endpoints of a tube light**; `%9037 =
+  0.5·(cos_a + cos_b)` is the standard two-endpoint irradiance average.
+- `%5402` is the **sphere radius**; `%9944 = sqrt(clamp(r²·…))` is sin(σ).
+- `%9947 = (max(NoL,−s) + s)² / (4s)` is Frostbite's sphere-light **horizon
+  falloff** (Lagarde & de Rousiers, *Moving Frostbite to PBR*).
+- `%9007 = (α/α′)²` is **Karis's sphere-light specular normalization**, and
+  `%9016 = clamp(radius·100, 0, 1)` fades it in — which is why the area arm's
+  spec weight `%7581` is zero at zero radius.
+
+So `%9948` is a sphere/tube *illuminance factor*, not a cosine, and `%7581`
+carries area-light normalization. Neither belongs in a BRDF integral. The
+punctual sibling has plain `%6767 = clamp(dot(N,L))`, plain `%6782 =
+clamp(dot(N,V))`, and spec weight `1.0`. **That is the site to read.**
+
+This is the fifth instance of `GOTCHAS #10` — a patch or a reading applied to
+one of N structural siblings. Here the two arms share every formula verbatim,
+so nothing about the disassembly looked wrong.
+
+#### (b) Specular is never multiplied by NoL
+
+At the consumption site (lines 8890–8912) the two lobes are assembled
+asymmetrically:
+
+```
+diffuse   %5111 = (albedo/π) · lightColour · %7583      %7583 = NoL
+specular  %5132 = lightColour · intensity · %7575 · %7581
+                                                        %7581 = 1  (punctual)
+```
+
+`F·D·Vis` is therefore already the BRDF-**times-cosine** the shader renders;
+the cosine is folded into the engine's `Vis`. The old `fit_ms_ggx.py` applied
+another `NoL` in its integrand (`integrand = D * Vis * nol * …`), undercounting
+by roughly ⟨NoL⟩. Between (a) and (b), the "2–4× too low" gap is fully
+accounted for.
+
+#### (c) The normalizer is exactly 0.5, analytically
+
+As α → 0 the NDF collapses to `H = N`, so `L → mirror(V)` and `NoL → NoV`.
+With `dω_L = 4·VoH·dω_H` and `∫ D(H)·NoH dω_H = 1`:
+
+```
+E_ss(α→0) = 4·NoV · Vis(NoL=NoV) = 4·NoV · 0.25/(2·NoV) = 0.5
+```
+
+**independent of NoV** — confirmed to 1.2e-5 by `--self-check`. (Evaluating the
+limit at finite α biases it low at grazing NoV, because part of the lobe falls
+below the horizon; that decays monotonically to 0.5 and is a truncation
+artefact, not a property of the lobe.)
+
+The engine's lobe therefore sits a uniform **factor of 2** below an
+energy-conserving one at mirror roughness. Whether that 2× is a real deficit
+absorbed into authored light intensities, or another factor upstream in
+`%5650`/`%7604`, is **still unresolved — and no longer matters**, because
+compensation is defined against the lobe's own mirror limit:
+
+```
+E_rel(α, NoV) = E_ss(α, NoV) / 0.5
+comp          = 1 + strength · F0 · max(1/E_rel − 1, 0)
+```
+
+which is exactly 1.0 at α = 0 and at strength = 0 — the regression mode — and
+is immune to any constant scale error in the lobe. That reframing is what
+unblocks the feature; the absolute normalization never needed to be solved.
+
+#### What E_rel actually looks like
+
+`python3 dev/fit_ms_ggx.py`. Two *separate* deviations show up:
+
+| α | NoV=1.0 | 0.75 | 0.50 | 0.25 | 0.10 |
+|---|---|---|---|---|---|
+| 0.05 | 1.010 | 0.999 | 0.977 | 0.907 | 0.715 |
+| 0.25 | 1.040 | 0.971 | 0.855 | 0.666 | 0.512 |
+| 0.50 | 0.936 | 0.858 | 0.768 | 0.671 | 0.611 |
+| 1.00 | 0.575 | 0.620 | 0.673 | 0.736 | 0.778 |
+
+1. **Roughness-driven loss** (the NoV=1 column, 1.04 → 0.58). This is the
+   multiple-scattering energy GGX drops, and it is what compensation is for.
+   Note the game loses about **half** what a correct GGX does (0.58 vs 0.31 at
+   α=1): its sum-form `Vis` over-brightens at high roughness and partly
+   self-compensates. **Splicing a textbook Lazarov/Karis fit here would roughly
+   double-compensate** — §2's original instinct to integrate the game's own
+   lobe was right, and it matters quantitatively.
+2. **Grazing loss at low α** (0.72 at NoV=0.1, α=0.05, where a correct GGX
+   holds 0.91). This is a different defect: the engine's `Vis` denominator is
+   the **sum** of the two Smith-Schlick G1 denominators where a correct
+   separable Smith uses their **product**, and the substitution is worst at
+   grazing. Compensating it would re-light every grazing surface in the game.
+   **Deliberately excluded** — the shipped fit is α-only.
+
+#### The fit (ready to author)
+
+α-only, evaluated at NoV = 1, every term carrying a factor of α so the result
+is identically 0 at α = 0 by construction rather than by fit accuracy:
+
+```
+a    = roughness * roughness
+loss = j0*a + j1*a^2 + j2*a^3 + j3*a^4
+comp = 1 + strength * F0 * max(loss, 0)
+
+j0 = -0.35581642
+j1 =  0.66852058
+j2 =  0.82793009
+j3 = -0.40552339
+```
+
+max abs err **0.0064**, rms 0.0024 over α ∈ [0,1]. At α=1 the shortfall is
+0.738 → **+66% specular on an F0=0.9 metal, +3% on an F0=0.04 dielectric**.
+`max(loss, 0)` clamps the small negative dip near α=0.25 so compensation never
+darkens below vanilla.
+
+#### Authored 2026-08-28 — `dev/patch_ms_ggx.py`
+
+Built and validated offline; **never launched**. What exists:
+
+| | |
+|---|---|
+| patcher | `dev/patch_ms_ggx.py` (`--strength`, `--arms`, `--report`) |
+| build | `dev/build_ptq.sh` — `m` joins the tier-1 matrix, now 15 combos |
+| install | `dev/install_ptq.sh` (unchanged mechanism, wider `COMBOS`) |
+| gate | `sync_settings.sh` — `ptmsggx`, combo letter `m` (order `r,c,b,m`) |
+| toggle | CET → Callisto SSS → Path tracing → "Rough-metal energy compensation" |
+| default | **off** — it is a real brightness change, so it ships opt-in |
+
+`m` cannot be its own overlay: it splices the same twelve `rgs_reference_main`
+permutations as T1.1/T1.2/T1.4, and the layer serves the first file it finds
+per id. `build_ptq.sh` chains `patch_ms_ggx.py` over `patch_pt_quality.py`'s
+output inside each combo, so the two edits compose in one module.
+
+**Coverage: 10 of 12 permutations.** `40c6faab52a13874` and `ab7f1822eeb0331b`
+carry six Fresnel sites each that assemble a **monochrome** specular —
+`p * Vis * D`, no `1-p` lerp, no F0 anywhere in the lobe. `comp` needs the
+lobe's own F0; borrowing one of those modules' two unrelated `+0.04` triples
+would be a positional guess of exactly the kind `GOTCHAS 10` is about. They are
+skipped by name and the patcher reports `variant: scalar-specular`, so the gap
+is loud rather than silent. Both **confirmed-live** permutations (`d622fb9e`,
+`4270b745`) are the three-channel form and are patched.
+
+`40c6faab` is also one of the two skinray permutations, so under
+`ptmsggx=on skinray=on` it is absent from `swaps.ptq/` and the layer falls
+through to `swaps/` — it keeps its skin BRDF patch and simply gets no energy
+compensation. Nothing is un-patched.
+
+Per module: 6 blocks (3 punctual + 3 area), 18 uses rewritten, `spirv-val`
+clean. Cost is ~8 ALU shared per block plus 3 per channel.
+
+**Still open — what a launch has to answer:**
+1. Does it change a pixel at all? Rough metal under direct light is the place
+   to look; smooth surfaces are mathematically untouched.
+2. Is patching the area arm right? Argued from the maths (the fit is
+   alpha-only, so it does not depend on what fills the NoL slot) but **not
+   verified on screen**. `--arms punctual` builds the other half of the A/B.
+3. Does the deliberate exclusion of the grazing error read as inconsistent?
+
+#### Splice site (punctual arm)
+
+Structural anchor: three consecutive `OpFMul` sharing second operand `%6817`
+(`= Vis·D`), first operands the Schlick `F` outputs `%6814/%6815/%6816`,
+results `%6818/%6819/%6820`. Per-channel because `F0` is per-channel. Roughness
+`α = %5655` is already in scope.
+
+**Open question before authoring:** whether to also patch the area arm
+(`%9998` → `%7576/78/80`). Its `Vis` shares the same sum-form denominator, so
+it loses energy the same way, but its inputs are illuminance factors rather
+than cosines and the α-only fit does not depend on them — so the same
+multiplier is very likely correct there too. Worth confirming rather than
+assuming, given how this blocker arose.
+
+---
+
+<details>
+<summary>Superseded blocker text (kept for the pattern)</summary>
+
 ### Why it is not spliced yet — blocker
+
 `comp` depends on `E_ss` in absolute terms (`1/E_ss`), so the lobe's
 normalization must be right. Integrating the lobe exactly as read above
 (`dev/fit_ms_ggx.py`) gives directional albedo far below any plausible value:
@@ -134,3 +327,5 @@ offline should the compensation be authored.
 Splicing a global multiplier on the current reading would risk a large
 brightness error across every material in the game — the exact failure mode
 this is meant to prevent.
+
+</details>

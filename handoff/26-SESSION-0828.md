@@ -19,7 +19,7 @@ the session's ledger and the resume point.
 | `ctrl` (ray B = flags 12, mask untouched) | **validated on screen.** The two-ray splice executes and reaches the consumer. |
 | `m6`, `m112` | **both regress.** Explained by §3 — not a splice bug. |
 | `m1`, `m118`, `m119` | built, installed, **never launched**. `m1` is staged. |
-| PT tier-1 (`24`) | **regressed hair on screen.** Narrowed to `ptbounce` or `ptrefl`; not yet resolved. |
+| PT tier-1 (`24`) | **NO REGRESSION.** Retracted 2026-08-28: hair is correct with `ptbounce` and `ptrefl` both on. §4.2 was a false alarm. |
 | The six numeric skin-BRDF sliders | **found inert.** Not fixed — see §5. |
 
 Staged for the next launch: `shadowset=m1`, PT held at the last proven-good
@@ -147,6 +147,19 @@ Confirmed by A/B: all four PT switches off → hair correct. Then **Launch A**
 reflection raygens). Both change *what geometry a ray can hit* near hair;
 T1.4's own tooltip warns it can reveal "proxy geometry the mask was there to
 hide". **Not yet resolved** — Launch B was staged but never reported.
+
+### 4.3 Retraction: there was no PT regression
+
+The hair fault in §4.2 does not reproduce. With `ptbounce` and `ptrefl` both
+**on**, hair is correct. All four tier-1 edits ship clean.
+
+What §4.2 actually caught was the shadow-set confusion of §7a -- launches
+attributed to the wrong `shadowset` before the content-hash journal existed.
+Every "suspect" line above is void, `ptreg`/`ptclamp`/`ptbounce`/`ptrefl` are
+all cleared, and the "last proven-good state" was never a constraint.
+
+Method note, again: two variables moved at once (PT overlays and shadow set)
+with no per-launch fingerprint. The journal added in §7 is the fix.
 
 ## 5. Bugs found
 
@@ -407,10 +420,8 @@ to the pre-prune copies, and two consecutive syncs of the same selection report
 
 ### Left open
 
-- **The PT tier-1 regression.** One of `ptbounce` / `ptrefl` regressed hair;
-  `ptreg` and `ptclamp` are cleared. Held at the last proven-good state
-  (`ptreg=on ptclamp=on ptbounce=off ptrefl=off`). Launch B was staged twice
-  and never reported.
+- ~~The PT tier-1 regression.~~ **Closed, no defect.** All four tier-1 edits
+  are clean on screen; see §4.3.
 - **The six numeric skin-BRDF sliders are inert** (`§5`). The panel says so.
   Either fold `regen_and_clear.sh` into `sync_settings.sh` or drop them.
 - **The residual flicker.** Not fixable on the ray-flag axis; needs either the

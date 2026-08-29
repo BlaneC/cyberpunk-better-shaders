@@ -301,6 +301,9 @@ first and confirm it from the launch journal before building anything on it.
   *everything the ray can reach*, so no subset of trace sites can separate "the
   hair loses culling" from "the flat props lose culling". Only the `CullMask`
   can, and using it means a second ray.
+- A reported regression is only attributable if exactly one variable moved
+  **and** the launch is fingerprinted. The "PT tier-1 hair regression" was
+  neither, and did not exist -- it was the shadow set changing underneath.
 - **A second `OpTraceRayKHR` spliced into a raygen shader does not execute** in
   this game under vkd3d-proton. The edit disassembles correctly, `spirv-val`
   passes, the swap is served -- and the result is bit-for-bit vanilla on screen.
@@ -308,3 +311,32 @@ first and confirm it from the launch journal before building anything on it.
   working splice *had* to reproduce `full-shadow`. Before building anything on
   a second trace, prove the trace runs: write a sentinel into the payload from
   a miss shader and read it back.
+
+### A reading can land on the wrong sibling too, not just a patch
+
+`GOTCHAS #10` was written about *patches* applied to one of N structural
+siblings. The MS-GGX blocker (`dev/MS_GGX_NOTES.md` §2) was the same failure in
+a **reading**: `spv_0170` carries two structurally identical GGX evaluators —
+punctual (`%12540`, lines 8558-8613) and area/tube (`%12539`, 8623-9998),
+selected by `(flags & 2) == 0`. They share every formula verbatim, so the
+disassembly of the wrong one looks exactly as correct as the right one. Six
+months of "the lobe loses 60-75% of its energy" came from integrating the area
+arm, whose "NoL" is a sphere/tube illuminance factor and whose spec weight
+carries Karis's `(alpha/alpha')^2` sphere normalization.
+
+The tell was available the whole time and was not looked for: the area arm's
+spec weight `%7581 = clamp(radius*100,0,1) * ...` is **zero at zero radius**.
+A block that renders no specular for a point light is not the point-light path.
+
+- When a block reads as implausible, check for a sibling **before** theorising
+  about the block. Search for the formula's own constants (`0_25`, the Schlick
+  pair `5_55472994` / `-6_98316002`) across the whole module and count the
+  hits; two hits means two evaluators.
+- An anomaly of exactly 2x or exactly 4x is usually a missing or doubled
+  factor, not a discovery. Here it was two: the wrong arm, and an extra `NoL`
+  applied to a lobe the shader never multiplies by `NoL`.
+- **Absolute normalization is often avoidable.** The blocker was framed as
+  "`comp` needs `1/E_ss` in absolute terms, so the normalization must be
+  right." Defining the compensation against the lobe's *own* alpha->0 limit
+  makes any constant scale error cancel exactly. Before chasing an absolute,
+  check whether the feature actually needs one.

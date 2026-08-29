@@ -22,7 +22,7 @@ set -uo pipefail
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${CALLISTO_INSTALL_DIR:-$HOME/.local/lib/callisto}"
 SRC="$MOD_DIR/swaps.ptq.matrix"
-COMBOS=(b c r cb rb rc rcb)
+COMBOS=(b c m r bm cb cm rb rc rm cbm rbm rcb rcm rcbm)
 
 case "${1:-install}" in
     status)

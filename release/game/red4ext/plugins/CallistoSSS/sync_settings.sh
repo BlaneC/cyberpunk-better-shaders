@@ -23,13 +23,13 @@ INSTALL_DIR="$HOME/.local/lib/callisto"
 # ptreg defaults OFF: unlike the other three it is a deliberate look trade
 # (indirect gloss goes softer in exchange for less noise), so it is opt-in.
 tier=1 kernel=on hair=on skinray=on shadowcull=on shadowset=full-shadow
-ptreg=off ptclamp=on ptbounce=on ptrefl=on
+ptreg=off ptclamp=on ptbounce=on ptrefl=on ptmsggx=off
 if [[ -f "$PARAMS" ]]; then
     while IFS='=' read -r k v; do
         v="${v%$'\r'}"
         case "$k" in
             tier|kernel|hair|skinray|shadowcull|shadowset) printf -v "$k" '%s' "$v" ;;
-            ptreg|ptclamp|ptbounce|ptrefl) printf -v "$k" '%s' "$v" ;;
+            ptreg|ptclamp|ptbounce|ptrefl|ptmsggx) printf -v "$k" '%s' "$v" ;;
         esac
     done < "$PARAMS"
 fi
@@ -114,17 +114,19 @@ else
     done
 fi
 
-# ptreg / ptclamp / ptbounce -- the tier-1 path-tracing edits (handoff/23).
-# All three splice the same twelve rgs_reference_main permutations, and the
-# layer serves the FIRST file it finds for an id, so they cannot be three
-# overlays. dev/build_ptq.sh pre-builds the seven non-empty combinations; this
-# picks one and materializes it into the single swaps.ptq/ overlay.
+# ptreg / ptclamp / ptbounce / ptmsggx -- the path-tracing splices (handoff/23
+# tier 1, plus T2.1 energy compensation). All four splice the same twelve
+# rgs_reference_main permutations, and the layer serves the FIRST file it finds
+# for an id, so they cannot be four overlays. dev/build_ptq.sh pre-builds the
+# fifteen non-empty combinations; this picks one and materializes it into the
+# single swaps.ptq/ overlay.
 #
-# The combo letters are in r,c,b order to match the built directory names.
+# The combo letters are in r,c,b,m order to match the built directory names.
 combo=""
 [[ "$ptreg"    != "off" ]] && combo+="r"
 [[ "$ptclamp"  != "off" ]] && combo+="c"
 [[ "$ptbounce" != "off" ]] && combo+="b"
+[[ "$ptmsggx"  != "off" ]] && combo+="m"
 
 PTQ="$INSTALL_DIR/swaps.ptq"
 mkdir -p "$PTQ"
@@ -156,7 +158,7 @@ else
 fi
 
 echo "[CallistoSSS] synced: tier=$tier kernel=$kernel hair=$hair skinray=$skinray shadowcull=$shadowcull/$shadow_set"
-echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce) ptrefl=$ptrefl"
+echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce msggx=$ptmsggx) ptrefl=$ptrefl"
 
 # --- pipeline cache gate ---------------------------------------------------
 # Flag files alone are not enough. Once a pipeline is cached, the game never
