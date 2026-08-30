@@ -18,7 +18,11 @@ local STATUS = "status.txt"
 -- through bit-exact vanilla. There is no skinray key any more: the raygen-side
 -- skin BRDF is sampling-only and cannot change a pixel (00-ARCHITECTURE s2).
 -- The six numeric rho/n/m knobs are gone with it -- nothing ever read them.
-local brdf = { tier = "1", kernel = "on", skin = "on", shadowcull = "on",
+local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
+               -- Shader execution reordering rung (handoff/41, 44). Off is
+               -- the A/B control (ser.disable); class/byte/hit/class+hit are
+               -- the hint variants parked in ser.set/ by dev/patch_ser.sh.
+               ser = "off",
                -- Path tracing (handoff/23 tier 1). ptreg is the only one that
                -- trades look for noise, so it is the only one defaulting off.
                shadowset = "full-shadow",
@@ -45,7 +49,10 @@ local brdf = { tier = "1", kernel = "on", skin = "on", shadowcull = "on",
 -- switch means adding one word, not editing a chain of `or` comparisons.
 local SWITCHES = { "tier", "kernel", "skin", "shadowcull",
                    "shadowset", "skinspec",
-                   "ptreg", "ptclamp", "ptbounce", "ptrefl", "ptmsggx" }
+                   "ptreg", "ptclamp", "ptbounce", "ptrefl", "ptmsggx",
+                   -- 44: `ser` was missing here, so saveParams() dropped it
+                   -- and SER could never be selected from this page.
+                   "ser" }
 local isSwitch = {}
 for _, k in ipairs(SWITCHES) do isSwitch[k] = true end
 
@@ -65,15 +72,56 @@ for _, k in ipairs(SWITCHES) do isSwitch[k] = true end
 -- in skin.set/.
 local SKIN_LEVELS = {
     { id = "off",     label = "Off -- tier-1 skin only (A/B control)" },
-    { id = "subtle",  label = "Subtle -- damp sheen (roughness cap 0.40)" },
-    { id = "medium",  label = "Medium -- clearly wet (0.30)" },
-    { id = "strong",  label = "Strong -- unmistakably oily (0.21)" },
-    { id = "extreme", label = "Extreme -- diagnostic, reads as wet plastic (0.14)" },
+    -- the oily ladder: Fresnel reshape + roughness CEILING (flattens variation)
+    { id = "subtle",  label = "Oily: subtle -- damp sheen (roughness cap 0.40)" },
+    { id = "medium",  label = "Oily: medium -- clearly wet (cap 0.30)" },
+    { id = "strong",  label = "Oily: strong -- unmistakably oily (cap 0.21)" },
+    { id = "extreme", label = "Oily: extreme -- diagnostic, wet plastic (cap 0.14)" },
+    -- 44 realism axes: roughness SCALE keeps the authored variation
+    { id = "rough-1.3",   label = "Rougher x1.3 -- matte, keeps pore variation" },
+    { id = "rough-1.6",   label = "Rougher x1.6 -- very matte" },
+    { id = "gloss-0.7",   label = "Glossier x0.7 -- tighter highlight, keeps variation" },
+    { id = "couple",      label = "Energy coupling only -- grazing skin darkens" },
+    { id = "micro",       label = "Micro-shadowing only -- dark skin self-shadows" },
+    { id = "eyes-wet",    label = "Wet eyes only (cornea roughness cap 0.08)" },
+    { id = "eyes-glassy", label = "Glassy eyes only (cap 0.04, diagnostic)" },
+    { id = "real",        label = "REAL: rougher x1.3 + coupling + micro + wet eyes" },
+    { id = "real-gloss",  label = "REAL-GLOSS: glossier x0.7 + coupling + micro + wet eyes" },
 }
 local SKIN_LABELS, SKIN_INDEX = {}, {}
 for i, e in ipairs(SKIN_LEVELS) do
     SKIN_LABELS[i] = e.label
     SKIN_INDEX[e.id] = i
+end
+
+-- SSS kernel presets: kernels/kernel.<id>.bin shipped next to the plugin,
+-- copied over kernel.bin by sync_settings.sh (44). `off` is the engine's own
+-- kernel (disable.flag) and the only true A/B control.
+local KERNEL_PRESETS = {
+    { id = "off",      label = "Off -- engine kernel (A/B control)" },
+    { id = "detail",   label = "Detail -- tight core, most pore definition (default)" },
+    { id = "balanced", label = "Balanced -- between detail and callisto" },
+    { id = "callisto", label = "Callisto -- wide red tail, softest" },
+    { id = "vanilla",  label = "Vanilla (re-authored) -- should match Off; a tooling check" },
+}
+local KERNEL_LABELS, KERNEL_INDEX = {}, {}
+for i, e in ipairs(KERNEL_PRESETS) do
+    KERNEL_LABELS[i] = e.label
+    KERNEL_INDEX[e.id] = i
+end
+
+-- SER hint rungs: ids must match dev/patch_ser.sh VARIANTS + ser.set/.
+local SER_RUNGS = {
+    { id = "off",       label = "Off -- no reorder (A/B control)" },
+    { id = "class",     label = "class -- hint = material class (recommended first)" },
+    { id = "byte",      label = "byte -- hint = material word low byte" },
+    { id = "hit",       label = "hit -- hint = bounce hit/miss" },
+    { id = "class+hit", label = "class+hit -- both" },
+}
+local SER_LABELS, SER_INDEX = {}, {}
+for i, e in ipairs(SER_RUNGS) do
+    SER_LABELS[i] = e.label
+    SER_INDEX[e.id] = i
 end
 
 local SHADOW_SETS = {
@@ -105,6 +153,10 @@ local function loadParams()
     -- actually being served.
     if brdf.skinspec == "on" then brdf.skinspec = "strong" end
     if not SKIN_INDEX[brdf.skinspec] then brdf.skinspec = "off" end
+    -- kernel was a boolean until 44; "on" means the detail preset.
+    if brdf.kernel == "on" or brdf.kernel == "1" then brdf.kernel = "detail" end
+    if not KERNEL_INDEX[brdf.kernel] then brdf.kernel = "detail" end
+    if not SER_INDEX[brdf.ser] then brdf.ser = "off" end
 end
 
 local function saveParams()
@@ -280,6 +332,18 @@ local function warnLines()
             .. "the Steam launch options, so sync_settings.sh never ran.",
             tostring(status.want_skinspec), tostring(brdf.skinspec)))
     end
+    if brdf.ser ~= "off" and status.want_ser and status.want_ser:sub(1, 3) == "off"
+       and status.want_ser ~= "off" then
+        add(string.format("WARNING: SER '%s' was requested but sync disabled it: %s. "
+            .. "off:stale = rebuild with ./dev/patch_ser.sh --install; "
+            .. "off:rung-missing = that rung is not parked.",
+            tostring(brdf.ser), tostring(status.want_ser)))
+    end
+    if status.want_kernel and brdf.kernel ~= status.want_kernel then
+        add(string.format("NOTE: kernel preset selector says '%s' but this launch "
+            .. "serves '%s' (applies on next launch through Steam).",
+            tostring(brdf.kernel), tostring(status.want_kernel)))
+    end
     return out
 end
 
@@ -326,11 +390,22 @@ registerForEvent("onInit", function()
         .. "not a shader, and is left alone. Applies on next launch.",
         brdf.tier ~= "off", true,
         function(state) brdf.tier = state and "1" or "off" saveParams() end)
-    nativeSettings.addSwitch("/callistoSSS/main", "Callisto skin kernel (next launch)",
-        "Replace the engine's SSS diffusion kernel with the Callisto-reshaped one. "
-        .. "Applies on next game launch.",
-        brdf.kernel ~= "off", true,
-        function(state) brdf.kernel = state and "on" or "off" saveParams() end)
+    nativeSettings.addSelectorString("/callistoSSS/main",
+        string.format("Callisto skin kernel [running: %s]", status.want_kernel or "?"),
+        "Which SSS diffusion kernel the engine blurs skin with (the 32x8 LUT "
+        .. "the RED4ext plugin swaps in at boot). Off = the engine's own "
+        .. "kernel, the only true A/B control. Detail keeps the tight red "
+        .. "core (pores stay crisp); Callisto has the widest red tail "
+        .. "(softest, most 'glow'); Balanced sits between. Vanilla is a "
+        .. "re-authored copy of the engine kernel and should be "
+        .. "indistinguishable from Off -- if it is not, the tooling is wrong. "
+        .. "Engine data, not a shader: unaffected by the MASTER switch. "
+        .. "Applies on next launch.",
+        KERNEL_LABELS, KERNEL_INDEX[brdf.kernel] or 2, 1,
+        function(i)
+            brdf.kernel = (KERNEL_PRESETS[i] or KERNEL_PRESETS[2]).id
+            saveParams()
+        end)
     nativeSettings.addSwitch("/callistoSSS/main", "Callisto skin BRDF (next launch)",
         "The tier-1 skin shading in the compute resolvers: a diffuse Fresnel "
         .. "and retroreflection term at every Disney-diffuse site, gated on "
@@ -344,9 +419,21 @@ registerForEvent("onInit", function()
     nativeSettings.addSelectorString("/callistoSSS/main",
         -- The running level goes in the LABEL, not a tooltip: a tooltip you
         -- have to hover is not where you look when the picture is wrong.
-        string.format("Oily / wet skin [running: %s]",
+        string.format("Skin build [running: %s]",
                       status.want_skinspec or "?"),
-        "A glossier specular response on skin, faces most of all: the "
+        "Which build of the skin overlay is served. Every rung carries the "
+        .. "identical tier-1 c1, so this changes ONE thing per rung. "
+        .. "OILY rungs: Fresnel reshape + roughness CEILING (handoff/27) -- "
+        .. "note a ceiling flattens every skin pixel to one roughness, which "
+        .. "is the 'soft plastic face' complaint (33). "
+        .. "ROUGHER/GLOSSIER rungs scale roughness instead, keeping the "
+        .. "authored pore/T-zone variation. COUPLING darkens skin at grazing "
+        .. "angles (energy conservation between diffuse and specular). "
+        .. "MICRO-SHADOWING lets dark, porous skin self-shadow at grazing "
+        .. "light, keyed on albedo. WET/GLASSY EYES cap the cornea's "
+        .. "roughness (material class 8) and touch nothing else. "
+        .. "REAL / REAL-GLOSS combine them (handoff/44, A/B script in 45). "
+        .. "--- Original oily notes: A glossier specular response on skin, faces most of all: the "
         .. "Fresnel curve is broadened so the highlight builds earlier off "
         .. "straight-on angles, and skin's roughness is capped so the "
         .. "highlight stays a tight wet-looking spot instead of smearing "
@@ -471,6 +558,24 @@ registerForEvent("onInit", function()
         .. "deliberate look change, not just a cleanup. Applies on next launch.",
         brdf.ptreg ~= "off", true,
         function(state) brdf.ptreg = state and "on" or "off" saveParams() end)
+    nativeSettings.addSelectorString("/callistoSSS/pt",
+        string.format("Shader execution reordering hint [running: %s]",
+                      status.want_ser or "?"),
+        "Puts OpReorderThreadWithHintNV back into the twelve reference "
+        .. "raygens (handoff/41): under vkd3d-proton the game asks for SER "
+        .. "and never emits the instruction. Not a look change -- ONLY a "
+        .. "frame-time delta proves anything; compare with the same scene, "
+        .. "same settings, off vs class. The rungs differ in what the "
+        .. "reorder is keyed on. Off writes ser.disable, so swaps.ptq/ "
+        .. "serves the same modules minus the hint: a true single-variable "
+        .. "A/B. If the running value reads off:stale, the SER build predates "
+        .. "the current PT build -- rerun ./dev/patch_ser.sh --install. "
+        .. "Applies on next launch.",
+        SER_LABELS, SER_INDEX[brdf.ser] or 1, 1,
+        function(i)
+            brdf.ser = (SER_RUNGS[i] or SER_RUNGS[1]).id
+            saveParams()
+        end)
     if hairEngine then
         local ok, err = pcall(hairEngine.register, nativeSettings)
         if not ok then print("[CallistoSSS] engine hair panel failed: " .. tostring(err)) end

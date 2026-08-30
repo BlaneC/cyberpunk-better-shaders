@@ -126,6 +126,22 @@ local DEFS = {
     label = "RTAO: rays per pixel" },
   { key = "EnableReferenceSER", paths = { RT }, kind = "bool", dflt = true,
     label = "Shader execution reordering (SER)" },
+  -- 43 M3 / 44: the sun as a disc, not a point. Angular size in degrees
+  -- (the real sun is 0.53). A larger disc softens every terminator and
+  -- widens every specular highlight -- the ONE engine-side knob that changes
+  -- how skin and eye highlights read under daylight, and it composes with
+  -- the skin roughness rungs. The three strings sit in the binary's
+  -- RayTracing/Diffuse key run, so that group is tried first; the resolver
+  -- reports which one answered.
+  { key = "SunAngularSize", paths = { DIFF, REFL, RT, REF }, kind = "float",
+    min = 0.0, max = 5.0, dflt = 0.5,
+    label = "Sun angular size (deg): softer shadows, wider highlights" },
+  { key = "SunVisibility", paths = { DIFF, REFL, RT, REF }, kind = "float",
+    min = 0.0, max = 2.0, dflt = 1.0,
+    label = "Sun visibility (direct sun contribution)" },
+  { key = "SunScatteringScale", paths = { DIFF, REFL, RT, REF }, kind = "float",
+    min = 0.0, max = 4.0, dflt = 1.0,
+    label = "Sun scattering scale" },
 }
 
 local function id(d) return d.key end

@@ -1,5 +1,10 @@
 # 43 — Code review, cleanup, and a second pass over the `38` ideas table
 
+> **2026-08-30 (44):** M2, M3, M4, M5, M6 are **built and parked** as
+> optional features (`44` §1); M7 is dead (`+2` is the normal, `44` §2.4);
+> M1 and the DLSS preset test are protocol steps in `45` (E10). The order
+> below is superseded by `45` §3.
+
 Written 2026-08-30. Review only plus the cleanups listed in §1; **nothing
 here was launched**. `38` is left as written; this document corrects and
 re-orders it and adds what it was missing.

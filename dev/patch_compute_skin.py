@@ -303,6 +303,83 @@ def find_c1_sites(mod):
     return sites, skipped
 
 
+def _fmul_consumers(mod, idt, ops=('OpFMul',)):
+    """(result, other_operand) for every FMul/FAdd that reads idt."""
+    from patch_chs_brdf import uses_of
+    out = []
+    for j in uses_of(mod, idt):
+        m = re.match(r'\s*(%\d+)\s*=\s*(OpFMul|OpFAdd) %float (%\w+) (%\w+)',
+                     mod.lines[j])
+        if m and m.group(2) in ops:
+            out.append((m.group(1), m.group(4) if m.group(3) == idt
+                        else m.group(3)))
+    return out
+
+
+def _is_diffuse_colour(mod, idt):
+    """albedo*(1-metal) as dxil-spirv emits it: OpFSub(X, OpFMul(X, M)),
+    optionally behind the material-fetch guard's OpPhi(%float_0, D)."""
+    _, d = mod.find_def(idt)
+    mp = re.match(r'OpPhi %float((?:\s+%\w+)+)\s*$', d or '')
+    if mp:
+        vals = [v for v in mp.group(1).split()[0::2] if v != '%float_0']
+        if len(set(vals)) != 1:
+            return False
+        _, d = mod.find_def(vals[0])
+    m = re.match(r'OpFSub %float (%\w+) (%\w+)\s*$', d or '')
+    if not m:
+        return False
+    X, Y = m.groups()
+    _, dy = mod.find_def(Y)
+    my = re.match(r'OpFMul %float (%\w+) (%\w+)\s*$', dy or '')
+    return bool(my and X in my.groups())
+
+
+def find_diffuse_colour(mod, cfg, site):
+    """The per-channel diffuse colour (albedo*(1-metal)) a c1 site feeds.
+
+    The shared scalar fans out three ways (one FMul per channel, sometimes
+    after one or two single-consumer FMul/FAdd hops); each branch multiplies
+    a chain that contains the channel's diffuse colour. Walk the three
+    operand trees in lock-step and take the first depth at which all three
+    are distinct _is_diffuse_colour ids that dominate the site. None when
+    the site's fan-out multiplies by light*shadow only (25 of 181 sites in
+    the 2026-08-30 census: albedo is folded in upstream, out of reach) --
+    the caller reports and skips, never guesses. Pure: rewrites nothing, so
+    it is safe to run before any pass splices (GOTCHAS 12).
+    """
+    cur = site['scalar']
+    cons = None
+    for _ in range(4):
+        c3 = _fmul_consumers(mod, cur)
+        if len(c3) == 3:
+            cons = c3
+            break
+        c1 = _fmul_consumers(mod, cur, ('OpFMul', 'OpFAdd'))
+        if len(c1) != 1:
+            break
+        cur = c1[0][0]
+    if not cons:
+        return None
+
+    def expand(idt, depth):
+        out = [idt]
+        if depth:
+            _, d = mod.find_def(idt)
+            m = re.match(r'OpFMul %float (%\w+) (%\w+)\s*$', d or '')
+            if m:
+                for op in m.groups():
+                    out += expand(op, depth - 1)
+        return out
+    trees = [expand(c[1], 4) for c in cons]
+    for k in range(min(len(t) for t in trees)):
+        trip = [t[k] for t in trees]
+        if len(set(trip)) == 3 and all(_is_diffuse_colour(mod, x) for x in trip) \
+                and all(cfg.dominates_line(x, site['line']) for x in trip):
+            return trip
+    return None
+
+
 def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
     """Tier-1 c1 at every Disney diffuse site, gated on skin (class 1).
 
@@ -330,6 +407,23 @@ def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
     gl = mod.glsl
     sites, skipped = find_c1_sites(mod)
     rep = {"c1_sites": 0, "skipped_shape": skipped, "skipped_dom": []}
+    # 44 M4/M5. Both ride the c1 select so every site still gets exactly ONE
+    # replace_all_uses on its scalar (a second call on the same id is a
+    # silent dead no-op -- the 08-DUAL-LOBE lesson). Identity (0) emits
+    # nothing, keeping the shipping rungs byte-exact.
+    dcouple = knobs.get("dcouple", 0.0)
+    micro_k = knobs.get("micro_k", 0.0)
+    if dcouple > 0.0:
+        five, sc = C(5.0), C(dcouple)
+        rep["dcouple_sites"] = 0
+    if micro_k > 0.0:
+        # Detect BEFORE emitting anything: the detector reads the module's
+        # own use lists, which the replace_all_uses below rewrites.
+        albedo = {s['line']: find_diffuse_colour(mod, cfg, s) for s in sites}
+        zero, two = C(0.0), C(2.0)
+        mk = C(micro_k)
+        wr, wg, wb = C(0.2126), C(0.7152), C(0.0722)
+        rep["micro_sites"], rep["micro_skipped"] = 0, []
     for s in sites:
         if not cfg.dominates_line(dom_id, s['line']):
             rep["skipped_dom"].append(s['line'] + 1)
@@ -372,6 +466,57 @@ def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
              f"        {g} = OpFMul %float {one} {one}"),
         ]
         fac = g
+        if dcouple > 0.0:
+            # Normalised Ashikhmin-Shirley coupling, f0-independent form:
+            # (1 - s(1-NoL)^5)(1 - s(1-NoV)^5). (1-NoL)^5 = Exp2(5*l1), and
+            # l1/l2 already exist above for c1.
+            q1, q2, p5l, p5v, sl, sv, fl, fv, cp, gd = [I() for _ in range(10)]
+            ins += [
+                f"        {q1} = OpFMul %float {l1} {five}",
+                f"        {q2} = OpFMul %float {l2} {five}",
+                f"        {p5l} = OpExtInst %float {gl} Exp2 {q1}",
+                f"        {p5v} = OpExtInst %float {gl} Exp2 {q2}",
+                f"        {sl} = OpFMul %float {p5l} {sc}",
+                f"        {sv} = OpFMul %float {p5v} {sc}",
+                f"        {fl} = OpFSub %float {one} {sl}",
+                f"        {fv} = OpFSub %float {one} {sv}",
+                f"        {cp} = OpFMul %float {fl} {fv}",
+                f"        {gd} = OpSelect %float {skin_gate} {cp} {one}",
+            ]
+            m2 = I()
+            ins.append(f"        {m2} = OpFMul %float {fac} {gd}")
+            fac = m2
+            rep["dcouple_sites"] += 1
+        if micro_k > 0.0:
+            trip = albedo.get(s['line'])
+            if trip is None:
+                rep["micro_skipped"].append(s['line'] + 1)
+            else:
+                # sat(1 - (1-NoL)^2 * k * (1 - lum(albedo))): dark, porous
+                # skin self-shadows at grazing light; a pale, smooth patch
+                # does not. lum = Rec.709 weights on the linear diffuse
+                # colour (already albedo*(1-metal); metal is 0 on skin).
+                Dr, Dg, Db = trip
+                lr, lg, lb, la, lum, lc, dk, sq, t1, t2, ms, cl, gm, m3 = \
+                    [I() for _ in range(14)]
+                ins += [
+                    f"        {lr} = OpFMul %float {Dr} {wr}",
+                    f"        {lg} = OpFMul %float {Dg} {wg}",
+                    f"        {lb} = OpFMul %float {Db} {wb}",
+                    f"        {la} = OpFAdd %float {lr} {lg}",
+                    f"        {lum} = OpFAdd %float {la} {lb}",
+                    f"        {lc} = OpExtInst %float {gl} NClamp {lum} {zero} {one}",
+                    f"        {dk} = OpFSub %float {one} {lc}",
+                    f"        {sq} = OpFMul %float {onl} {onl}",
+                    f"        {t1} = OpFMul %float {sq} {mk}",
+                    f"        {t2} = OpFMul %float {t1} {dk}",
+                    f"        {ms} = OpFSub %float {one} {t2}",
+                    f"        {cl} = OpExtInst %float {gl} NClamp {ms} {zero} {one}",
+                    f"        {gm} = OpSelect %float {skin_gate} {cl} {one}",
+                    f"        {m3} = OpFMul %float {fac} {gm}",
+                ]
+                fac = m3
+                rep["micro_sites"] += 1
         ins.append(f"        {out} = OpFMul %float {s['scalar']} {fac}")
         replace_all_uses(mod, s['scalar'], out, s['line'])
         edits.append((s['line'], ins))
@@ -500,11 +645,22 @@ def find_spec_fresnel_groups(mod):
     return groups
 
 
-def skin_spec_active(knobs):
-    """Tier-3 emission gate: identity knobs must emit NOTHING (bit-exact)."""
+def skin_fresnel_active(knobs):
+    """Tier-3 Fresnel emission gate: identity knobs must emit NOTHING."""
     return (abs(knobs.get("n_s", 0.5) - 0.5) > 1e-9
-            or abs(knobs.get("spec_gain", 1.0) - 1.0) > 1e-9
-            or knobs.get("alpha_max", 1.0) < 1.0)
+            or abs(knobs.get("spec_gain", 1.0) - 1.0) > 1e-9)
+
+
+def alpha_reshape_active(knobs):
+    """Any of the three alpha edits (skin cap, skin scale, eye cap) live?"""
+    return (knobs.get("alpha_max", 1.0) < 1.0
+            or abs(knobs.get("alpha_scale", 1.0) - 1.0) > 1e-9
+            or knobs.get("eye_alpha_max", 1.0) < 1.0)
+
+
+def skin_spec_active(knobs):
+    """Tier-3 emission gate (kept for callers): Fresnel OR alpha reshape."""
+    return skin_fresnel_active(knobs) or alpha_reshape_active(knobs)
 
 
 def build_skin_spec(mod, cfg, dom_id, skin_gate, knobs):
@@ -615,31 +771,44 @@ def build_skin_spec(mod, cfg, dom_id, skin_gate, knobs):
     return consts, edits, rep
 
 
-def build_skin_alpha_cap(mod, cfg, dom_id, skin_gate, knobs):
-    """Callisto Tier-3 roughness ceiling: alpha' = min(alpha, alpha_max) on skin.
+def build_skin_alpha_cap(mod, cfg, dom_id, skin_gate, knobs, eye_gate=None):
+    """Per-class GGX alpha reshape, ONE nested select per alpha id:
 
-    Skin's authored roughness maps sit around 0.4-0.6, and a GGX lobe that
-    wide reads as a dull sheen rather than a wet highlight. Capping alpha is
-    what actually produces the oily look -- the Fresnel reshape in
-    build_skin_spec only broadens the falloff, and its saturate(2-r) amplitude
-    term is clamped to 1 across the whole n_s > 0.5 direction, so with
-    spec_gain at its 1.0 default this cap is the dominant lever.
+        a_skin = min(min(alpha*alpha_scale, 1), alpha_max)   (class 1)
+        a_eye  = min(alpha, eye_alpha_max)                    (class 8)
+        alpha' = select(skin, a_skin, select(eye, a_eye, alpha))
 
-    ALL uses of each alpha are rewritten, not just the eval's, so the
-    evaluation and the importance-sampling branch agree -- otherwise MIS is
-    biased. (In the hair patcher this rode that pass's own alpha reshape; a
-    second replace_all_uses on the same id would have clobbered the first,
-    which is the 08-DUAL-LOBE dead-sheen lesson.)
+    Each factor is emitted only when its knob is non-identity, and in the
+    original cap-only case the instruction sequence and id order are exactly
+    what this pass emitted before 44 (verified: the five shipping rungs
+    rebuild byte-identical), so the refactor is provably inert.
 
-    Identity at alpha_max >= 1: emits nothing at all, keeping such builds
-    byte-exact.
+    Why a cap at all: skin's authored roughness sits around 0.4-0.6 and a
+    GGX lobe that wide reads as a dull sheen, not a wet highlight -- the cap
+    is what produces the oily look, the Fresnel reshape only widens the
+    falloff. Why a SCALE as well (33 s5, 43 M2): the cap flattens every skin
+    pixel above the ceiling to one roughness, killing the authored pore /
+    forehead / cheek variation; a multiplier moves the whole distribution
+    while keeping it. Eyes (31 s5, 43 M6): a cornea is a wet glass surface
+    the authored maps never get below ~0.3 roughness; a class-8 ceiling is
+    the whole "wet eyes" feature.
+
+    ALL uses of each alpha are rewritten so the evaluation and the
+    importance-sampling branch agree (else MIS is biased). A second
+    replace_all_uses on the same id would silently no-op -- the 08-DUAL-LOBE
+    lesson -- which is exactly why the three edits share one select chain.
     """
     from patch_skin_brdf import replace_all_uses
     consts, edits = [], []
     rep = {"alphas": [], "skipped_dom": []}
     smax_v = knobs.get('alpha_max', 1.0)
-    if smax_v >= 1.0 or skin_gate is None:
-        rep['inactive'] = 'alpha_max >= 1 -- nothing emitted'
+    scale_v = knobs.get('alpha_scale', 1.0)
+    emax_v = knobs.get('eye_alpha_max', 1.0)
+    do_cap = smax_v < 1.0 and skin_gate is not None
+    do_scale = abs(scale_v - 1.0) > 1e-9 and skin_gate is not None
+    do_eye = emax_v < 1.0 and eye_gate is not None
+    if not (do_cap or do_scale or do_eye):
+        rep['inactive'] = 'identity alpha knobs -- nothing emitted'
         return consts, edits, rep
 
     sites = P.find_ggx_sites(mod)
@@ -647,23 +816,50 @@ def build_skin_alpha_cap(mod, cfg, dom_id, skin_gate, knobs):
         rep['inactive'] = 'no GGX sites'
         return consts, edits, rep
 
-    smax, c = mod.const(smax_v)
-    if c:
-        consts.append(c)
+    def C(v):
+        nid, c = mod.const(v)
+        if c:
+            consts.append(c)
+        return nid
+    # Constant declaration order is part of the byte-exactness contract:
+    # the legacy cap declared smax first.
+    smax = C(smax_v) if do_cap else None
+    scale = C(scale_v) if do_scale else None
+    one = C(1.0) if do_scale else None
+    emax = C(emax_v) if do_eye else None
     gl = mod.glsl
     I = mod.new_id
+    rep.update(cap=do_cap, scale=do_scale, eye=do_eye)
     for alpha in sorted({s['alpha'] for s in sites},
                         key=lambda a: mod.find_def(a)[0]):
         aline, _ = mod.find_def(alpha)
         if aline is None or not cfg.dominates_line(dom_id, aline):
             rep["skipped_dom"].append(alpha)
             continue
-        mn, sel = I(), I()
+        ins = []
+        a_skin = alpha
+        if do_scale:
+            sm, mn1 = I(), I()
+            ins += [f"        {sm} = OpFMul %float {alpha} {scale}",
+                    f"        {mn1} = OpExtInst %float {gl} NMin {sm} {one}"]
+            a_skin = mn1
+        if do_cap:
+            mn = I()
+            ins.append(f"        {mn} = OpExtInst %float {gl} NMin {a_skin} {smax}")
+            a_skin = mn
+        a_else = alpha
+        if do_eye:
+            me, se = I(), I()
+            ins += [f"        {me} = OpExtInst %float {gl} NMin {alpha} {emax}",
+                    f"        {se} = OpSelect %float {eye_gate} {me} {alpha}"]
+            a_else = se
+        if a_skin is not alpha:
+            sel = I()
+            ins.append(f"        {sel} = OpSelect %float {skin_gate} {a_skin} {a_else}")
+        else:
+            sel = a_else
         replace_all_uses(mod, alpha, sel, aline)
-        edits.append((aline, [
-            f"        {mn} = OpExtInst %float {gl} NMin {alpha} {smax}",
-            f"        {sel} = OpSelect %float {skin_gate} {mn} {alpha}",
-        ]))
+        edits.append((aline, ins))
         rep["alphas"].append({"alpha": alpha, "line": aline + 1, "sel": sel})
     return consts, edits, rep
 
@@ -831,21 +1027,33 @@ def process(path, outdir, tier, knobs, hunt_classes, do_rt=True,
         # Inserted directly after the class value (the module's own IEqual, or
         # our own shift emitted after the shared texel's extract in the
         # &31-variant modules) so the gate inherits that line's dominance.
-        edits = [(ins_line, pre_ins
-                  + [f"        {skin_gate} = OpIEqual %bool {shift} {u1}"])]
+        gate_ins = [f"        {skin_gate} = OpIEqual %bool {shift} {u1}"]
+        eye_gate = None
+        if knobs.get('eye_alpha_max', 1.0) < 1.0:
+            # Class 8 = eyes (31 s5). Same shift, same dominance, one more
+            # compare. Only emitted when the eye cap is live (byte-exactness).
+            u8, ud8 = mod.uconst(8)
+            if ud8:
+                consts.append(ud8)
+            eye_gate = mod.new_id()
+            gate_ins.append(f"        {eye_gate} = OpIEqual %bool {shift} {u8}")
+        edits = [(ins_line, pre_ins + gate_ins)]
 
         c1, e1, rep['diffuse'] = build_skin_c1(mod, cfg, dom_id, skin_gate, knobs)
         consts += c1
         edits += e1
 
-        # Tier-3 gloss. The roughness cap runs FIRST: it rewrites every use of
-        # each alpha, while the Fresnel pass rewrites the Schlick F ids. The
-        # two touch disjoint ids, so they compose rather than clobber.
-        if with_skinspec and skin_spec_active(knobs):
+        # Tier-3 gloss. The alpha reshape runs FIRST: it rewrites every use
+        # of each alpha, while the Fresnel pass rewrites the Schlick F ids.
+        # The two touch disjoint ids, so they compose rather than clobber.
+        # (44: the two are gated independently -- a scale-only or eye-only
+        # rung emits no Fresnel code at all.)
+        if with_skinspec and alpha_reshape_active(knobs):
             cA, eA, rep['alpha_cap'] = build_skin_alpha_cap(
-                mod, cfg, dom_id, skin_gate, knobs)
+                mod, cfg, dom_id, skin_gate, knobs, eye_gate)
             consts += cA
             edits += eA
+        if with_skinspec and skin_fresnel_active(knobs):
             cS, eS, rep['skin_spec'] = build_skin_spec(
                 mod, cfg, dom_id, skin_gate, knobs)
             consts += cS
@@ -855,7 +1063,8 @@ def process(path, outdir, tier, knobs, hunt_classes, do_rt=True,
 
         rep['params'] = {k: knobs[k] for k in
                          ('rho_f', 'rho_r', 'n_f', 'm_f', 'n_r', 'm_r',
-                          'n_s', 'spec_gain', 'alpha_max')}
+                          'n_s', 'spec_gain', 'alpha_max', 'alpha_scale',
+                          'eye_alpha_max', 'dcouple', 'micro_k')}
     else:
         die(f"unknown tier {tier}")
 
@@ -911,7 +1120,8 @@ def main():
     if not a.vanilla and not a.with_skinspec:
         # Tier-3 knobs are inert without the flag: force identity so a plain
         # c1 build is byte-exact against a pre-Tier-3 one.
-        knobs.update(n_s=0.5, spec_gain=1.0, alpha_max=1.0)
+        knobs.update(n_s=0.5, spec_gain=1.0, alpha_max=1.0,
+                     alpha_scale=1.0, eye_alpha_max=1.0)
     for kv in a.set:
         k, v = kv.split('=')
         if k in knobs and k != 'tint':

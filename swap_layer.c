@@ -468,10 +468,27 @@ static void status_hit(const char *id, int ok) {
     status_write();
 }
 
-static uint32_t *load_swap(const char *name, size_t *out_size) {
+static int spv_declares_ser(const uint32_t *w, size_t bytes);
+
+/* First-file-wins across the overlays, then the base dir -- with one
+ * exception (44-LOW-HANGING-FRUIT): when the device has no SER, a candidate
+ * that declares ShaderInvocationReorderNV is skipped and the search
+ * CONTINUES to the next overlay. Before this the reject happened after the
+ * search, so a stale/unusable swaps.ser/ file turned the module VANILLA --
+ * bypassing swaps.ptq/ and every splice below it, with a log line that read
+ * as a SER problem rather than a PT-stack problem. */
+static uint32_t *load_swap(const char *name, size_t *out_size, int allow_ser) {
     for (int i = 0; i < g_noverlay; i++) {
         uint32_t *c = load_swap_from(g_overlaydir[i], name, out_size);
-        if (c) return c;
+        if (!c) continue;
+        if (!allow_ser && spv_declares_ser(c, *out_size)) {
+            LOGF("\"ev\":\"ser_reject\",\"id\":\"%s\",\"size\":%zu,\"dir\":\"%s\","
+                 "\"reason\":\"device_extension_not_enabled\",\"action\":\"next_overlay\"}",
+                 name, *out_size, g_overlaydir[i]);
+            free(c);
+            continue;
+        }
+        return c;
     }
     return load_swap_from(g_swapdir, name, out_size);
 }
@@ -832,9 +849,24 @@ static int ser_enable_setup(InstData *inst, VkPhysicalDevice phys,
     uint32_t n = ci->enabledExtensionCount;
     if (n && !names)               { *reason = "bad_ext_array";  return 0; }
     if (names_have(names, n, CALLISTO_SER_EXT)) {
-        /* Somebody already asked for it -- nothing to do, and the feature
-         * struct is then theirs to own. */
+        /* Somebody already asked for it (vkd3d-proton does, every launch:
+         * "app_exts":71 in the log) -- nothing to add, and the feature struct
+         * is theirs to own. The caller treats every already_enabled* reason
+         * as SER ON. 44-LOW-HANGING-FRUIT: until then this returned 0 with
+         * ser_on=0, so the layer REJECTED every SER swap on the one device
+         * that actually had the extension, and served vanilla raygens. */
         *reason = "already_enabled";
+        for (const VkBaseInStructure *p = ci->pNext; p; p = p->pNext)
+            if (p->sType ==
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV) {
+                const VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV *f =
+                    (const VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV *)p;
+                *reason = f->rayTracingInvocationReorder
+                        ? "already_enabled_feature_on"
+                        : "already_enabled_feature_off";
+                return 0;
+            }
+        *reason = "already_enabled_no_feature_struct";
         return 0;
     }
     /* The extension's own dependency. Enabling ours without it makes
@@ -956,6 +988,13 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
     ((VkLayerDeviceCreateInfo *)lc)->u.pLayerInfo = lc->u.pLayerInfo->pNext;
     VkResult r = next_create(phys, ser_try ? &ci2 : ci, ac, pDev);
     if (ser_try && r == VK_SUCCESS) {
+        ser_on = 1;
+    } else if (!ser_try && r == VK_SUCCESS
+               && !strncmp(ser_reason, "already_enabled", 15)) {
+        /* The app enabled the extension itself: SER modules are legal on
+         * this device. (feature_off is logged as such; per 41 s7 this driver
+         * accepts the modules either way -- only a frame-time delta proves
+         * the reorder happens.) */
         ser_on = 1;
     } else if (ser_try) {
         /* Never be the reason the game does not start. Retry with exactly
@@ -1081,11 +1120,11 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
     }
 
     uint32_t *code = NULL; size_t size = 0;
-    if (has_id) code = load_swap(id, &size);          /* <hash>.<entry>.spv */
+    if (has_id) code = load_swap(id, &size, d->ser); /* <hash>.<entry>.spv */
     if (!code) {
         char name[80];
         snprintf(name, sizeof name, "sha256-%s", SHA());
-        code = load_swap(name, &size);                /* sha256-<hex>.spv */
+        code = load_swap(name, &size, d->ser);        /* sha256-<hex>.spv */
     }
 
     /* SER: a swap that declares ShaderInvocationReorderNV is only legal on a
@@ -1097,8 +1136,10 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
      * is A1's expected failure mode anyway) rather than "the game is broken".
      * `d->ser` is 0 for an untracked device, which is the right default. */
     if (code && spv_declares_ser(code, size) && !d->ser) {
+        /* Unreachable since load_swap() filters per overlay; kept as the
+         * last line of defence for the base dir. */
         LOGF("\"ev\":\"ser_reject\",\"id\":\"%s\",\"size\":%zu,"
-             "\"reason\":\"device_extension_not_enabled\"}",
+             "\"reason\":\"device_extension_not_enabled\",\"action\":\"vanilla\"}",
              has_id ? id : "", size);
         free(code);
         code = NULL;

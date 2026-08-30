@@ -95,6 +95,15 @@ KNOBS = {
     "n_s": 0.65,        # specular Fresnel falloff reshape
     "spec_gain": 1.0,   # extra amplitude on the Fresnel boost
     "alpha_max": 0.2025,  # skin GGX-alpha ceiling (0.45 perceptual)^2
+    # 44-LOW-HANGING-FRUIT: the "realism" knobs. All identity by default so
+    # every pre-existing rung rebuilds byte-exact.
+    "alpha_scale": 1.0,    # skin GGX alpha multiplier (33 s5 / 43 M2): keeps
+                           # the authored roughness VARIATION the cap flattens
+    "eye_alpha_max": 1.0,  # class-8 (eye) GGX-alpha ceiling (31 s5 / 43 M6)
+    "dcouple": 0.0,        # diffuse/specular energy coupling strength (43 M4):
+                           # diffuse *= (1-s(1-NoL)^5)(1-s(1-NoV)^5)
+    "micro_k": 0.0,        # albedo-driven micro-shadowing (43 M5):
+                           # diffuse *= sat(1 - (1-NoL)^2 k (1-lum(albedo)))
     # GI-resolver dual-lobe variants: wider lobes (many indirect samples make
     # a tight lobe read as noise), TRT-weighted (the coloured glint shows in
     # bounce light). m_dual_gi defaults to m_dual (shared on/off).
@@ -106,7 +115,8 @@ KNOBS = {
 VANILLA = dict(KNOBS, tint=(1.0, 1.0, 1.0), rho_f=1.0, rho_r=1.0,
                s_h=1.0, a_min=0.0, k_sheen=0.0, w_wrap=0.0, m_aniso=0.0,
                trt_r=1.0, trt_g=1.0, trt_b=1.0,
-               n_s=0.5, spec_gain=1.0, alpha_max=1.0)
+               n_s=0.5, spec_gain=1.0, alpha_max=1.0,
+               alpha_scale=1.0, eye_alpha_max=1.0, dcouple=0.0, micro_k=0.0)
 
 # gbuffer material class for hair -- NOT yet identified; see HAIR_HANDOFF.md
 # section 1 for the discovery procedure. Skin is 1.

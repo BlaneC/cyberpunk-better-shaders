@@ -1,5 +1,12 @@
 # 38 — Wild ideas after 37: the unlock table
 
+> **2026-08-30 (44):** §1.2's `+2` fetch is the **shading normal** (`+1` is
+> albedo) — B1/M7 have no material channel to read. The "vkd3d-proton does
+> not deliver SER" line is half right: it enables the extension and never
+> emits the instruction, and the layer's handling of that was the bug that
+> un-patched ptq on every SER launch. See `44` §2.1, §2.4. The low-hanging
+> items (M2–M6) are built; `45` runs them.
+
 Written 2026-08-29. Investigation only — nothing was built, patched or launched.
 Sources: the 3273-module dump in `~/callisto_dump/`; the 406-file disassembly
 set in `dev/disasm/`; `analysis/evidence/meta/capA_prov.jsonl` via

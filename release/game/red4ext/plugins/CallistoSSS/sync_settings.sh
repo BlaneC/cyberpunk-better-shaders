@@ -34,7 +34,7 @@ INSTALL_DIR="$HOME/.local/lib/callisto"
 # raygen-side skin BRDF is sampling-only and cannot change a pixel
 # (00-ARCHITECTURE section 2), and keeping it cost a second half of the ptq
 # matrix plus a SER trap. A stale key in brdf_params.txt is ignored.
-tier=1 kernel=on skin=on shadowcull=on shadowset=full-shadow
+tier=1 kernel=detail skin=on shadowcull=on shadowset=full-shadow
 #
 # There is no `skintrans`/`skinthick` key: the Tier-4 backlit transmission
 # they selected was removed 2026-08-30 (handoff/39). A stale brdf_params.txt
@@ -54,10 +54,28 @@ fi
 
 mkdir -p "$INSTALL_DIR/swaps"
 
-# kernel -- SSS diffusion kernel (RED4ext).
+# kernel -- SSS diffusion kernel (RED4ext). Since 44-LOW-HANGING-FRUIT this
+# names a PRESET (detail | balanced | callisto | vanilla), one of the four
+# kernels dev/author_callisto_kernel.py ships in kernels/; the chosen one is
+# copied over kernel.bin, which the plugin reads once per boot. `on` is the
+# legacy alias for detail. vanilla is a re-authored copy of the engine's own
+# kernel, NOT the engine data: `off` (disable.flag) is the true A/B control.
+case "$kernel" in on|1|'') kernel=detail ;; esac
+kernel_note=""
 if [[ "$kernel" == "off" ]]; then
     echo 1 > "$KERNEL_FLAG"
 else
+    ksrc="$PLUGIN_DIR/kernels/kernel.$kernel.bin"
+    if [[ ! -f "$ksrc" && -f "$PLUGIN_DIR/kernels/kernel.detail.bin" ]]; then
+        echo "[CallistoSSS] kernel='$kernel' has no kernels/kernel.$kernel.bin; using detail" >&2
+        kernel=detail; ksrc="$PLUGIN_DIR/kernels/kernel.detail.bin"
+    fi
+    if [[ -f "$ksrc" ]]; then
+        cp -pf "$ksrc" "$PLUGIN_DIR/kernel.bin"
+    else
+        kernel_note=" (no kernels/ shipped -- serving the kernel.bin already present)"
+        echo "[CallistoSSS] no kernels/ dir next to sync_settings.sh; kernel.bin left as is" >&2
+    fi
     rm -f "$KERNEL_FLAG"
 fi
 
@@ -287,7 +305,7 @@ else
     rm -f "$INSTALL_DIR/ptrefl.disable"
 fi
 
-echo "[CallistoSSS] synced: tier=$tier kernel=$kernel skin=$skin/skinspec=$skin_set shadowcull=$shadowcull/$shadow_set"
+echo "[CallistoSSS] synced: tier=$tier kernel=$kernel$kernel_note skin=$skin/skinspec=$skin_set shadowcull=$shadowcull/$shadow_set"
 echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce msggx=$ptmsggx) ptrefl=$ptrefl ser=$ser_state"
 
 # --- pipeline cache gate ---------------------------------------------------

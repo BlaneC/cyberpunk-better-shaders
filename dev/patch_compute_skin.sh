@@ -51,11 +51,41 @@ WORK="$MOD_DIR/dev/disasm/compute"
 #                                          rather than "does it look right"
 #
 # Adding a level is one line here plus one in init.lua's SKIN_LEVELS.
+# Format: "name:parent:k=v,k=v". `parent` is the rung this one must differ
+# from (the ladder's byte-difference check); every rung must also differ from
+# `off`. Since 44-LOW-HANGING-FRUIT the gloss knobs are spelled out in full on
+# every rung, because --with-skinspec's KNOBS defaults are NOT identity
+# (n_s=0.65, alpha_max=0.2025): a rung that names only its own knob would
+# silently carry the default gloss as well.
+#
+# Realism axes (44), all skin-gated, all identity when absent:
+#   alpha_scale    GGX alpha multiplier -- rougher/glossier while KEEPING the
+#                  authored roughness variation the cap flattens (33 s5, 43 M2).
+#                  alpha = roughness^2, so x1.3 is roughness x1.14, x0.7 is x0.84.
+#   dcouple        diffuse/specular energy coupling, (1-s(1-NoL)^5)(1-s(1-NoV)^5)
+#                  (43 M4): grazing skin darkens instead of glowing.
+#   micro_k        albedo-driven micro-shadowing (43 M5): dark, porous skin
+#                  self-shadows at grazing light; pale skin does not.
+#   eye_alpha_max  class-8 (eye) alpha ceiling (31 s5, 43 M6): wet/glassy eyes.
+G0="n_s=0.5,spec_gain=1.0,alpha_max=1.0"          # gloss OFF -- realism axes only
 LEVELS=(
-    "subtle:n_s=0.60,spec_gain=1.0,alpha_max=0.1600"
-    "medium:n_s=0.70,spec_gain=1.2,alpha_max=0.0900"
-    "strong:n_s=0.80,spec_gain=1.5,alpha_max=0.0450"
-    "extreme:n_s=0.90,spec_gain=2.0,alpha_max=0.0200"
+    # the original oily ladder: Fresnel reshape + roughness CEILING
+    "subtle:off:n_s=0.60,spec_gain=1.0,alpha_max=0.1600"
+    "medium:subtle:n_s=0.70,spec_gain=1.2,alpha_max=0.0900"
+    "strong:medium:n_s=0.80,spec_gain=1.5,alpha_max=0.0450"
+    "extreme:strong:n_s=0.90,spec_gain=2.0,alpha_max=0.0200"
+    # roughness SCALE (keeps variation)
+    "rough-1.3:off:$G0,alpha_scale=1.3"
+    "rough-1.6:rough-1.3:$G0,alpha_scale=1.6"
+    "gloss-0.7:off:$G0,alpha_scale=0.7"
+    # single-axis rungs for attribution
+    "couple:off:$G0,dcouple=1.0"
+    "micro:off:$G0,micro_k=1.0"
+    "eyes-wet:off:$G0,eye_alpha_max=0.0064"
+    "eyes-glassy:eyes-wet:$G0,eye_alpha_max=0.0016"
+    # the combined "realistic skin" candidates
+    "real:rough-1.3:$G0,alpha_scale=1.3,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064"
+    "real-gloss:gloss-0.7:$G0,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064"
 )
 
 TIER=skin; EXTRA=(); SETS=0; SKINSPEC=0
@@ -104,8 +134,12 @@ RT_DONE=0
 build_into() {
     local dest="$1"; shift
     local args=(--tier "$TIER")
-    if (( ${#EXTRA[@]} )); then args+=("${EXTRA[@]}"); fi
     args+=("$@")
+    # The command-line --set overrides go LAST so they win over a rung's own
+    # values (argparse keeps the last assignment). Before 44 they went first,
+    # so the documented `--sets --set alpha_max=0.06` was silently a no-op on
+    # every rung that named alpha_max itself.
+    if (( ${#EXTRA[@]} )); then args+=("${EXTRA[@]}"); fi
 
     mkdir -p "$dest"
     rm -f "$dest"/*.spv "$dest"/*.spvasm 2>/dev/null || true
@@ -178,8 +212,10 @@ build_into() {
     python3 - "$dest" <<'COV' || exit 1
 import glob, json, os, sys
 dest = sys.argv[1]
-tot = dict(mods=0, c1=0, chans=0, alphas=0, lifted=0)
+tot = dict(mods=0, c1=0, chans=0, alphas=0, lifted=0, dcouple=0, micro=0,
+           micro_skipped=0)
 bad = []
+micro_short = []
 for f in sorted(glob.glob(os.path.join(dest, '.skin.*.json'))):
     if os.path.getsize(f) == 0:
         continue                     # module failed to patch; already reported
@@ -191,6 +227,13 @@ for f in sorted(glob.glob(os.path.join(dest, '.skin.*.json'))):
     tot['c1'] += di.get('c1_sites', 0)
     tot['chans'] += sp.get('chans', 0)
     tot['alphas'] += len(ac.get('alphas', []))
+    tot['dcouple'] += di.get('dcouple_sites', 0)
+    tot['micro'] += di.get('micro_sites', 0)
+    nms = len(di.get('micro_skipped', []))
+    tot['micro_skipped'] += nms
+    if nms:
+        micro_short.append('%s:%d/%d' % (d['module'][:8], di.get('micro_sites', 0),
+                                         di.get('micro_sites', 0) + nms))
     if 'OpPhi' in d.get('class_gate', {}).get('def', ''):
         tot['lifted'] += 1
     n = (len(di.get('skipped_dom', [])) + len(sp.get('skipped_dom', []))
@@ -202,6 +245,15 @@ for f in sorted(glob.glob(os.path.join(dest, '.skin.*.json'))):
 print('  coverage: %d modules, %d c1 sites, %d gloss channels, %d alphas'
       ' (%d gate(s) lifted onto a class phi)'
       % (tot['mods'], tot['c1'], tot['chans'], tot['alphas'], tot['lifted']))
+if tot['dcouple'] or tot['micro'] or tot['micro_skipped']:
+    # micro-shadowing needs the site's diffuse colour; ~25 of 181 sites fan
+    # out through light*shadow only and have no reachable albedo (44 s3).
+    # Those sites keep c1 (and coupling) and skip micro -- reported, never
+    # fatal, because the skip is structural, not a gate failure.
+    print('  realism: %d coupling sites, %d micro-shadow sites (%d sites have '
+          'no reachable albedo: %s)' % (tot['dcouple'], tot['micro'],
+                                         tot['micro_skipped'],
+                                         ' '.join(micro_short) or '-'))
 if bad:
     sys.stderr.write('  SITES SKIPPED -- the class gate does not reach the shading:\n')
     for m, why in bad[:10]:
@@ -218,7 +270,6 @@ if (( SETS )); then
     build_into "$MOD_DIR/swaps.skin.off"
     off_n=$BUILT
     BUILT_SETS=(off)
-    prev_gloss=off
     # PARENT[name] is the set this one must differ from: one step down its own
     # axis. Comparing every rung only against `off` would pass a ladder whose
     # top three rungs were identical to each other, which is precisely the
@@ -226,14 +277,14 @@ if (( SETS )); then
     # to catch.
     declare -A PARENT=()
     for spec in "${LEVELS[@]}"; do
-        lvl="${spec%%:*}"; kv="${spec#*:}"
+        IFS=':' read -r lvl parent kv <<< "$spec"
+        [[ -n "$kv" ]] || { echo "LEVELS entry '$spec' is not name:parent:k=v" >&2; exit 2; }
         setargs=(--with-skinspec)
         IFS=',' read -ra kvs <<< "$kv"
         for one in "${kvs[@]}"; do setargs+=(--set "$one"); done
-        echo "--- set '$lvl' (c1 + gloss: $kv) ---"
+        echo "--- set '$lvl' (c1 + $kv; parent $parent) ---"
         build_into "$MOD_DIR/swaps.skin.$lvl" "${setargs[@]}"
-        PARENT[$lvl]="$prev_gloss"
-        prev_gloss="$lvl"
+        PARENT[$lvl]="$parent"
         BUILT_SETS+=("$lvl")
     done
 
@@ -294,7 +345,12 @@ echo "installed ${#inst[@]} compute swap(s) -> $DEST (overlay 'skin')"
 # {off,on} became a five-rung ladder), and a stale dir left behind is a level
 # the selector can still be pointed at while nothing rebuilds it.
 if (( SETS )); then
-    rm -rf "$INSTALL_DIR/skin.set"
+    # probe-* rungs belong to dev/patch_subtype_probe.sh --install; before 44
+    # this rm -rf silently deleted them and the CET selector kept naming them.
+    for old in "$INSTALL_DIR/skin.set"/*/; do
+        [[ -d "$old" ]] || continue
+        case "$(basename "$old")" in probe-*) ;; *) rm -rf "$old" ;; esac
+    done
     for v in "${BUILT_SETS[@]}"; do
         vd="$INSTALL_DIR/skin.set/$v"
         mkdir -p "$vd"
@@ -305,7 +361,7 @@ if (( SETS )); then
         cp -pf "$MOD_DIR/swaps.skin.$v"/*.spv "$vd/"
     done
     echo "parked ${#BUILT_SETS[@]} sets -> $INSTALL_DIR/skin.set: ${BUILT_SETS[*]}"
-    echo "  the CET selector 'Oily / wet skin' (skinspec) picks between them"
+    echo "  the CET selector 'Skin build' (skinspec) picks between them"
 fi
 
 if [[ -f "$INSTALL_DIR/skin.disable" ]]; then
