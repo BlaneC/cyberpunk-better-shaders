@@ -22,6 +22,9 @@
 # Those two keep whatever the tier-1 pass produced, which is why the chain runs
 # in this order and not the reverse.
 #
+# (skinray was removed 2026-08-30 -- handoff/43 -- so the skin/ half below is
+# no longer materialised by sync_settings.sh. It is still built so an older
+# install keeps working; delete it once every install has been resynced.)
 # Each combo carries two bases, because skinray already ships a patched copy of
 # two of the twelve permutations and an overlay hit would silently replace it:
 #

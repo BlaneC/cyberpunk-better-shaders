@@ -41,11 +41,47 @@ W, H = 32, 8
 SUBKERNELS = [(0, 15), (15, 9), (24, 6)]   # (baseX, tapCount)
 VALID_ROWS = 3
 
-# ---- Callisto knobs (tune here) --------------------------------------
-TAIL_WIDEN = (2.50, 1.10, 1.00)   # per-channel: c1 diffuse-fresnel analog
-MID_LIFT = 0.25                   # c1 retroreflection analog
-CENTER_SOFTEN = 0.35              # c2 smooth-terminator analog
-OFFSET_SCALE = 10.0               # scales nonzero tap offsets (blur radius)
+# ---- Callisto knobs ---------------------------------------------------
+#
+# OFFSET_SCALE IS THE ONE THAT MATTERS FOR FACIAL DETAIL, and the original
+# value here was 10.0 -- a TEN TIMES wider subsurface blur than the engine
+# authored.  An SSS kernel is a spatial blur over the diffuse lighting on
+# skin, so at 10x radius every pore-scale and small-feature lighting
+# variation on a face is averaged away before it is ever seen.  That is the
+# "faces read soft / the shading just isn't detailed / it's all smoothed
+# over" complaint, and it was this mod's own default (handoff/33 section 2).
+#
+# CENTER_SOFTEN compounds it: it moves weight OUT of the centre tap and into
+# the off-centre taps, which is the same direction -- less of the pixel's own
+# lighting, more of its neighbours'.
+#
+# Presets, selected with --preset (default: `detail`):
+#
+#   detail   the sharp one.  Vanilla blur RADIUS, no centre softening, and
+#            only the red-channel tail kept from the Callisto reshape -- so
+#            skin still gets the warm bleed that reads as flesh, without the
+#            smear that costs the texture.  THIS IS THE DEFAULT NOW.
+#   balanced 2x radius, mild softening: the Callisto character with some of
+#            the detail cost back.
+#   callisto the original shipped shape (10x radius).  Kept so the change is
+#            reversible and A/B-able, NOT because it is recommended.
+#   vanilla  identity -- reshapes nothing, for a true control.  With this the
+#            swapped LUT is byte-identical to the engine's own upload.
+#
+# A/B note: the kernel is uploaded once at boot by the RED4ext plugin, so a
+# preset change needs a relaunch, not a reload.  The CET "Callisto skin
+# kernel" switch turns the whole swap off, which is the vanilla control.
+PRESETS = {
+    'detail':   dict(tail=(1.60, 1.05, 1.00), mid=0.10, soften=0.00, offset=1.0),
+    'balanced': dict(tail=(2.00, 1.08, 1.00), mid=0.18, soften=0.15, offset=2.0),
+    'callisto': dict(tail=(2.50, 1.10, 1.00), mid=0.25, soften=0.35, offset=10.0),
+    'vanilla':  dict(tail=(1.00, 1.00, 1.00), mid=0.00, soften=0.00, offset=1.0),
+}
+_P = PRESETS['detail']
+TAIL_WIDEN = _P['tail']           # per-channel: c1 diffuse-fresnel analog
+MID_LIFT = _P['mid']              # c1 retroreflection analog
+CENTER_SOFTEN = _P['soften']      # c2 smooth-terminator analog
+OFFSET_SCALE = _P['offset']       # scales nonzero tap offsets (BLUR RADIUS)
 # Runtime CB observed baseX=0 tapCount=6: the game reads only the first
 # USED_TAPS of the 15-tap kernel. Normalize the radius axis to that window
 # so tail/mid shaping lands on taps that are actually sampled.
@@ -123,6 +159,33 @@ def reshape_row(row):
     return out
 
 def main():
+    global TAIL_WIDEN, MID_LIFT, CENTER_SOFTEN, OFFSET_SCALE, DST_BIN, DST_JSON
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--preset', default='detail', choices=sorted(PRESETS),
+                    help='named knob set (default: detail -- vanilla blur '
+                         'radius, no centre softening)')
+    ap.add_argument('--out', help='output .bin path (default: %s)' % DST_BIN)
+    ap.add_argument('--offset-scale', type=float,
+                    help='override the blur RADIUS multiplier; 1.0 is what '
+                         'the engine authored')
+    ap.add_argument('--center-soften', type=float,
+                    help='override the centre-tap bleed (0 keeps the pixel\'s '
+                         'own lighting)')
+    a = ap.parse_args()
+    P = PRESETS[a.preset]
+    TAIL_WIDEN, MID_LIFT = P['tail'], P['mid']
+    CENTER_SOFTEN, OFFSET_SCALE = P['soften'], P['offset']
+    if a.offset_scale is not None:
+        OFFSET_SCALE = a.offset_scale
+    if a.center_soften is not None:
+        CENTER_SOFTEN = a.center_soften
+    if a.out:
+        DST_BIN = a.out
+        DST_JSON = os.path.splitext(a.out)[0] + '.json'
+    print(f"preset={a.preset}  tail={TAIL_WIDEN} mid={MID_LIFT} "
+          f"soften={CENTER_SOFTEN} offset_scale={OFFSET_SCALE}")
     tex = load(SRC)
     new = [reshape_row(tex[y]) if y < VALID_ROWS else [px[:] for px in tex[y]]
            for y in range(H)]

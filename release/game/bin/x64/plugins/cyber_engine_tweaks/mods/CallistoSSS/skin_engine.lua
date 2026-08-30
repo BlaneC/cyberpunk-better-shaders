@@ -26,6 +26,16 @@
 --                                     LightBlockerInfluence
 --   Developer/FeatureToggles          CharacterRimEnhancement,
 --                                     CharacterSubsurface{Translucency,Scattering}
+--   Editor/Characters/Eyes            UseAOOnEyes
+--
+-- EYES: that last line is the ENTIRE engine surface for eye shading.  A
+-- string pass over the same exe finds no cvEye* shader constant, and no
+-- `cornea`/`sclera`/`iris`/`caruncle`/`tearfilm`/`wetness` string anywhere
+-- (handoff/31 section 1) -- one boolean is all the renderer exposes.  It
+-- gates ambient occlusion on the eyeball, so turning it OFF brightens the
+-- sclera and lets a catchlight read against it; that is a small but real
+-- lever on how wet an eye looks, and it is the only free one.  Anything
+-- more needs the class-8 roughness splice (handoff/31).
 --
 -- CAVEAT, stated: the three RimEnhancement_RayTracing keys sit next to the
 -- RT/Skin path in the string table, but the string is deduplicated so
@@ -51,6 +61,7 @@ local RIM     = "Editor/Characters/RimEnhancement/Skin"
 local RIMROOT = "Editor/Characters/RimEnhancement"
 local RIMRT   = "Editor/Characters/RimEnhancement_RayTracing/Skin"
 local TOGGLES = "Developer/FeatureToggles"
+local EYES    = "Editor/Characters/Eyes"
 
 -- label, path, key, kind, min, max, dflt.
 -- dflt is only a fallback for a CVar that cannot be read at all: at register
@@ -77,6 +88,10 @@ local DEFS = {
   { key = "AllowSkinAmbientMix",      path = SKIN, kind = "bool", label = "Allow skin ambient mix", dflt = false },
   { key = "SkinAmbientIntensity_Factor", path = SKIN, label = "Skin ambient intensity factor", min = 0.0, max = 2.0, dflt = 1.0 },
   { key = "SkinAmbientMix_Factor",    path = SKIN, label = "Skin ambient mix factor",    min = 0.0, max = 2.0, dflt = 1.0 },
+
+  -- eyes -- the whole engine-side eye surface is this one boolean
+  { key = "UseAOOnEyes", path = EYES, kind = "bool", dflt = true,
+    label = "Eyes: ambient occlusion on eyeballs" },
 
   -- feature gates for the passes above
   { key = "CharacterRimEnhancement",       path = TOGGLES, kind = "bool", dflt = true,
@@ -197,7 +212,7 @@ function M.register(ns)
     -- attribution) visible in the header instead of as a silently inert
     -- slider -- the loud-gap discipline the patchers follow.
     ns.addSubcategory(P, string.format(
-        "Skin specular / sheen (engine, applies live) -- %d/%d CVars found",
+        "Skin & eyes (engine, applies live) -- %d/%d CVars found",
         found, #DEFS))
     ns.addSwitch(P, "Take over engine skin settings",
         "Cyberpunk's renderer already parameterises skin's specular "
@@ -233,6 +248,13 @@ function M.register(ns)
     for _, d in ipairs(DEFS) do
         local key = id(d)
         local desc = key
+        if d.path == EYES then
+            desc = desc .. "\n(the entire engine-side eye surface is this "
+                .. "one boolean -- there is no cvEye* constant in the exe. "
+                .. "OFF brightens the eyeball and lets a catchlight read "
+                .. "against the sclera; a real wet-eye highlight needs the "
+                .. "class-8 roughness splice, see handoff/31.)"
+        end
         if d.path == RIMRT then
             desc = desc .. "\n(attribution inferred: if this slider does "
                 .. "nothing, the key may belong to another RimEnhancement "
