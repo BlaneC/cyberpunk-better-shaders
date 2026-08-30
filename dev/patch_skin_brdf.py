@@ -98,28 +98,6 @@ KNOBS = {
     # GI-resolver dual-lobe variants: wider lobes (many indirect samples make
     # a tight lobe read as noise), TRT-weighted (the coloured glint shows in
     # bounce light). m_dual_gi defaults to m_dual (shared on/off).
-    # Callisto Tier-4 skin transmission (29-FACE-TRANSLUCENCY-AND-RAYS.md).
-    # Barre-Brisebois translucency added at the diffuse accumulator, gated on
-    # the skin class. IDENTITY AT t_thick=0 -- nothing is emitted at all, so
-    # a Tier-4-off build is byte-identical to one built before the pass
-    # existed. Every other knob only matters when t_thick > 0.
-    "t_thick": 0.0,      # overall strength / apparent thinness; 0 = off
-    "t_power": 12.0,     # view falloff exponent; higher = tighter rim
-    "t_distort": 0.35,   # how far the transmission half-vector bends to N
-    "t_r": 1.0,          # transmission tint, red   (blood is red-dominant)
-    "t_g": 0.28,         # transmission tint, green
-    "t_b": 0.16,         # transmission tint, blue
-    # Mask weights, each a lerp from 1 (ignore the term) to the term itself.
-    # t_wback is the one that keeps this off directly-lit skin: saturate(-N.L)
-    # is nonzero only where the light is BEHIND the surface, which is what
-    # "the light passes through the ear" means. Leave it at 1.
-    "t_wback": 1.0,      # weight on saturate(-N.L)
-    "t_wshadow": 0.0,    # weight on (1 - sun shadow mask)
-    "t_wblock": 0.0,     # weight on the engine's own light-blocker mask
-    "t_walbedo": 1.0,    # weight on the surface albedo
-    # Energy damp: scale the existing skin diffuse by (1 - t_damp) so the
-    # added transmission does not simply brighten faces (23-*.md section 4).
-    "t_damp": 0.0,
     "m_dual_gi": -1.0,   # <0 => follow m_dual; >=0 overrides GI strength
     "p_R_gi": 8.0,       # GI R lobe exponent (wider than direct)
     "p_TRT_gi": 6.0,     # GI TRT lobe exponent (wider than direct)
@@ -128,8 +106,7 @@ KNOBS = {
 VANILLA = dict(KNOBS, tint=(1.0, 1.0, 1.0), rho_f=1.0, rho_r=1.0,
                s_h=1.0, a_min=0.0, k_sheen=0.0, w_wrap=0.0, m_aniso=0.0,
                trt_r=1.0, trt_g=1.0, trt_b=1.0,
-               n_s=0.5, spec_gain=1.0, alpha_max=1.0,
-               t_thick=0.0, t_damp=0.0)
+               n_s=0.5, spec_gain=1.0, alpha_max=1.0)
 
 # gbuffer material class for hair -- NOT yet identified; see HAIR_HANDOFF.md
 # section 1 for the discovery procedure. Skin is 1.
