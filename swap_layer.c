@@ -23,6 +23,36 @@
  *   CALLISTO_SWAP_QUIET=1   log swap hits/errors only, not every module
  *   CALLISTO_DUMP_DIR       dump incoming SPIR-V of every module here
  *   CALLISTO_DUMP_MATCH     only dump ids containing this substring
+ *   CALLISTO_SER_DISABLE=1  never touch vkCreateDevice (see "SER" below)
+ *
+ * SER -- Shader Execution Reordering (handoff/41-SER-BUILD.md, idea A1 of
+ * handoff/38-WILD-IDEAS.md). Cyberpunk uses the DXR HitObject/SER path on
+ * Windows and ships `cvRayTracingEnableReferenceSER`; vkd3d-proton does not
+ * translate NVAPI shader intrinsics, so on Linux the CVar is inert and 0 of
+ * 3273 dumped modules declare SPV_NV_shader_invocation_reorder -- while this
+ * driver reports VK_NV_ray_tracing_invocation_reorder with
+ * ReorderingHint = REORDER_MODE_REORDER_EXT. dev/patch_ser.py puts the
+ * instruction back into the twelve rgs_reference_main permutations.
+ *
+ * A module that declares that capability is REJECTED at pipeline creation
+ * unless the extension is enabled on the VkDevice, and the application (i.e.
+ * vkd3d-proton) never asks for it. So this layer asks on its behalf, in
+ * xCreateDevice: it appends the extension name to a COPY of the caller's
+ * array and chains VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV into
+ * pNext. Every step is conditional and every refusal is logged:
+ *   {"ev":"ser","action":"enabled"|"skipped"|"fallback",...}
+ * If anything at all is off -- env flag, driver without the extension, an app
+ * that did not enable VK_KHR_ray_tracing_pipeline (the extension's own
+ * dependency; enabling ours without it would make vkCreateDevice FAIL and the
+ * game not start) -- the call passes straight through untouched. And if the
+ * modified create fails anyway, it is retried with the caller's original
+ * struct, so this can never be the reason the game does not launch.
+ *
+ * The other half of the safety net is in xCreateShaderModule: a swap file
+ * that declares the SER capability is NOT served to a device that does not
+ * have it enabled. Without that check a stale swaps.ser/ against a layer
+ * that failed to enable the extension would turn into a raytracing-pipeline
+ * creation failure, i.e. a black screen, rather than a log line.
  *
  * Dispatch evidence (the missing link between "created" and "dispatched"):
  * the layer records every module's identity, then hooks
@@ -62,6 +92,7 @@ static FILE *g_log;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_seq;
 static int g_quiet, g_disabled;
+static int g_ser_disabled;       /* CALLISTO_SER_DISABLE */
 static const char *g_dump_dir;   /* CALLISTO_DUMP_DIR */
 
 /* The constructor can run before the sandbox has finished setting up the
@@ -77,6 +108,8 @@ static void log_open(void) {
     g_quiet = getenv("CALLISTO_SWAP_QUIET") && !strcmp(getenv("CALLISTO_SWAP_QUIET"), "1");
     g_disabled = getenv("CALLISTO_SWAP_DISABLE") && !strcmp(getenv("CALLISTO_SWAP_DISABLE"), "1");
     g_dump_dir = getenv("CALLISTO_DUMP_DIR");
+    g_ser_disabled = getenv("CALLISTO_SER_DISABLE")
+                     && !strcmp(getenv("CALLISTO_SER_DISABLE"), "1");
 }
 
 /* call with g_mu held */
@@ -241,7 +274,9 @@ static uint32_t *load_swap_from(const char *dir, const char *name,
     snprintf(path, sizeof path, "%s/%s.spv", dir, name);
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    long n = -1;
+    if (fseek(f, 0, SEEK_END) == 0) n = ftell(f);
+    if (n < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
     if (n < 20 || (n & 3)) { fclose(f); LOGF("\"ev\":\"swap_bad\",\"file\":\"%s\",\"size\":%ld}", path, n); return NULL; }
     uint32_t *buf = malloc(n);
     if (!buf || fread(buf, 1, n, f) != (size_t)n) { fclose(f); free(buf); return NULL; }
@@ -250,6 +285,36 @@ static uint32_t *load_swap_from(const char *dir, const char *name,
     *out_size = (size_t)n;
     LOGF("\"ev\":\"swap_load\",\"file\":\"%s\",\"size\":%ld}", path, n);
     return buf;
+}
+
+/* If an overlay dir carries a MANIFEST.txt, echo its first line into the log.
+ *
+ * `26` section 7 is the reason: the layer logs a swap's FILE NAME and SIZE,
+ * and binary SPIR-V stores an OpConstant in a fixed-width instruction, so two
+ * variants that differ only in a constant are indistinguishable in the log --
+ * and an on-screen result was once credited to a set that had never been
+ * launched. A one-line provenance stamp written by the patcher costs nothing
+ * and makes any future observation attributable from the log alone.
+ * Everything outside [ -~] and the two JSON metacharacters is dropped, since
+ * the line goes straight into a JSONL field. */
+static void log_overlay_manifest(const char *name, const char *dir) {
+    char path[4608];
+    snprintf(path, sizeof path, "%s/MANIFEST.txt", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char raw[512], clean[512];
+    if (fgets(raw, sizeof raw, f)) {
+        size_t j = 0;
+        for (size_t i = 0; raw[i] && j + 1 < sizeof clean; i++) {
+            unsigned char c = (unsigned char)raw[i];
+            if (c < 0x20 || c > 0x7e || c == '"' || c == '\\') continue;
+            clean[j++] = (char)c;
+        }
+        clean[j] = 0;
+        LOGF("\"ev\":\"overlay_manifest\",\"name\":\"%s\",\"line\":\"%s\"}",
+             name, clean);
+    }
+    fclose(f);
 }
 
 /* Resolve <layerdir>/swaps.<name> and its <layerdir>/<name>.disable flag.
@@ -266,7 +331,21 @@ static void overlay_init(void) {
      * first-file-wins, so a leftover swaps.hair/ from an older install would
      * shadow the skin modules for the same shader ids and silently serve the
      * retired build. Dropping the name makes any stale dir inert. */
-    if (!list || !*list) list = "skin,shadowcull,ptq,ptrefl";
+    /* "ser" is FIRST on purpose. It is built ON TOP of whatever ptq serves
+     * (dev/patch_ser.sh refuses a vanilla source for exactly this reason), so
+     * it has to win the first-file-wins race against ptq for the twelve
+     * rgs_reference_main ids -- if ptq won, swaps.ser/ would be dead with no
+     * error anywhere. The flip side is the trap this ordering creates: a
+     * swaps.ser/ built against an OLD ptq combo keeps serving that combo
+     * after the CET page changes a PT toggle -- silently, and while LOOKING
+     * applied, because the cache stamp sees swaps.ptq/ change and clears the
+     * pipeline caches. sync_settings.sh now ENFORCES this rather than asking
+     * the reader to remember it: it recomputes the content sha of the
+     * materialized swaps.ptq/ and compares it against the src_sha in
+     * swaps.ser/MANIFEST.txt, writing ser.disable on any mismatch. Failing
+     * that way round is the safe one -- losing the hint cannot change a pixel,
+     * whereas a stale ser silently overrides the PT quality selection. */
+    if (!list || !*list) list = "ser,skin,shadowcull,ptq,ptrefl";
     const char *base = g_layerdir[0] ? g_layerdir : ".";
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", list);
@@ -284,6 +363,7 @@ static void overlay_init(void) {
             snprintf(g_overlayname[g_noverlay], 64, "%s", tok);
             snprintf(g_overlaydir[g_noverlay], 4096, "%s", dir);
             g_noverlay++;
+            log_overlay_manifest(tok, dir);
         }
     }
 }
@@ -413,6 +493,10 @@ typedef struct {
     PFN_vkGetInstanceProcAddr gipa;
     PFN_vkCreateDevice CreateDevice;
     PFN_vkDestroyInstance DestroyInstance;
+    /* Needed only to ask whether the physical device supports SER before we
+     * try to enable it. Resolved through the NEXT layer's gipa, so it is the
+     * driver's answer, not ours. */
+    PFN_vkEnumerateDeviceExtensionProperties EnumDevExt;
 } InstData;
 typedef struct {
     DispatchKey key;
@@ -423,6 +507,11 @@ typedef struct {
     PFN_vkDestroyPipeline DestroyPipeline;
     PFN_vkCreateRayTracingPipelinesKHR CreateRTPipelines;
     PFN_vkCreateComputePipelines CreateComputePipelines;
+    /* 1 iff VK_NV_ray_tracing_invocation_reorder is enabled on THIS device.
+     * Per-device rather than global on purpose: a dozen Proton helper
+     * processes and their devices load this layer, and serving a SER module
+     * to a device without the extension is a pipeline-creation failure. */
+    int ser;
 } DevData;
 
 static InstData g_inst[MAX_OBJ]; static int g_ninst;
@@ -662,6 +751,148 @@ static void trace_maybe_log(const void *cb) {
 }
 
 /* ------------------------------------------------------------------ */
+/* SER -- Shader Execution Reordering                                   */
+/* ------------------------------------------------------------------ */
+/* See the header comment. Two pieces:
+ *
+ *   ser_enable_setup()  decides whether to add
+ *                       VK_NV_ray_tracing_invocation_reorder to a
+ *                       VkDeviceCreateInfo, and builds the modified copy.
+ *   spv_declares_ser()  says whether a swap file needs it, so a module is
+ *                       never handed to a device that cannot take it.
+ *
+ * Note on vkEnumerateDeviceExtensionProperties: this layer deliberately does
+ * NOT intercept the application-facing form of it, and does not need to. We
+ * are not implementing an extension -- the NVIDIA ICD already advertises this
+ * one, so vkd3d-proton's own queries already see it and would see it with or
+ * without us. It simply never asks for it, because it has no SER to express.
+ * Advertising it *harder* would buy nothing and could mislead a caller into
+ * believing a translation path exists that does not. (The layer's exported
+ * vkEnumerateDeviceExtensionProperties is only ever reached by the loader
+ * with pLayerName == our own layer name, for our own -- empty -- list;
+ * vkGetInstanceProcAddr does not hand the symbol out, so an app query falls
+ * through to the next link in the chain untouched.)
+ *
+ * vkd3d-proton queries features independently, through
+ * vkGetPhysicalDeviceFeatures2 with its own pNext chain, and never reads back
+ * ppEnabledExtensionNames -- so appending to a copy of that array is
+ * invisible to it. The one thing that would bite is a duplicate feature
+ * struct in pNext, which is invalid usage, so the chain is walked first and
+ * ours is not added if one is already there. */
+#define CALLISTO_SER_EXT VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME
+#define CALLISTO_RTPIPE_EXT VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME
+
+/* SPIR-V: Capability ShaderInvocationReorderNV. Not in vulkan_core.h -- it is
+ * a SPIR-V enumerant, not a Vulkan one, so there is no header to include and
+ * no compiler error if it is wrong. The value below was NOT taken from a spec
+ * table; it was read out of an assembled module:
+ *   spirv-as a raygen declaring the capability, then dump word[6] of the
+ *   OpCapability run. It is 5383. An earlier build of this file had 5345,
+ *   which compiled and ran and silently never matched -- the guard below was
+ *   a no-op and would have served a SER module to a device without the
+ *   extension. dev/patch_ser.sh --selftest is what caught it; keep that test
+ *   working. */
+#define SPV_CAP_SHADER_INVOCATION_REORDER_NV 5383u
+#define SPV_OP_CAPABILITY 17u
+
+/* Does this module declare the SER capability? Capabilities are the first
+ * section after the 5-word header and are contiguous, so the scan stops at
+ * the first instruction that is not OpCapability. */
+static int spv_declares_ser(const uint32_t *w, size_t bytes) {
+    size_t n = bytes / 4, i;
+    if (!w || n < 5 || w[0] != 0x07230203) return 0;
+    for (i = 5; i < n; ) {
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffffu;
+        if (len == 0 || i + len > n) break;
+        if (op != SPV_OP_CAPABILITY) break;
+        if (len >= 2 && w[i + 1] == SPV_CAP_SHADER_INVOCATION_REORDER_NV) return 1;
+        i += len;
+    }
+    return 0;
+}
+
+static int names_have(const char *const *names, uint32_t n, const char *want) {
+    for (uint32_t i = 0; i < n; i++)
+        if (names[i] && !strcmp(names[i], want)) return 1;
+    return 0;
+}
+
+/* Decide + build. Returns 1 if *out was filled with a modified create-info
+ * (caller owns *out_exts and must free it), 0 for "leave the caller's struct
+ * alone". *reason is always set to a short token for the log. */
+static int ser_enable_setup(InstData *inst, VkPhysicalDevice phys,
+        const VkDeviceCreateInfo *ci, VkDeviceCreateInfo *out,
+        VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV *feat,
+        const char ***out_exts, const char **reason) {
+    *out_exts = NULL;
+    if (g_ser_disabled)            { *reason = "env_disabled";   return 0; }
+    if (!inst || !inst->EnumDevExt) { *reason = "no_enum_fn";     return 0; }
+
+    const char *const *names = ci->ppEnabledExtensionNames;
+    uint32_t n = ci->enabledExtensionCount;
+    if (n && !names)               { *reason = "bad_ext_array";  return 0; }
+    if (names_have(names, n, CALLISTO_SER_EXT)) {
+        /* Somebody already asked for it -- nothing to do, and the feature
+         * struct is then theirs to own. */
+        *reason = "already_enabled";
+        return 0;
+    }
+    /* The extension's own dependency. Enabling ours without it makes
+     * vkCreateDevice FAIL, which means the game does not start -- and DXR is
+     * a setting the player can turn off, so this is not hypothetical. */
+    if (!names_have(names, n, CALLISTO_RTPIPE_EXT)) {
+        *reason = "no_ray_tracing_pipeline";
+        return 0;
+    }
+
+    /* Ask the driver, do not assume. */
+    uint32_t cnt = 0;
+    if (inst->EnumDevExt(phys, NULL, &cnt, NULL) != VK_SUCCESS || !cnt) {
+        *reason = "enum_failed";
+        return 0;
+    }
+    VkExtensionProperties *props = calloc(cnt, sizeof *props);
+    if (!props)                    { *reason = "oom";            return 0; }
+    int have = 0;
+    if (inst->EnumDevExt(phys, NULL, &cnt, props) == VK_SUCCESS)
+        for (uint32_t i = 0; i < cnt && !have; i++)
+            if (!strcmp(props[i].extensionName, CALLISTO_SER_EXT)) have = 1;
+    free(props);
+    if (!have)                     { *reason = "unsupported";    return 0; }
+
+    /* A duplicate sType in a pNext chain is invalid usage. If the app already
+     * chained the feature struct (it does not today, but a future
+     * vkd3d-proton might), leave the chain alone and let it speak. */
+    for (const VkBaseInStructure *p = ci->pNext; p; p = p->pNext)
+        if (p->sType ==
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV) {
+            *reason = "feature_already_chained";
+            return 0;
+        }
+
+    const char **e = malloc((size_t)(n + 1) * sizeof *e);
+    if (!e)                        { *reason = "oom";            return 0; }
+    for (uint32_t i = 0; i < n; i++) e[i] = names[i];
+    e[n] = CALLISTO_SER_EXT;
+
+    feat->sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
+    /* Prepending keeps every node the caller built -- including the loader's
+     * own VkLayerDeviceCreateInfo, whose pLayerInfo this function's caller
+     * advances and restores by pointer. Nothing is copied but the head. */
+    feat->pNext = (void *)(uintptr_t)ci->pNext;
+    feat->rayTracingInvocationReorder = VK_TRUE;
+
+    *out = *ci;
+    out->pNext = feat;
+    out->enabledExtensionCount = n + 1;
+    out->ppEnabledExtensionNames = e;
+    *out_exts = e;
+    *reason = "enabled";
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* instance / device creation (loader chain advance)                   */
 /* ------------------------------------------------------------------ */
 static VkResult VKAPI_CALL xCreateInstance(const VkInstanceCreateInfo *ci,
@@ -688,6 +919,8 @@ static VkResult VKAPI_CALL xCreateInstance(const VkInstanceCreateInfo *ci,
     d->gipa = next_gipa;
     d->CreateDevice = (PFN_vkCreateDevice)next_gipa(*pInst, "vkCreateDevice");
     d->DestroyInstance = (PFN_vkDestroyInstance)next_gipa(*pInst, "vkDestroyInstance");
+    d->EnumDevExt = (PFN_vkEnumerateDeviceExtensionProperties)
+        next_gipa(*pInst, "vkEnumerateDeviceExtensionProperties");
     LOGF("\"ev\":\"vkCreateInstance\",\"inst\":\"%p\"}", (void *)*pInst);
     return r;
 }
@@ -708,19 +941,51 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
     if (!next_create) next_create = (PFN_vkCreateDevice)
         next_gipa(VK_NULL_HANDLE, "vkCreateDevice");
     if (!next_create) return VK_ERROR_INITIALIZATION_FAILED;
+    /* ---- SER: ask for VK_NV_ray_tracing_invocation_reorder on the app's
+     * behalf. Everything here is conditional and reversible; see the header
+     * comment and ser_enable_setup(). */
+    VkDeviceCreateInfo ci2;
+    VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV serfeat;
+    const char **ser_exts = NULL;
+    const char *ser_reason = "not_attempted";
+    int ser_try = ser_enable_setup(id, phys, ci, &ci2, &serfeat,
+                                   &ser_exts, &ser_reason);
+    int ser_on = 0;
+
     VkLayerDeviceCreateInfo save = *lc;
     ((VkLayerDeviceCreateInfo *)lc)->u.pLayerInfo = lc->u.pLayerInfo->pNext;
-    VkResult r = next_create(phys, ci, ac, pDev);
+    VkResult r = next_create(phys, ser_try ? &ci2 : ci, ac, pDev);
+    if (ser_try && r == VK_SUCCESS) {
+        ser_on = 1;
+    } else if (ser_try) {
+        /* Never be the reason the game does not start. Retry with exactly
+         * what the caller passed; the link info is still advanced, which is
+         * what the next layer expects on either call. */
+        LOGF("\"ev\":\"ser\",\"action\":\"fallback\",\"result\":%d,"
+             "\"note\":\"modified vkCreateDevice failed; retrying vanilla\"}",
+             (int)r);
+        r = next_create(phys, ci, ac, pDev);
+        ser_reason = "create_failed";
+    }
     ((VkLayerDeviceCreateInfo *)lc)->u.pLayerInfo = save.u.pLayerInfo;
+    free(ser_exts);
+    LOGF("\"ev\":\"ser\",\"action\":\"%s\",\"reason\":\"%s\","
+         "\"ext\":\"%s\",\"app_exts\":%u,\"result\":%d}",
+         ser_on ? "enabled" : "skipped", ser_reason, CALLISTO_SER_EXT,
+         ci->enabledExtensionCount, (int)r);
     if (r != VK_SUCCESS) return r;
 
     VkDevice dev = *pDev;
     DevData *d = add_dev(dev);
     if (!d) {
+        /* Untracked: gdpa falls through, and xCreateShaderModule's SER guard
+         * reads a NULL DevData as "no SER on this device", so a SER-carrying
+         * swap is refused rather than handed to a device we cannot vouch for. */
         LOGF("\"ev\":\"table_full\",\"what\":\"device\",\"max\":%d}", MAX_OBJ);
-        return r;                       /* untracked: gdpa falls through */
+        return r;
     }
     d->gdpa = next_gdpa;
+    d->ser = ser_on;
     d->DestroyDevice = (PFN_vkDestroyDevice)d->gdpa(dev, "vkDestroyDevice");
     d->CreateShaderModule = (PFN_vkCreateShaderModule)d->gdpa(dev, "vkCreateShaderModule");
     d->DestroyShaderModule = (PFN_vkDestroyShaderModule)d->gdpa(dev, "vkDestroyShaderModule");
@@ -774,8 +1039,11 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
 
     char id[96] = {0}, dxil[17] = {0};
     int has_id = scan_dxil_id(ci->pCode, ci->codeSize, id, dxil);
-    char sha[65];
-    sha256(ci->pCode, ci->codeSize, sha);
+    /* The sha256 is only a secondary key (the sha256-<hex>.spv fallback) and
+     * a log field. Hashing every one of ~3300 modules per launch is wasted
+     * when the id matched and the log is quiet, so it is computed on demand. */
+    char sha[65]; int have_sha = 0;
+#define SHA() (have_sha ? sha : (have_sha = 1, sha256(ci->pCode, ci->codeSize, sha), sha))
 
     /* CALLISTO_DUMP_DIR: write the INCOMING SPIR-V for every module whose id
      * contains CALLISTO_DUMP_MATCH (default: all). The live game builds many
@@ -788,7 +1056,7 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
         if (!want || (has_id && strstr(id, want))) {
             char path[1024];
             snprintf(path, sizeof path, "%s/%s.spv", g_dump_dir,
-                     has_id ? id : sha);
+                     has_id ? id : SHA());
             /* Same module is created repeatedly; first write wins. */
             if (access(path, F_OK) != 0) {
                 FILE *df = fopen(path, "wb");
@@ -797,7 +1065,7 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
                     fclose(df);
                     LOGF("\"ev\":\"dump\",\"id\":\"%s\",\"sha256\":\"%s\","
                          "\"size\":%zu,\"path\":\"%s\"}",
-                         has_id ? id : "", sha, ci->codeSize, path);
+                         has_id ? id : "", SHA(), ci->codeSize, path);
                 }
             }
         }
@@ -806,7 +1074,7 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
     if (g_disabled) {
         if (!g_quiet)
             LOGF("\"ev\":\"module\",\"size\":%zu,\"id\":\"%s\",\"sha256\":\"%s\",\"swap\":\"disabled\"}",
-                 ci->codeSize, has_id ? id : "", sha);
+                 ci->codeSize, has_id ? id : "", SHA());
         VkResult r = next(dev, ci, ac, pMod);
         if (r == VK_SUCCESS && pMod) modid_add((uint64_t)*pMod, id, 0);
         return r;
@@ -816,14 +1084,30 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
     if (has_id) code = load_swap(id, &size);          /* <hash>.<entry>.spv */
     if (!code) {
         char name[80];
-        snprintf(name, sizeof name, "sha256-%s", sha);
+        snprintf(name, sizeof name, "sha256-%s", SHA());
         code = load_swap(name, &size);                /* sha256-<hex>.spv */
+    }
+
+    /* SER: a swap that declares ShaderInvocationReorderNV is only legal on a
+     * device where we managed to enable the extension. Serving it anyway does
+     * not fail here -- it fails later, inside
+     * vkCreateRayTracingPipelinesKHR, as a black screen with no obvious
+     * cause. Refuse it loudly instead and let the vanilla module through, so
+     * the worst case of a mismatched swaps.ser/ is "SER did nothing" (which
+     * is A1's expected failure mode anyway) rather than "the game is broken".
+     * `d->ser` is 0 for an untracked device, which is the right default. */
+    if (code && spv_declares_ser(code, size) && !d->ser) {
+        LOGF("\"ev\":\"ser_reject\",\"id\":\"%s\",\"size\":%zu,"
+             "\"reason\":\"device_extension_not_enabled\"}",
+             has_id ? id : "", size);
+        free(code);
+        code = NULL;
     }
 
     if (!code) {
         if (!g_quiet)
             LOGF("\"ev\":\"module\",\"size\":%zu,\"id\":\"%s\",\"sha256\":\"%s\",\"swap\":\"none\"}",
-                 ci->codeSize, has_id ? id : "", sha);
+                 ci->codeSize, has_id ? id : "", SHA());
         VkResult r = next(dev, ci, ac, pMod);
         if (r == VK_SUCCESS && pMod) modid_add((uint64_t)*pMod, id, 0);
         return r;
@@ -833,12 +1117,13 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
     sub.pCode = code; sub.codeSize = size;
     VkResult r = next(dev, &sub, ac, pMod);
     LOGF("\"ev\":\"module\",\"size\":%zu,\"id\":\"%s\",\"sha256\":\"%s\",\"swap\":\"%s\",\"result\":%d}",
-         ci->codeSize, has_id ? id : "", sha,
+         ci->codeSize, has_id ? id : "", SHA(),
          r == VK_SUCCESS ? "HIT" : "hit_failed", (int)r);
     if (r == VK_SUCCESS && pMod) modid_add((uint64_t)*pMod, id, 1);
     status_hit(has_id ? id : "", r == VK_SUCCESS);
     free(code);
     return r;
+#undef SHA
 }
 
 static void VKAPI_CALL xDestroyShaderModule(VkDevice dev, VkShaderModule mod,
@@ -868,7 +1153,27 @@ static VkResult VKAPI_CALL xCreateRayTracingPipelinesKHR(VkDevice dev,
     PFN_vkCreateRayTracingPipelinesKHR next = d ? d->CreateRTPipelines : NULL;
     if (!next) return VK_ERROR_INITIALIZATION_FAILED;
     VkResult r = next(dev, dop, cache, count, infos, ac, pPipes);
-    if (r != VK_SUCCESS && r != VK_PIPELINE_COMPILE_REQUIRED) return r;
+    if (r != VK_SUCCESS && r != VK_PIPELINE_COMPILE_REQUIRED) {
+        /* Used to return silently. A swap that the driver rejects fails
+         * HERE, not at module creation, so without this line the only symptom
+         * of a bad splice is a missing effect -- indistinguishable from a
+         * splice that ran and did nothing, which is exactly A1's own null
+         * result. Name the raygen so the log says which one. */
+        const char *bad = "";
+        if (count && infos) {
+            for (uint32_t s2 = 0; s2 < infos[0].stageCount; s2++)
+                if (infos[0].pStages[s2].stage == VK_SHADER_STAGE_RAYGEN_BIT_KHR) {
+                    pthread_mutex_lock(&g_id_mu);
+                    int mi = modid_find((uint64_t)infos[0].pStages[s2].module);
+                    if (mi >= 0 && mi < g_nmodid) bad = g_modid[mi].id;
+                    pthread_mutex_unlock(&g_id_mu);
+                    break;
+                }
+        }
+        LOGF("\"ev\":\"rt_pipeline_failed\",\"result\":%d,\"count\":%u,"
+             "\"first_rgs\":\"%s\"}", (int)r, count, bad);
+        return r;
+    }
 
     for (uint32_t i = 0; i < count; i++) {
         int rgs = -1;

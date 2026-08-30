@@ -23,27 +23,31 @@ INSTALL_DIR="$HOME/.local/lib/callisto"
 # ptreg defaults OFF: unlike the other four it is a deliberate look trade
 # (indirect gloss goes softer in exchange for less noise), so it is opt-in.
 # ptmsggx defaults ON since it was confirmed on screen 2026-08-28 (handoff/28).
-# skinspec (Callisto Tier-3 skin gloss) defaults to 'strong' on explicit
-# request (2026-08-29: "make it very obviously oily to start"). This is NOT a
-# confirmed-on-screen default -- the ledger rule (handoff/19, /28) still
-# applies and it has never been A/B'd -- it is an author's choice that the
-# feature be visible when enabled rather than invisible. Drop to off/subtle
-# here if that turns out wrong. Must stay in step with init.lua's own default:
-# when the two disagree the effect appears to switch itself off on any launch
-# where CET has not yet written brdf_params.txt.
-tier=1 kernel=on skin=on skinray=on shadowcull=on shadowset=full-shadow
-# skintrans (Callisto Tier-4 backlit skin transmission) defaults OFF: it has
-# never been seen on screen, and unlike skinspec it changes light where the
-# engine currently puts none, so it is opt-in until an A/B says otherwise.
-ptreg=off ptclamp=on ptbounce=on ptrefl=on ptmsggx=on skinspec=strong
-skintrans=off
+# skinspec (Callisto Tier-3 skin gloss) defaults OFF since 2026-08-29:
+# alpha_max is a roughness CEILING and every rung clamps the whole face to one
+# constant alpha, erasing the authored roughness variation (handoff/33). Opt-in.
+# Defaults must stay in step with init.lua's: when the two disagree the effect
+# appears to switch itself off on any launch where CET has not yet written
+# brdf_params.txt.
+#
+# There is no `skinray` key any more (removed 2026-08-30, handoff/43): the
+# raygen-side skin BRDF is sampling-only and cannot change a pixel
+# (00-ARCHITECTURE section 2), and keeping it cost a second half of the ptq
+# matrix plus a SER trap. A stale key in brdf_params.txt is ignored.
+tier=1 kernel=on skin=on shadowcull=on shadowset=full-shadow
+#
+# There is no `skintrans`/`skinthick` key: the Tier-4 backlit transmission
+# they selected was removed 2026-08-30 (handoff/39). A stale brdf_params.txt
+# may still carry them; they are ignored, which is the intended behaviour --
+# the read loop below whitelists keys, so an unknown one falls through.
+ptreg=off ptclamp=on ptbounce=on ptrefl=on ptmsggx=on skinspec=off ser=off
 if [[ -f "$PARAMS" ]]; then
     while IFS='=' read -r k v; do
         v="${v%$'\r'}"
         case "$k" in
-            tier|kernel|skin|skinray|shadowcull|shadowset) printf -v "$k" '%s' "$v" ;;
+            tier|kernel|skin|shadowcull|shadowset) printf -v "$k" '%s' "$v" ;;
             ptreg|ptclamp|ptbounce|ptrefl|ptmsggx|skinspec) printf -v "$k" '%s' "$v" ;;
-            skintrans) printf -v "$k" '%s' "$v" ;;
+            ser) printf -v "$k" '%s' "$v" ;;
         esac
     done < "$PARAMS"
 fi
@@ -55,6 +59,15 @@ if [[ "$kernel" == "off" ]]; then
     echo 1 > "$KERNEL_FLAG"
 else
     rm -f "$KERNEL_FLAG"
+fi
+
+# tier -- the MASTER switch for every shader swap. Off forces every overlay
+# below off (and empties swaps/), so the layer passes through bit-exact
+# vanilla: the A/B baseline. It does not touch the SSS kernel, which is engine
+# data, not a shader swap. Before 2026-08-30 it only gated the raygen side,
+# so "Callisto BRDF off" still served the skin and shadow overlays (handoff/43).
+if [[ "$tier" == "off" ]]; then
+    skin=off shadowcull=off
 fi
 
 # skin -- the compute-resolve skin overlay (tier-1 c1, plus the Tier-3 gloss
@@ -92,45 +105,27 @@ fi
 # pretending the request was honoured. An unknown or unbuilt level falls back
 # to off rather than silently serving a different strength than the one named.
 #
-# skintrans -- the Tier-4 backlit transmission ladder (handoff/29). It splices
-# the SAME 84 compute modules as the gloss, so for the same first-file-wins
-# reason it cannot be a second overlay either: the combinations are pre-built
-# by `dev/patch_compute_skin.sh --sets --trans` and parked under the composed
-# name "<skinspec>+t<skintrans>". off/subtle/medium/strong/extreme, where
-# extreme is the diagnostic rung (fires on all lit skin, ignoring geometry --
-# it answers "does the splice reach the screen", not "does it look right").
-#
-# A combination that was never built falls back to the gloss-only set of the
-# same strength, NOT to off: dropping silently to off would change the gloss
-# as well, and the next A/B would be attributing a difference to transmission
-# that was really the gloss moving underneath it.
+# A level name is now just a gloss rung. The composed "<gloss>+t<trans>[+k]"
+# names went with the Tier-4 transmission (removed 2026-08-30, handoff/39);
+# a stale skin.set/<gloss>+t.../ from an older build is simply never named
+# here, and `--sets` rm -rf's skin.set/ on every run, so a rebuild clears it.
 skin_set=fixed
 want_skin="$skinspec"
 case "$want_skin" in
     on)  want_skin=strong ;;
     ''|0) want_skin=off ;;
 esac
-want_gloss="$want_skin"
-case "$skintrans" in
-    off|''|0) ;;
-    *) want_skin="$want_skin+t$skintrans" ;;
-esac
 if [[ -d "$INSTALL_DIR/skin.set" ]]; then
-    if [[ ! -d "$INSTALL_DIR/skin.set/$want_skin" \
-          && -d "$INSTALL_DIR/skin.set/$want_gloss" \
-          && "$want_skin" != "$want_gloss" ]]; then
-        echo "[CallistoSSS] skintrans='$skintrans' has no built set for" >&2
-        echo "[CallistoSSS]   skinspec=$want_gloss; using $want_gloss (no" >&2
-        echo "[CallistoSSS]   transmission). Run: ./dev/patch_compute_skin.sh --sets --trans" >&2
-        want_skin="$want_gloss"
-    fi
     if [[ ! -d "$INSTALL_DIR/skin.set/$want_skin" ]]; then
         echo "[CallistoSSS] skinspec='$skinspec' is not a built level; using off" >&2
         want_skin=off
     fi
+    # Empty the overlay BEFORE testing the rung dir: if even skin.set/off/ is
+    # missing, the previous launch's rung must not stay behind and get served
+    # under the new name.
+    mkdir -p "$INSTALL_DIR/swaps.skin"
+    rm -f "$INSTALL_DIR/swaps.skin/"*.spv
     if [[ -d "$INSTALL_DIR/skin.set/$want_skin" ]]; then
-        mkdir -p "$INSTALL_DIR/swaps.skin"
-        rm -f "$INSTALL_DIR/swaps.skin/"*.spv
         cp -pf "$INSTALL_DIR/skin.set/$want_skin/"*.spv \
               "$INSTALL_DIR/swaps.skin/" 2>/dev/null && skin_set=$want_skin
     fi
@@ -182,26 +177,10 @@ if [[ -d "$INSTALL_DIR/shadowcull.set/$want_set" ]]; then
           "$INSTALL_DIR/swaps.shadowcull/" 2>/dev/null && shadow_set=$want_set
 fi
 
-# skinray -- the tier-1 raygen sampling (eval-invisible skin BRDF). The
-# pristine copies live in swaps.prehunt/; off removes them from swaps/.
-if [[ "$skinray" == "off" ]]; then
-    rm -f "$INSTALL_DIR/swaps/"*.rgs_reference_main.spv
-elif [[ "$tier" != "off" ]]; then
-    cp -pf "$INSTALL_DIR/swaps.prehunt/"*.rgs_reference_main.spv \
-          "$INSTALL_DIR/swaps/" 2>/dev/null || true
-fi
-
-# tier -- the master Callisto BRDF switch. Off empties swaps/ so the layer
-# passes through (bit-exact vanilla); on restores the raygens if missing.
-if [[ "$tier" == "off" ]]; then
-    rm -f "$INSTALL_DIR/swaps/"*.spv
-else
-    for f in "$INSTALL_DIR/swaps.prehunt/"*.rgs_reference_main.spv; do
-        [[ -f "$f" ]] || continue
-        base="$(basename "$f")"
-        [[ -f "$INSTALL_DIR/swaps/$base" ]] || cp -pf "$f" "$INSTALL_DIR/swaps/"
-    done
-fi
+# swaps/ -- the base dir. It used to carry the two skinray raygens; those are
+# gone, so it is always emptied. Overlays are the only thing served now, which
+# also means the ptq matrix no longer needs its skin/ half.
+rm -f "$INSTALL_DIR/swaps/"*.spv
 
 # ptreg / ptclamp / ptbounce / ptmsggx -- the path-tracing splices (handoff/23
 # tier 1, plus T2.1 energy compensation). All four splice the same twelve
@@ -222,21 +201,83 @@ mkdir -p "$PTQ"
 rm -f "$PTQ/"*.spv
 if [[ "$tier" != "off" && -n "$combo" && -d "$INSTALL_DIR/ptq/$combo/base" ]]; then
     cp -pf "$INSTALL_DIR/ptq/$combo/base/"*.spv "$PTQ/" 2>/dev/null
-    # skinray ships its own patched copies of two of the twelve permutations in
-    # the base swaps/ dir. Every overlay outranks that dir, so a vanilla-based
-    # ptq module would silently un-patch them; the matrix carries skin-based
-    # builds of exactly those two for this case.
-    if [[ "$skinray" != "off" ]]; then
-        cp -pf "$INSTALL_DIR/ptq/$combo/skin/"*.spv "$PTQ/" 2>/dev/null
-    fi
     rm -f "$INSTALL_DIR/ptq.disable"
-    ptq_state="$combo$([[ "$skinray" != "off" ]] && echo "+skin")"
+    ptq_state="$combo"
 else
     # An empty overlay dir still reads as "enabled" in the layer's log, which
     # would be a lie in the status page. Flag it off explicitly.
     echo 1 > "$INSTALL_DIR/ptq.disable"
     ptq_state=off
 fi
+
+# ser -- the Shader Execution Reordering overlay (handoff/41), off by default.
+# `ser` names a HINT RUNG the way `skinspec` names a gloss build: off, class,
+# byte, hit, class+hit. dev/patch_ser.sh --install parks all four in ser.set/,
+# so switching rungs is a copy and never a patcher re-run -- same contract as
+# the ptq matrix and skin.set.
+#
+# swaps.ser/ is built ON TOP of whatever swaps.ptq/ serves, and `ser` is FIRST
+# in the overlay list, so its twelve rgs_reference_main files outrank every ptq
+# matrix cell. That ordering is what makes it work; it is also the trap. A
+# swaps.ser/ built against a DIFFERENT combo keeps serving that combo after a
+# PT toggle -- and the toggle LOOKS applied, because the cache stamp below sees
+# swaps.ptq/ change and clears the pipeline caches. You would pay a full shader
+# recompile for a setting that never reached the driver. The matrix exists
+# precisely so PT settings are a copy and never a rebuild; an unchecked ser
+# overlay silently takes that back.
+#
+# So verify rather than document: patch_ser.sh records the content sha of its
+# source in MANIFEST.txt, and this recomputes it over what was just
+# materialised. On any mismatch the overlay is turned OFF. Failing that way
+# round is deliberate -- losing SER costs a scheduling hint that CANNOT change
+# a pixel, while a stale SER silently overrides the PT quality selection, which
+# can. Asymmetric failure modes get the safe default, not a comment telling the
+# next person to be careful.
+#
+# This check can only ever force OFF. It must never turn SER on by itself:
+# --install ships it disabled on purpose so the first launch is the A/B control.
+SER="$INSTALL_DIR/swaps.ser"
+ser_state=off
+if [[ "$ser" != "off" && "$tier" != "off" ]]; then
+    # Materialise the requested rung, exactly as ptq and skin.set do. The
+    # overlay is emptied whether or not the rung exists: an older swaps.ser/
+    # left in place would otherwise pass every check below under its own
+    # manifest and be served in place of the rung that was asked for.
+    mkdir -p "$SER"; rm -f "$SER"/*.spv "$SER/MANIFEST.txt"
+    if [[ -d "$INSTALL_DIR/ser.set/$ser" ]]; then
+        cp -pf "$INSTALL_DIR/ser.set/$ser"/*.spv \
+               "$INSTALL_DIR/ser.set/$ser/MANIFEST.txt" "$SER/" 2>/dev/null
+    fi
+    ser_src="$(sed  -n 's/.*src="\([^"]*\)".*/\1/p'       "$SER/MANIFEST.txt" 2>/dev/null | head -1)"
+    ser_want="$(sed -n 's/.*src_sha=\([0-9a-f]*\).*/\1/p' "$SER/MANIFEST.txt" 2>/dev/null | head -1)"
+    ser_var="$(sed  -n 's/.*variant=\([a-z+]*\).*/\1/p'    "$SER/MANIFEST.txt" 2>/dev/null | head -1)"
+    # Same glob and same order as dev/patch_ser.sh:389-403, so the shas compare.
+    ser_have="$(cat "$PTQ"/*.rgs_reference_main.spv 2>/dev/null | sha256sum | cut -c1-16)"
+    if ! compgen -G "$SER/*.spv" >/dev/null; then
+        ser_state="off:rung-missing"
+        echo "[CallistoSSS] ser=$ser requested but no such rung -- run ./dev/patch_ser.sh --install."
+    elif [[ -z "$ser_want" ]]; then
+        ser_state="off:no-manifest"
+        echo "[CallistoSSS] ser DISABLED: swaps.ser/ has no readable MANIFEST.txt, so its source cannot be verified."
+    elif [[ "$ser_src" == VANILLA* ]]; then
+        # --from-vanilla is only safe with every other raygen patch off.
+        # patch_ser.sh already shouts about this at build.
+        if [[ "$ptq_state" == off ]]; then
+            ser_state="${ser_var:-$ser}:vanilla"
+        else
+            ser_state="off:vanilla-vs-patched"
+            echo "[CallistoSSS] ser DISABLED: built --from-vanilla, but ptq=$ptq_state would be un-patched by it."
+        fi
+    elif [[ "$ser_want" != "$ser_have" ]]; then
+        ser_state="off:stale"
+        echo "[CallistoSSS] ser DISABLED (stale): built against ptq $ser_want, ptq is now ${ser_have:-empty} (ptq=$ptq_state)."
+        echo "[CallistoSSS]   rebuild it with ./dev/patch_ser.sh --install -- it reads the installed swaps.ptq/ as served."
+    else
+        ser_state="${ser_var:-$ser}"
+    fi
+fi
+if [[ "$ser_state" == off* ]]; then echo 1 > "$INSTALL_DIR/ser.disable"
+else rm -f "$INSTALL_DIR/ser.disable"; fi
 
 # ptrefl -- the same cullMask widening on the three reflection raygens. Nothing
 # else patches those modules, so it is an ordinary independent overlay.
@@ -246,8 +287,8 @@ else
     rm -f "$INSTALL_DIR/ptrefl.disable"
 fi
 
-echo "[CallistoSSS] synced: tier=$tier kernel=$kernel skin=$skin/skinspec=$skin_set (skintrans=$skintrans) skinray=$skinray shadowcull=$shadowcull/$shadow_set"
-echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce msggx=$ptmsggx) ptrefl=$ptrefl"
+echo "[CallistoSSS] synced: tier=$tier kernel=$kernel skin=$skin/skinspec=$skin_set shadowcull=$shadowcull/$shadow_set"
+echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce msggx=$ptmsggx) ptrefl=$ptrefl ser=$ser_state"
 
 # --- pipeline cache gate ---------------------------------------------------
 # Flag files alone are not enough. Once a pipeline is cached, the game never
@@ -282,10 +323,11 @@ payload="$(stat -c '%n %s %Y' \
               "$INSTALL_DIR"/swaps.skin/*.spv \
               "$INSTALL_DIR"/swaps.shadowcull/*.spv \
               "$INSTALL_DIR"/swaps.ptq/*.spv \
+              "$INSTALL_DIR"/swaps.ser/*.spv \
               "$INSTALL_DIR"/swaps.ptrefl/*.spv \
               "$INSTALL_DIR"/libVkLayer_callisto_spvswap.so 2>/dev/null \
            | sort | sha256sum | cut -c1-16)"
-want="tier=$tier kernel=$kernel skin=$skin skinspec=$skin_set skinray=$skinray shadowcull=$shadowcull shadowset=$shadow_set ptq=$ptq_state ptrefl=$ptrefl payload=$payload"
+want="tier=$tier kernel=$kernel skin=$skin skinspec=$skin_set shadowcull=$shadowcull shadowset=$shadow_set ptq=$ptq_state ser=$ser_state ptrefl=$ptrefl payload=$payload"
 have="$(cat "$STAMP" 2>/dev/null || true)"
 if [[ "$want" != "$have" || "${CALLISTO_FORCE_CLEAR:-0}" == "1" ]]; then
     [[ -d "$GLCACHE" ]] && rm -rf "${GLCACHE:?}/"* 2>/dev/null
@@ -310,8 +352,10 @@ fi
 # the CONTENT hash of what was actually served.
 sc_sha="$(cat "$INSTALL_DIR/swaps.shadowcull/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
 skin_sha="$(cat "$INSTALL_DIR/swaps.skin/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
-printf '%s shadowset=%s sc_sha=%s ptq=%s ptrefl=%s skin=%s skinspec=%s skin_sha=%s tier=%s cache=%s payload=%s\n' \
-    "$(date -Is)" "$shadow_set" "${sc_sha:-none}" "$ptq_state" "$ptrefl" \
+ser_sha="$(cat "$INSTALL_DIR/swaps.ser/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
+printf '%s shadowset=%s sc_sha=%s ptq=%s ser=%s ser_sha=%s ptrefl=%s skin=%s skinspec=%s skin_sha=%s tier=%s cache=%s payload=%s\n' \
+    "$(date -Is)" "$shadow_set" "${sc_sha:-none}" "$ptq_state" \
+    "$ser_state" "$([[ "$ser_state" == off* ]] && echo none || echo "${ser_sha:-none}")" "$ptrefl" \
     "$skin" "$skin_set" "${skin_sha:-none}" \
     "$tier" "${cache_action:-kept}" "$payload" \
     >> "$HOME/callisto_launches.log" 2>/dev/null || true
@@ -340,18 +384,18 @@ jnum() { grep -o "\"$1\": *[0-9]*" "$LAST_RUN" 2>/dev/null | grep -o '[0-9]*$' |
     echo "want_tier=$tier"
     echo "want_kernel=$kernel"
     echo "want_skin=$skin"
-    echo "want_skinray=$skinray"
     echo "want_shadowcull=$shadowcull"
     echo "want_shadowset_req=$shadowset"
     echo "want_shadowset=$shadow_set"
     echo "want_skinspec_req=$skinspec"
-    echo "want_skintrans_req=$skintrans"
     echo "want_skinspec=$skin_set"
     echo "want_ptreg=$ptreg"
     echo "want_ptclamp=$ptclamp"
     echo "want_ptbounce=$ptbounce"
     echo "want_ptrefl=$ptrefl"
     echo "want_ptq=$ptq_state"
+    echo "want_ser=$ser_state"
+    echo "req_ser=$ser"
     echo "cache=${cache_action:-kept}"
     # What the PREVIOUS launch asked for, straight off the stamp. Without it
     # the page would compare this launch's intent against last launch's result
