@@ -1,3 +1,9 @@
+> **2026-08-30:** the raygen-era instructions below (`regen_and_clear.sh`,
+> `swaps/` as "the active swap set", the smoke-test tint) are historical.
+> Today: overlays are built by `patch_compute_skin.sh`, `patch_shadow_flags.sh`,
+> `build_ptq.sh`, `patch_ser.sh`, `build_agx.sh`; `sync_settings.sh` picks
+> them per launch. See `handoff/CURRENT.md`. Retired scripts: `retired/`.
+
 # CallistoSSS
 
 RED4ext plugin that replaces Cyberpunk 2077's runtime-generated SSS_Blur

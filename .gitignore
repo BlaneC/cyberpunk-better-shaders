@@ -23,15 +23,42 @@ swaps.skin.subtle/
 swaps.skin.medium/
 swaps.skin.strong/
 swaps.skin.extreme/
-# The transmission ladder crosses the gloss ladder (--sets --trans), so the
-# build dirs are named <gloss>+t<trans>. One glob covers every rung, present
-# and future, which the enumerated names above do not.
+# One glob covers every rung, present and future, which the enumerated names
+# above do not. Kept after the Tier-4 transmission removal (handoff/39) so a
+# stale swaps.skin.<gloss>+t<trans>/ from that build can never be committed.
 swaps.skin.*/
 swaps.shadowcull/
 swaps.prehunt/
 swaps.huntall/
 swaps.tintall/
+# G-U4 sub-enum / A2 sheen probe rungs (dev/patch_subtype_probe.sh).
+# Diagnostics, not features: they are never installed by a plain build,
+# and like every other generated swap dir they are not redistributed.
+swaps.probe.*/
 swaps_smoke/
 dev/disasm/
 *.spv
 *.spvasm
+# SER rungs (dev/patch_ser.sh --install) and every other generated overlay.
+swaps.ser/
+swaps.ser.set/
+swaps.*/
+*.bak_*
+# Local build output of swap_layer.c; the shipped copy is release/vulkan/.
+# (Tracked today for convenience; `make layer` regenerates both.)
+
+# --- Local-only binaries -------------------------------------------------
+# Reference shots and A/B galleries live here but are NOT redistributed: the
+# raw photomode dumps run to ~150 MB and every one of them is reproducible
+# from a launch. Only the handful of before/after pairs the release notes
+# already ship stay tracked, listed explicitly below.
+/pics/*
+!/pics/after_hellmen.png
+!/pics/before_hellmen.png
+!/pics/after_rogue.png
+# Third-party papers read during investigation (36 cites the NTC one at
+# 44 MB). Handoff docs cite them by title and URL; the PDFs are not ours to
+# redistribute and do not belong in the history.
+/docs/papers/
+# Desktop screenshots dropped in the repo root by the capture tool.
+/Screenshot From *.png
