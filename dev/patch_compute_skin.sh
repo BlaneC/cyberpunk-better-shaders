@@ -58,44 +58,7 @@ LEVELS=(
     "extreme:n_s=0.90,spec_gain=2.0,alpha_max=0.0200"
 )
 
-# --- Tier-4 skin transmission (handoff/29-FACE-TRANSLUCENCY-AND-RAYS.md) -----
-# Light through thin skin: ears, nostrils, the bridge of the nose go red when
-# the sun is behind the head. The engine has a whole raster-side subsystem for
-# this (CharacterSubsurfaceTranslucency + the light blockers) that never
-# reaches the traced path, which is why it is invisible in this game with path
-# tracing on -- see `29` A1 for the evidence.
-#
-# t_thick is the strength; t_power is the view falloff (higher = a tighter rim
-# right at the silhouette, lower = a broader glow across the whole backlit
-# side); t_distort bends the transmission half-vector toward the normal, which
-# is what makes the light appear to spread inside the surface rather than
-# shine straight through it.
-#
-#   level    thick  power  what it is for
-#   subtle    0.25    16   a hint at the silhouette only
-#   medium    0.55    12   the intended look: ears read warm against the sun
-#   strong    1.00     8   pushed; the whole backlit side glows
-#   extreme   2.50     2   DIAGNOSTIC. t_wback=0 drops the "light is behind
-#                          me" gate, so it fires on all lit skin regardless of
-#                          geometry. It answers "does this splice reach the
-#                          screen at all", not "does it look right" -- the
-#                          handoff/27 7.5 question, asked before the aesthetic
-#                          one. Expect it to look wrong.
-#
-# The two mask experiments are NOT rungs, because they are not strengths:
-#   --set t_wshadow=1   also require the pixel to be in sun shadow
-#   --set t_wblock=1    also require the engine's own light blocker to say the
-#                       sun is behind this character (present in 40 of the 84
-#                       anchored libs; dev/survey_translucency.py reports which)
-# Both are forwarded verbatim to every rung, so either is one command.
-TLEVELS=(
-    "subtle:t_thick=0.25,t_power=16.0,t_distort=0.30"
-    "medium:t_thick=0.55,t_power=12.0,t_distort=0.35"
-    "strong:t_thick=1.00,t_power=8.0,t_distort=0.40"
-    "extreme:t_thick=2.50,t_power=2.0,t_distort=0.50,t_wback=0.0"
-)
-
-TIER=skin; EXTRA=(); SETS=0; SKINSPEC=0; TRANS=0
+TIER=skin; EXTRA=(); SETS=0; SKINSPEC=0
 while (( $# )); do
     case "$1" in
         --hunt) TIER=hunt ;;
@@ -105,20 +68,11 @@ while (( $# )); do
         --set) EXTRA+=(--set "${2:?--set needs K=V}"); shift ;;
         --with-skinspec) SKINSPEC=1 ;;
         --sets) SETS=1 ;;
-        # Cross the gloss ladder with the transmission ladder. Both splice the
-        # same 84 modules and the layer serves the FIRST file it finds for an
-        # id, so they cannot be two overlays -- the combinations have to be
-        # pre-built, exactly as dev/build_ptq.sh does for the four PT splices.
-        # 5x5 sets at ~40s each, so it is opt-in rather than the default.
-        --trans) TRANS=1 ;;
         -*) echo "unknown flag: $1" >&2; exit 2 ;;
         *)  DUMP_DIR="$1" ;;
     esac
     shift
 done
-if (( TRANS && ! SETS )); then
-    echo "--trans needs --sets (it crosses the two ladders)" >&2; exit 2
-fi
 if (( SETS )) && [[ "$TIER" != skin ]]; then
     echo "--sets only applies to the skin tier" >&2; exit 2
 fi
@@ -161,25 +115,100 @@ build_into() {
     # the ladder feeds all its builds the same disassembly, so repeating it
     # would multiply the build time for no extra signal.
     if (( RT_DONE )); then args+=(--no-roundtrip-check); fi
-    local pass=() fail=() name asm f n
+    local name asm f n
+    rm -f "$dest"/.ok.* "$dest"/.bad.* 2>/dev/null || true
+
+    # Disassemble first, sequentially. spirv-dis writes into $WORK, which is
+    # SHARED by every set, so parallel sets racing on the same missing .spvasm
+    # would interleave writes into one file. After the first set this is a
+    # no-op anyway -- every disassembly is already cached.
+    local asms=() missing=()
     for f in "${targets[@]}"; do
         name="$(basename "${f%.spv}")"
         asm="$WORK/$name.spvasm"
-        [[ -f "$asm" ]] || spirv-dis "$f" -o "$asm" 2>/dev/null || { fail+=("$name"); continue; }
-        if python3 "$MOD_DIR/dev/patch_compute_skin.py" "$asm" "${args[@]}" \
-                --outdir "$dest" > "$dest/.skin.$name.json" 2>"$dest/.skin.$name.err"; then
-            pass+=("$name")
-        else
-            fail+=("$name")
+        if [[ ! -f "$asm" ]] && ! spirv-dis "$f" -o "$asm" 2>/dev/null; then
+            missing+=("$name"); continue
         fi
+        asms+=("$asm")
     done
-    echo "patched ${#pass[@]}, failed ${#fail[@]}${1:+  [$*]}"
-    if (( ${#fail[@]} > 0 )); then
-        for n in "${fail[@]}"; do
+
+    # The 77 module patches are independent processes sharing nothing but
+    # $dest, and each writes only files named after its own module -- so this
+    # parallelises with no locking. Serially a 29-set ladder is ~25 min on ONE
+    # core with the other 23 idle. Set CALLISTO_JOBS=1 to get the old serial
+    # order back when a failure needs reading in sequence.
+    local jobs="${CALLISTO_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+    local argfile="$dest/.args"
+    printf '%s\n' "${args[@]}" > "$argfile"
+    printf '%s\0' "${asms[@]}" | \
+        CB_DEST="$dest" CB_ARGS="$argfile" \
+        CB_PY="$MOD_DIR/dev/patch_compute_skin.py" \
+        xargs -0 -P "$jobs" -n1 bash -c '
+            asm="$1"; n="$(basename "${asm%.spvasm}")"
+            mapfile -t A < "$CB_ARGS"
+            if python3 "$CB_PY" "$asm" "${A[@]}" --outdir "$CB_DEST" \
+                    > "$CB_DEST/.skin.$n.json" 2>"$CB_DEST/.skin.$n.err"; then
+                : > "$CB_DEST/.ok.$n"
+            else
+                : > "$CB_DEST/.bad.$n"
+            fi' _
+    rm -f "$argfile"
+
+    local np nf
+    np=$(find "$dest" -maxdepth 1 -name '.ok.*' | wc -l)
+    nf=$(find "$dest" -maxdepth 1 -name '.bad.*' | wc -l)
+    nf=$(( nf + ${#missing[@]} ))
+    echo "patched $np, failed $nf${1:+  [$*]}"
+    if (( nf > 0 )); then
+        for f in "$dest"/.bad.*; do
+            [[ -e "$f" ]] || continue
+            n="$(basename "$f")"; n="${n#.bad.}"
             echo "  $n :: $(sed 's/.*error: //' "$dest/.skin.$n.err" 2>/dev/null | head -1 | cut -c1-70)"
         done | sort | uniq -c | sort -rn | head -8
     fi
-    BUILT=${#pass[@]}
+    rm -f "$dest"/.ok.* "$dest"/.bad.* 2>/dev/null || true
+
+    # A module can be "patched", validate clean, differ in bytes from the
+    # baseline, and still carry ZERO splice sites -- every site rejected by
+    # the dominance check while the knob OpConstants are emitted regardless.
+    # That is not hypothetical: it is how the two GI resolvers shipped with
+    # the whole skin BRDF silently absent (handoff/42-BOUNCE-LIGHT-GATE.md)
+    # while every byte-level check in this script passed. Coverage is
+    # asserted from the per-module reports, never inferred from a byte diff.
+    python3 - "$dest" <<'COV' || exit 1
+import glob, json, os, sys
+dest = sys.argv[1]
+tot = dict(mods=0, c1=0, chans=0, alphas=0, lifted=0)
+bad = []
+for f in sorted(glob.glob(os.path.join(dest, '.skin.*.json'))):
+    if os.path.getsize(f) == 0:
+        continue                     # module failed to patch; already reported
+    d = json.load(open(f))[0]
+    di = d.get('diffuse', {})
+    sp = d.get('skin_spec', {})
+    ac = d.get('alpha_cap', {})
+    tot['mods'] += 1
+    tot['c1'] += di.get('c1_sites', 0)
+    tot['chans'] += sp.get('chans', 0)
+    tot['alphas'] += len(ac.get('alphas', []))
+    if 'OpPhi' in d.get('class_gate', {}).get('def', ''):
+        tot['lifted'] += 1
+    n = (len(di.get('skipped_dom', [])) + len(sp.get('skipped_dom', []))
+         + len(ac.get('skipped_dom', [])))
+    if n:
+        bad.append((d['module'], '%d site(s) skipped_dom' % n))
+    elif di.get('c1_sites', 0) == 0:
+        bad.append((d['module'], 'no c1 site at all'))
+print('  coverage: %d modules, %d c1 sites, %d gloss channels, %d alphas'
+      ' (%d gate(s) lifted onto a class phi)'
+      % (tot['mods'], tot['c1'], tot['chans'], tot['alphas'], tot['lifted']))
+if bad:
+    sys.stderr.write('  SITES SKIPPED -- the class gate does not reach the shading:\n')
+    for m, why in bad[:10]:
+        sys.stderr.write('    %s :: %s\n' % (m, why))
+    sys.exit(1)
+COV
+    BUILT=$np
     RT_DONE=1
     (( BUILT > 0 )) || { echo "nothing patched" >&2; exit 1; }
 }
@@ -207,35 +236,6 @@ if (( SETS )); then
         prev_gloss="$lvl"
         BUILT_SETS+=("$lvl")
     done
-
-    if (( TRANS )); then
-        # The cross product. Each transmission rung is built on top of EVERY
-        # gloss rung, so moving one selector never silently moves the other --
-        # which is what would happen if transmission could only be had with
-        # the gloss forced off.
-        for gspec in "off:" "${LEVELS[@]}"; do
-            glvl="${gspec%%:*}"; gkv="${gspec#*:}"
-            gargs=()
-            if [[ "$glvl" != off ]]; then
-                gargs=(--with-skinspec)
-                IFS=',' read -ra gkvs <<< "$gkv"
-                for one in "${gkvs[@]}"; do gargs+=(--set "$one"); done
-            fi
-            prev_t="$glvl"
-            for tspec in "${TLEVELS[@]}"; do
-                tlvl="${tspec%%:*}"; tkv="${tspec#*:}"
-                name="$glvl+t$tlvl"
-                targs=("${gargs[@]}" --with-translucency)
-                IFS=',' read -ra tkvs <<< "$tkv"
-                for one in "${tkvs[@]}"; do targs+=(--set "$one"); done
-                echo "--- set '$name' (gloss $glvl + transmission: $tkv) ---"
-                build_into "$MOD_DIR/swaps.skin.$name" "${targs[@]}"
-                PARENT[$name]="$prev_t"
-                prev_t="$name"
-                BUILT_SETS+=("$name")
-            done
-        done
-    fi
 
     # Equal coverage across every set is what makes the ladder attributable: if
     # one level patched a module another did not, moving the selector would also
@@ -305,8 +305,7 @@ if (( SETS )); then
         cp -pf "$MOD_DIR/swaps.skin.$v"/*.spv "$vd/"
     done
     echo "parked ${#BUILT_SETS[@]} sets -> $INSTALL_DIR/skin.set: ${BUILT_SETS[*]}"
-    echo "  the CET selectors 'Oily / wet skin' (skinspec) and"
-    echo "  'Backlit skin transmission' (skintrans) pick between them"
+    echo "  the CET selector 'Oily / wet skin' (skinspec) picks between them"
 fi
 
 if [[ -f "$INSTALL_DIR/skin.disable" ]]; then
