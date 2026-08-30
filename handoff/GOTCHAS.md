@@ -497,3 +497,132 @@ anchor that could not reach a single site.
   Check every operand anyway — a phi mixing in an unrelated uint would give a
   gate that fires on something that is not the material class, and no offline
   check catches that.
+
+
+### An overlay reject must fall through, never to vanilla
+
+The layer's SER guard refused a SER-declaring swap *after* the overlay search
+and served the **vanilla** module — so the file in `swaps.ser/` that was
+built to sit on top of `swaps.ptq/` un-patched ptq entirely, with a log line
+that read as a SER problem. Any future "this swap is not legal here" check
+belongs **inside** `load_swap()`'s loop, so the next overlay gets its turn.
+(`44` §2.1.)
+
+- A reject path is a swap path. Test it with the same rigour as a hit path:
+  count the `rgs_reference_main` HITs per launch (12 when ptq serves), not
+  just the absence of errors.
+- "The app already enabled the extension" is *enabled*. vkd3d-proton asks for
+  `VK_NV_ray_tracing_invocation_reorder` every launch; the layer treated its
+  own no-op as "SER off" for the life of `41`.
+
+### Deploy through `make install`, then `cmp`
+
+There was no deploy target; the game ran a `sync_settings.sh` two commits
+stale while three sessions reasoned about launches from the repo copy.
+`45` §1 has the `cmp` lines — run them before the first launch of a session.
+
+### `--with-skinspec` defaults are not identity, and CLI `--set` goes last
+
+`KNOBS` ships `n_s=0.65, alpha_max=0.2025`. A ladder rung that names only its
+own knob under `--with-skinspec` carries the default gloss as well; spell
+every gloss knob out (`G0` in `LEVELS`). And `build_into` used to put the
+command-line `--set`s *before* the rung's, so the documented override was a
+no-op on every rung that named the same knob. Argparse keeps the **last**
+assignment.
+
+### A rebuild that reuses a parked dir must not delete what it does not own
+
+`--sets` did `rm -rf skin.set/` and took the `probe-*` rungs with it while the
+CET selector kept offering them. Delete by name, or skip what another script
+parks.
+
+
+### Binning a delta by the baseline's own value is regression to the mean
+
+`ab_compare.py --tone` bins pixels by baseline luminance and reports
+(test−baseline) per bin: the baseline's noise drives both the bin assignment
+and the sign of the artefact — the bottom bin reads spuriously positive, the
+top spuriously negative, and binning by the test image *flips* it. Bin by a
+smoothed copy (noise is high-frequency, tone is not) and trust only rows
+stable across σ. `46` §4.3 caught a wrong conclusion (E1 "darkens shadowed
+skin") this way before it shipped.
+
+### `payload=` in the launch journal is a stat hash, not a content hash
+
+`sync_settings.sh` builds it from `stat -c '%n %s %Y'`. Two different ptq
+combos (`rcm` vs `rcbm`) whose .spv files share names, sizes and build-run
+mtimes logged the **same** `payload=225acb871d94a4b8` while serving genuinely
+different bytes (`46` §18.3). Equal payload does not prove equal serve. Cache
+eviction is safe (it keys off the whole `want` string), but to prove a launch
+served something new, hash the overlay itself:
+
+```bash
+cat ~/.local/lib/callisto/swaps.ptq/*.spv | sha256sum | cut -c1-16
+```
+
+### Put a NON-SKIN control in every texture comparison, and watch for regime breaks
+
+`46` §13: six launches of skin numbers were quoted before anyone measured the
+same metric on sky, terrain and buildings in the same frames. When someone
+did, static geometry — which no skin overlay can touch — had gained **12-19%
+fine energy** between two capture sessions 8 minutes apart, and stayed there.
+Every E1-baselined figure in that ledger straddled the break. The mod journal
+cannot see this: it records what was *served*, and the serve was byte-identical.
+
+Two habits fix it. **(1) Every masked metric gets the inverted mask run beside
+it** — a skin-specific effect is `skin − nonskin`, never `skin` alone.
+**(2) `stat` the settings file around a launch block**:
+
+```bash
+ls -l ~/…/AppData/Local/CD\ Projekt\ Red/Cyberpunk\ 2077/UserSettings.json
+grep -A3 '"name": "DLSS_D"' …/UserSettings.json   # Ray Reconstruction
+```
+
+It records only current state, so read it *before and after* — `DLSS_D: true`
+is how L4 was caught having never turned RR off at all.
+
+### "Carries the patch" is not "can reach a pixel" — check what it WRITES
+
+`46` §12: of the 77 anchored compute modules, 76 write `v4float` to a colour
+target and one — `ab0bc2fee876d489` — writes `v4uint` into an
+`OpTypeImage %int 2D` storage image: rounded integers with a `0xFFFFFFFF`
+invalid sentinel, `IsInf`/`IsNan` guards and an age byte. A sample-index /
+reservoir pass. It matches the 1/pi + 0.107508637 anchor because it evaluates
+the full material stack to compute a *reuse weight*, and it is in
+`swaps.skin`, so the tier-1 `c1` is spliced into it — where it cannot
+brighten anything. A whole peer-reviewed argument (`46` §9 c2, "both GI
+resolvers carry the gate, so the lift didn't miss") was built on calling it a
+resolver.
+
+The tell was free and static: `patch_subtype_probe.py --tier cls` declines it
+with *"no image write reachable for the hunt"*, and the probe set is 76 where
+every rung is 77. **A module count that differs from the ladder's is a
+finding, not a rounding error.** Before arguing from coverage, grep the write:
+
+```bash
+spirv-dis ~/callisto_dump/<id>.dxil.spv | grep -B4 OpImageWrite
+```
+
+### No A/B number without a same-config floor — and controls are not one
+
+Non-skin control regions null out global shifts only; they cannot proxy the
+measured surface (`46` §9 c3: skin moved +1.4% on two *opposite* rungs while
+the controls sat at ±0.26%, and the drift story built on the controls was
+wrong). The floor is a same-config relaunch — A-B-A when the axis matters.
+
+**This was measured on 2026-08-30 and it was worse than the guess** (`46`
+§11). A byte-identical relaunch moved S1's skin mean **+1.232/255** and its
+fine-texture energy **+58.5%** — further than any rung ever had. Six launches
+of numbers were published before one null was run; §5 and §6.2 of that ledger
+did not survive it. The floor is Ray Reconstruction resolving *different
+pores* between runs: the diff is pore-scale speckle over the whole face, with
+flat static controls and 0,0 alignment. It is scene-dependent — bounce-lit
+interior floored at −0.4%, direct sun and dim grazing did not.
+
+So: **a rung is not measured until a null relaunch of the same config has
+been measured in the same scene with the same metric.** Two corollaries.
+*Texture metrics under a denoiser* conflate authored detail with residual
+sample noise, and a tighter specular lobe raises them without adding detail.
+*Rung-vs-rung beats rung-vs-baseline* — the floor is a near-uniform relative
+offset, so it cancels between two rungs; the one S1 result that survived was
+a differential (E2a→E2b, flat face, +3.2% on the top-3% highlight).

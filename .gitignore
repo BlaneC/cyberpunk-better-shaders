@@ -62,3 +62,9 @@ swaps.*/
 /docs/papers/
 # Desktop screenshots dropped in the repo root by the capture tool.
 /Screenshot From *.png
+# A/B capture galleries. a-b-testing/<rung>/ holds the photomode frames for
+# each launch -- ~250 MB, the same category as /pics above, and every frame is
+# reproducible from a launch (the exact config is in each rung's CONFIG.md and
+# UserSettings dump). The ledger, the protocol, the pinned masks and the
+# settings dumps that prove what each rung ran ARE tracked; the frames are not.
+/a-b-testing/**/*.png

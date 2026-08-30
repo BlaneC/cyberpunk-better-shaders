@@ -24,6 +24,18 @@ be direct-light only** — the class gate reached 0 of 218 splice lines in the
 two GI resolvers, so bounce-lit skin had never carried the gloss, the
 roughness cap, or the shipping tier-1 `c1`. Fixed, and the build now asserts
 coverage instead of inferring it from a byte diff (`42-BOUNCE-LIGHT-GATE.md`).
+Updated **2026-08-30 (afternoon)**: the low-hanging half of `38`/`43` is
+built — four skin realism axes as a 14-rung ladder, kernel presets, sun
+CVars, a SER selector — and two infrastructure faults were found and fixed:
+the layer had been **serving vanilla raygens on every `ser=class` launch**,
+and the game had been running a stale `sync_settings.sh`/`init.lua`
+(`44-LOW-HANGING-FRUIT.md`). The launch order is `45-AB-PROTOCOL.md`.
+Updated **2026-08-30 evening**: six launches ran (`46-AB-LEDGER.md`, peer-
+reviewed in its §9). The roughness axis is on screen and was perceived
+unprompted; the `42` bounce-light fix shows **no on-screen signature** and is
+reopened as a question; the shipping stack measurably *reduces* fine skin
+texture vs vanilla (suspect: the firefly clamp, untested). Next: `46` §9.4's
+four calibration launches.
 
 This file is the **ledger**, not the argument. Each row points at the document
 that carries the evidence. Where a claim is weaker than it sounds, the
@@ -41,6 +53,12 @@ treating "built", "loaded" or "swapped" as "working".
 | ↳ narrowed to the direct shadow rays (`full-shadow`, now the default) | **ships, works** | on screen; the GI half added flicker and no seam contribution | `26` §7b |
 | ↳ its LOD-flicker regression on flat props | **reduced, not fixed; axis exhausted** | ray flags are per-ray, so no site subset separates hair from flat props; the two-ray splice that could use the cull mask **does not execute** (`sctrl`, a positive control, came back vanilla) | `26` §7c-d |
 | Skin BRDF patch | **ships, works** | A/B screenshots | `02`, `03` |
+| **Skin realism rungs** — roughness scale, energy coupling, micro-shadowing, wet/glassy eyes, `real`/`real-gloss` (9 rungs) | **built, parked, deployed, default off** | offline: 77/77, 0 skipped gates; micro reaches 150/173 sites. **`rough-1.3`/`gloss-0.7` on screen 2026-08-30**: highlights mirror correctly, fine texture +35/+48% vs vanilla, seen unprompted; direction open (`46` §9.5). `couple`/`micro`/eyes never launched | `44`, `46` |
+| ↳ tier-1 `c1` on **bounce-lit** skin (`42`'s fix) | **reopened as a question** | S2 measured ≈0 with the grazing signature reversed, where +1.4/255 was predicted — while all 77 modules served. Three hypotheses; one probe-cls launch decides | `46` §6.1, §9.4 L2 |
+| ↳ shipping default stack vs bit-exact vanilla | **on screen: near-threshold mean, −16% fine texture** | one pair, no floor; suspect `ptclamp`; A-B-A + ptclamp-off queued | `46` §6.2, §9.4 |
+| **SSS kernel presets** (`detail`/`balanced`/`callisto`/`vanilla` selector) | **ships; `detail` is the confirmed one** | the other three never on screen | `44`, `33` §1 |
+| **Sun angular size / visibility / scattering** (PT panel) | deployed, live | CVar names from the binary's key run; resolver group unconfirmed | `44`, `43` M3 |
+| **SER selector in CET** + layer fix (app-enabled ext counts; rejects fall through) | **ships, off by default** | `--selftest` 11/11; the pre-fix layer served vanilla raygens on every `ser=class` launch, so no SER launch to date measured anything | `44` §2.1, `41` |
 | **AgX tonemapper (HDR)** | **ships, works** | confirmed on screen by the user, 2026-08-27 | `18`, `21` |
 | **AgX tonemapper (SDR)** | **ships, works** | confirmed on screen by the user, 2026-08-28 ("decent, serviceable") | `21` |
 | **AgX over the authored per-area grade** | **ships, works** | on screen in both modes; the area LUTs survive the tone curve replacement | `21` |
@@ -198,6 +216,7 @@ And a third, from the colour bug:
 | `dev/patch_compute_skin.py` / `.sh` | the skin BRDF patcher (tier-1 c1 + Tier-3 gloss + hunt/tint diagnostics); `--sets` builds the overlay twice and parks the A/B pair | yes |
 | `dev/build_ptq.sh` | the 15-combo `{reg,clamp,bounce,msggx}` matrix + the reflection overlay; chains `patch_ms_ggx.py` over the tier-1 output | yes |
 | `dev/install_ptq.sh` | install / remove / status for the matrix | yes |
+| `make install` | deploy `release/` + the layer `.so` into the game/install dirs with a dated backup | yes (2026-08-30) |
 | `dev/patch_shadow_opacity.py` | the opacity-split shadow ray (`28` + `76`, min-combined) | yes (offline) |
 | `dev/build_shadow_sets.sh`, `dev/install_shadow_sets.sh` | both shadowcull builds, parked for the CET switch | yes |
 
