@@ -1,5 +1,10 @@
 # CallistoSSS — architecture and current state
 
+> **2026-08-30 note:** this document predates the removal of the hair BRDF
+> (`19`, `27` §8) and of `skinray` (`43`). §1's table and §4's hair rows
+> describe a build that no longer ships; the mechanism sections (§2, §3, §6)
+> are still the truth. **`CURRENT.md` is the short, current summary.**
+
 **Read this first.** `01`–`07` are the chronological investigation trail, each
 correcting the one before it; several of their conclusions are superseded.
 This document is the consolidated truth as of Aug 2026 for the **hair/skin**

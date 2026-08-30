@@ -19,8 +19,9 @@ This mod makes two surgical, composable changes:
 
 ### 1. Callisto BRDF injection (the main event)
 
-A small Vulkan layer hot-swaps the path tracer's ray-generation shader at
-load time with a patched version that adds the Callisto **c1** term to skin:
+A small Vulkan layer hot-swaps the path tracer's lighting-resolve compute
+shaders at load time with patched versions that add the Callisto **c1** term
+to skin:
 
 - **Diffuse Fresnel** — soft, fleshy response at grazing angles instead of
   the flat Lambert falloff.

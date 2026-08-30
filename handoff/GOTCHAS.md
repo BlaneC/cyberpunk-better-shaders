@@ -91,12 +91,80 @@ says how to avoid re-learning what is already known.
     chair is identical to the feature not working. Tier-4 hit exactly this —
     its detector finds the diffuse image write by walking back to a Disney
     diffuse scalar, and Tier-1's c1 rewrite had already pointed that chain at
-    a pending id (`30` §5). Order every read-only detector ahead of every
+    a pending id. (Tier-4 itself was later removed — `39` — but this rule
+    outlived it and is general.) Order every read-only detector ahead of every
     rewriting emitter, and say why in the code, because the constraint is
     invisible at the call site.
 
+13. **Existence is not addressability. Prove you can *reach* a signal before
+    designing anything that consumes it.** `29` A4 R3 wanted the engine's own
+    skin back-depth target for real per-pixel thickness. The pass was found
+    (depth-only, 1280x720, uniquely `clear=1.0` — reverse-Z for "keep the
+    farthest fragment"), and it was proven to **run in RT Overdrive** with 25
+    indexed draws, which is the question rule 5 tells you to ask. It is still
+    unusable: in a bindless heap the resource is named by an *index*, and that
+    index moved from 73203 to 503350 across two captures **29 seconds apart in
+    the same session**, with the offset from the consuming shader's
+    push-constant base moving -10322 -> -955/-15230 (not even single-valued in
+    the second capture). A baked constant would multiply whatever resource
+    landed in that slot into the light.
+
+    So the go/no-go for any new input has three parts, not one: does it exist,
+    does it run, and **is its address stable**. Answer the third before
+    writing a detector, because a route can pass the first two convincingly
+    and still be dead. `39` §6 carries the evidence; it is closed, not
+    deferred, and the only thing that reopens it is an engine-side binding.
+
+14. **Before importing a sampling technique, check which of its preconditions
+    this renderer actually meets.** Cranley-Patterson randomizes a *low-discrepancy
+    point set*; on a plain LCG `frac(u+c)` is a measure-preserving bijection and
+    provably changes nothing — and there is no Sobol/Halton/Owen sequence anywhere
+    in the reference raygens. Heitz & Belcour's blue-noise error distribution comes
+    from the *mask*, not from the rotation, and it additionally requires surrendering
+    the per-pixel seed: a white per-pixel seed re-randomizes each pixel and destroys
+    the mask's spatial structure downstream, so the gain needs the seed hash
+    **deleted**, not offset. A named technique from a real paper, correctly cited,
+    can still be a no-op on this renderer. The check is cheap — model the shader's
+    RNG in forty lines of numpy and measure it (`dev/validate_sampler_rng.py`)
+    before writing a patcher. (`37`)
+
 ## Mechanics
 
+- **`ngfx-replay` hanging at 0% CPU is usually a dialog, not a hang.** It opens
+  a `zenity` window about `VK_KHR_external_semaphore` / `VK_EXT_present_timing`
+  incompatibility and blocks on it forever, which under a headless or
+  background invocation looks exactly like a deadlock. Add
+  `--no-block-on-incompatibility` to the `15` §0 command. `NGFXPROBE_STRIP_ALLOC=3`
+  is still mandatory or you get a SIGSEGV inside `libnvidia-glcore`.
+- **In `probe_layer.c`, never name anything `b`.** `LOGF` declares its own
+  `char b[8192]`, so a parameter called `b` shadows it and the buffer is
+  silently passed where the format string expects a number. Build with
+  `-Wformat` — that is what caught it. The file now carries a comment saying so.
+- **Widening `prov_scan`'s offset window needs two fixes, not one.** A negative
+  low bound added to an *unsigned* push-constant base wraps to ~4e9 and walks
+  the heap read off the buffer (SIGSEGV); compute the candidate in `int64_t`
+  and reject `< 0` before casting. And the old `prov_lookup` was an O(n) linear
+  scan over ~19k descriptors, which a 7x wider sweep turns quadratic and the
+  replay unusable — it now goes through an open-addressed hash that preserves
+  first-insert semantics.
+- **`mod.uconst()` has no pending-declaration cache; `mod.const()` does.**
+  `const()` memoises in `self.fconst`, so asking twice for the same float
+  returns the id and `None` — no second declaration. `uconst()` only scans
+  `mod.lines`, which does **not** yet contain the constants the current pass
+  is about to append, so the second call hands back the same id *and* another
+  declaration of it. Any emitter that can run more than once per module (one
+  splice target per light-carrying edge, say) then fails `spirv-val` with
+  `Id N is defined more than once`. Memoise at the call site. This only shows
+  up in the multi-target minority of modules, so a single-module test passes
+  and the ladder build is what catches it.
+- **Parallelise the ladder with `CALLISTO_JOBS`.** `build_into` patches its 77
+  modules with `xargs -P` (default `nproc`); they are independent processes
+  sharing only the output directory and each writes files named after its own
+  module. A 29-set ladder went 31 min -> 6.5 min on 24 cores. `spirv-dis`
+  stays **sequential on purpose**: it writes into `dev/disasm/compute`, which
+  every set shares, so racing sets would interleave writes into one file.
+  `CALLISTO_JOBS=1` restores the old serial order when a failure needs
+  reading in sequence.
 - **Env vars do not reach the game.** Proton/Steam launch layering eats them.
   Use flag files plus `CALLISTO_LOG`; the layer reads `CALLISTO_SWAP_DIR`,
   `CALLISTO_LOG`, `CALLISTO_SWAP_DISABLE`, `CALLISTO_SWAP_QUIET`,
@@ -158,6 +226,14 @@ says how to avoid re-learning what is already known.
   outputs; that set is the starting point for naming one.
 - **`trace_rays` attribution is unreliable** — `vkDestroyPipeline` never clears
   the rtpipe table, so reused handles report a stale raygen. Use `pipe_stage`.
+- **`grep -r` over `~/callisto_dump` silently returns 0 for strings that are
+  there.** The extension census in `38` first read as "BDA is absent" —
+  `grep -rl physical_storage_buffer ~/callisto_dump/` gave **0** while
+  `strings` on any single module showed `SPV_KHR_physical_storage_buffer` on
+  line 2. Run it as `cd ~/callisto_dump && grep -la <str> *.spv | wc -l`, which
+  gives 3225 of 3273. The failure mode is the dangerous one: a census that
+  returns zero looks like a finding, and "no module declares X" is exactly the
+  shape of claim these documents build on.
 - **`ls <glob> | wc -l` under `nullglob`** counts the whole directory.
 - **A failed `spirv-val` can leave a stale `.spv`** for the installer to pick up.
 - **The live pixels are shaded in compute**, not in the RT passes; RT produces
@@ -376,3 +452,48 @@ one file, defaulted in another, with nothing comparing the two.
   bug and just as easy to stare past.
 - When adding a launch-gated setting, grep for every file that names it and
   make the defaults agree in the same edit. Two files, one grep.
+
+---
+
+### A byte diff is not coverage — a module can be "patched" with zero sites
+
+`27` §8.3 claimed all 77 modules carried the Tier-3 gloss, including the two
+GI resolvers. They did not: the class gate was rejected at **every** splice
+site in both, and what made them "differ from the baseline" was **48 bytes of
+`OpConstant`** that no instruction consumed. The knobs are emitted by
+`mod.const()` before any site is examined, so a pass that splices nothing
+still changes the file. Every check the build ran — `spirv-val`, "each rung
+differs from `off`", "each rung differs from the rung below", "coverage lists
+match" — passed on that delta, for two years' worth of builds, while the whole
+skin BRDF was absent from bounce-lit skin (`42`).
+
+- **Assert the site count, not the file hash.** `patch_compute_skin.sh` now
+  reads the per-module JSON reports and aborts on any non-empty `skipped_dom`
+  or any module landing zero `c1` sites. A byte diff answers "did the file
+  change"; only the report answers "did an instruction get spliced".
+- A `skipped_*` list that nothing ever reads is the same bug one level up.
+  Every skip counter this repo emits should be fatal by default, and loud
+  where it is legitimately non-zero.
+- The corollary for the ladder: **two rungs differing does not mean the knob
+  reached the shader.** If both rungs' deltas are their own constants, the
+  A/B compares nothing and looks exactly like a knob that does not matter.
+
+### The value a shader tests is not always the value the shader computed
+
+dxil-spirv guards the material-class fetch behind a bounds test and merges it
+out with `OpPhi %uint %uint_0 <skipped> <shift> <fetched>`. Below that merge
+the **shift dominates nothing** and the **phi dominates everything** — and the
+shader's own class tests read the phi. `find_class_shift` anchors on the
+`>>5` reached through an `OpImageFetch`, which is structurally the fetched
+value and can never be the phi, so in the two GI resolvers it returned an
+anchor that could not reach a single site.
+
+- When a gate is rejected everywhere, look one block **down**, not for another
+  fetch. The dominating form of the value is often already there, and it costs
+  no instructions (compare the hair patcher, which refetched the class and
+  hoisted it — correct, and more expensive than it needed to be).
+- Guarded-fetch phis are safe to gate on: the guard's other operand is
+  `%uint_0`, which is not skin, so a pixel that skipped the fetch gates off.
+  Check every operand anyway — a phi mixing in an unrelated uint would give a
+  gate that fires on something that is not the material class, and no offline
+  check catches that.
