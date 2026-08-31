@@ -58,9 +58,10 @@ resumes the work with zero prior context.
   **0.0%** of S2 skin. The class gate passes; the painted modules write the
   **direct-light term only**, so bounce-lit radiance comes from a writer
   outside the 77 anchored modules. §6.1 hypothesis (b) confirmed, (a) dead.
-  The phi-lift commit did not achieve its goal. **Next step is a static
-  search, no launch: find the compute modules that write float colour but
-  lack the (1/π, 0.107508637) anchor.**
+  The phi-lift commit did not achieve its goal. ~~Next step is a static
+  search~~ **Done that night: the writer is not a compute module at all —
+  it is the ReSTIR-GI diffuse raygen pair (`48`/`50`), and `42` closes via
+  `gi-50` (confirmed table above).**
 - **Material classes confirmed on screen:** skin 1, hair 4 (eyelashes
   included), plants 5, **eyes 8** (sun-clipped catchlights only — 30 px above
   the null's max, blue ×2.82 against the palette's ×3.0).
@@ -148,5 +149,5 @@ and the numeric sliders (`43`) · the two-ray shadow splice (`26` §7d) ·
 - `dev/` — shipping patchers; `dev/retired/` — the ones that are done.
 - Ideas and their gates: `38`, reviewed in `43`, low-hanging half built in `44`.
 - A/B captures live in `a-b-testing/<rung>/S*.png`; `a-b-testing/reproduce.sh`
-  regenerates every figure quoted in `46`/`47`; `./dev/ab_launch_audit.py N`
+  regenerates every figure quoted in `46`/`47` (`reproduce_50.py`: `50`); `./dev/ab_launch_audit.py N`
   re-derives what each launch actually served from the layer journal.

@@ -55,7 +55,8 @@ compute). Metric: median ln(G/R) over hand-placed regions on linearized
 sRGB, face minus in-frame non-skin control, probe minus null. Controls
 between the two launches agree to ±0.01 (S1 jacket +0.704 vs +0.705, sand
 −0.187 vs −0.188) — that is the empirical floor, and it also bounds every
-cross-launch confound (below).
+cross-launch confound (below). Every number in this section and §6
+regenerates from `a-b-testing/reproduce_50.py` (boxes embedded there).
 
 | scene | vs hair | vs jacket | vs floor/ground/sand | reading |
 |---|---|---|---|---|
@@ -214,6 +215,8 @@ lighting-matched in scenes with stationary light (S3 interior: yes;
 S1 sun, S2 crowd: no). If a sun-lit delta ever matters, reshoot both
 sides in one session — the R2-vs-R3 pairs matched to ±0.01 at 12 min
 apart, which is what "matched" looks like.
+
+All figures above: `a-b-testing/reproduce_50.py`.
 
 **Decision: `skinspec=gi-50` is the standing rung**, live in
 `brdf_params.txt` with `ser=class`. `42` closes: tier-1 `c1` now reaches
