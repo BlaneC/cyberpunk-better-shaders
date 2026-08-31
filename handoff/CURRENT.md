@@ -8,6 +8,18 @@ this project keeps relearning: *built*, *loaded* and *swapped* are not
 2026-08-31 14:17 oil+fuzz build, its first look, the 14:57 rebuild, its
 launch, and the 15:57 half-oil + bounce-bleed rebuild):**
 
+- **Glass refraction Phase 0.5 (D3, `20` §5b / `51` §4): BUILT, DEPLOYED
+  17:15, LAUNCHED, USER VERDICT KEEP — "looks incredible" (`76`).** The transparent-reflection raygen's mirror
+  direction repointed to Snell's law (no TIR branch needed, η<1), origin
+  sign fixed to P+ε·D, all 19 downstream uses rewritten; ladder
+  off/eta15/eta20 parked in refract.set/, served THROUGH swaps.ptrefl/ via
+  new `refract=` key + CET selector (default off). Machine-checked 500/500
+  vs reference refract, spirv-val clean, sync paths sandbox-tested. The `20`
+  consumer question stays open — it gates v1's two-ray combine, not this.
+  A/B ran (PT Overdrive, ptrefl=on, window/glassware oblique); the user
+  called it incredible and had it committed. **Still unrecorded: which level
+  was on screen (eta20 vs eta15) and the warp-vs-ghost per-pixel call of
+  `76` §3.** Default stays `refract=off` — opt-in via the CET selector.
 - **USER VERDICT ON THE STACK: KEEP IT. Fuzz "incredible like 99 percent
   of the time" — the sun-only gate was requested, PROVEN feasible, then
   withdrawn and parked (`75`).** The indoor complaint (16:32 screenshot,

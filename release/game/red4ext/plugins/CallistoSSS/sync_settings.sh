@@ -40,14 +40,14 @@ tier=1 kernel=detail skin=on shadowcull=on shadowset=full-shadow
 # they selected was removed 2026-08-30 (handoff/39). A stale brdf_params.txt
 # may still carry them; they are ignored, which is the intended behaviour --
 # the read loop below whitelists keys, so an unknown one falls through.
-ptreg=off ptclamp=on ptbounce=on ptrefl=on ptmsggx=on skinspec=off ser=off
+ptreg=off ptclamp=on ptbounce=on ptrefl=on ptmsggx=on skinspec=off ser=off refract=off
 if [[ -f "$PARAMS" ]]; then
     while IFS='=' read -r k v; do
         v="${v%$'\r'}"
         case "$k" in
             tier|kernel|skin|shadowcull|shadowset) printf -v "$k" '%s' "$v" ;;
             ptreg|ptclamp|ptbounce|ptrefl|ptmsggx|skinspec) printf -v "$k" '%s' "$v" ;;
-            ser) printf -v "$k" '%s' "$v" ;;
+            ser|refract) printf -v "$k" '%s' "$v" ;;
         esac
     done < "$PARAMS"
 fi
@@ -366,8 +366,49 @@ else
     rm -f "$INSTALL_DIR/ptrefl.disable"
 fi
 
+# refract -- Phase 0.5 glass refraction (handoff/20 par5b, 51 par4, 76). The
+# transparent-reflection raygen id is OWNED by the ptrefl overlay (first-file-
+# wins), so this is not its own overlay: the chosen level is materialized INTO
+# swaps.ptrefl/, and off restores the plain ptrefl file. eta15/eta20 repoint
+# the traced mirror direction to the refracted one (n=1.5 / n=2.0) and push
+# the ray origin through the surface; ladder parked in refract.set/ by
+# ./dev/build_refract.sh --install. Nothing is patched at launch -- a copy,
+# like skin.set and shadowcull.set.
+refract_state="$refract"
+RSET="$INSTALL_DIR/refract.set"
+RMOD="ee6d252e090adc74.rgs_reflection_transparent_main.spv"
+if [[ ! -d "$RSET/off" ]]; then
+    # pre-refract install: nothing parked, nothing to restore -- leave the
+    # ptrefl overlay exactly as installed and only complain if asked for more.
+    if [[ "$refract" != "off" ]]; then
+        refract_state="off:rung-missing"
+        echo "[CallistoSSS] refract=$refract requested but no refract.set/ -- run ./dev/build_refract.sh --install."
+    fi
+elif [[ ! -d "$INSTALL_DIR/swaps.ptrefl" ]]; then
+    refract_state="off:no-ptrefl-dir"
+else
+    lvl="$refract"
+    if [[ "$lvl" != "off" && ( "$ptrefl" == "off" || "$tier" == "off" ) ]]; then
+        # the rung rides the ptrefl overlay; with ptrefl.disable set the file
+        # would sit there unserved and LOOK selected. Refuse loudly instead.
+        refract_state="off:needs-ptrefl"
+        echo "[CallistoSSS] refract DISABLED: rides the ptrefl overlay, and ptrefl/tier is off."
+        lvl=off
+    elif [[ "$lvl" != "off" && ! -d "$RSET/$lvl" ]]; then
+        refract_state="off:no-such-level"
+        echo "[CallistoSSS] refract=$refract has no refract.set/$refract -- serving off."
+        lvl=off
+    fi
+    # Materialize even for off, so a previous launch's eta file can never
+    # linger behind a changed setting (the stale-rung rule, handoff/43).
+    cp -pf "$RSET/$lvl/$RMOD" "$INSTALL_DIR/swaps.ptrefl/$RMOD"
+    # first MANIFEST line is echoed into the journal by the layer, so the
+    # serve identity of the ptrefl overlay names the refract level.
+    cp -pf "$RSET/$lvl/MANIFEST.txt" "$INSTALL_DIR/swaps.ptrefl/MANIFEST.txt" 2>/dev/null || true
+fi
+
 echo "[CallistoSSS] synced: tier=$tier kernel=$kernel$kernel_note skin=$skin/skinspec=$skin_set shadowcull=$shadowcull/$shadow_set"
-echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce msggx=$ptmsggx) ptrefl=$ptrefl ser=$ser_state"
+echo "[CallistoSSS] path tracing: ptq=$ptq_state (reg=$ptreg clamp=$ptclamp bounce=$ptbounce msggx=$ptmsggx) ptrefl=$ptrefl refract=$refract_state ser=$ser_state"
 
 # --- pipeline cache gate ---------------------------------------------------
 # Flag files alone are not enough. Once a pipeline is cached, the game never
@@ -406,7 +447,7 @@ payload="$(stat -c '%n %s %Y' \
               "$INSTALL_DIR"/swaps.ptrefl/*.spv \
               "$INSTALL_DIR"/libVkLayer_callisto_spvswap.so 2>/dev/null \
            | sort | sha256sum | cut -c1-16)"
-want="tier=$tier kernel=$kernel skin=$skin skinspec=$skin_set shadowcull=$shadowcull shadowset=$shadow_set ptq=$ptq_state ser=$ser_state ptrefl=$ptrefl payload=$payload"
+want="tier=$tier kernel=$kernel skin=$skin skinspec=$skin_set shadowcull=$shadowcull shadowset=$shadow_set ptq=$ptq_state ser=$ser_state ptrefl=$ptrefl refract=$refract_state payload=$payload"
 have="$(cat "$STAMP" 2>/dev/null || true)"
 if [[ "$want" != "$have" || "${CALLISTO_FORCE_CLEAR:-0}" == "1" ]]; then
     [[ -d "$GLCACHE" ]] && rm -rf "${GLCACHE:?}/"* 2>/dev/null
@@ -430,11 +471,12 @@ fi
 # (`26` §7). This journal is the fix: one append-only line per launch, keyed on
 # the CONTENT hash of what was actually served.
 sc_sha="$(cat "$INSTALL_DIR/swaps.shadowcull/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
+ptrefl_sha="$(cat "$INSTALL_DIR/swaps.ptrefl/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
 skin_sha="$(cat "$INSTALL_DIR/swaps.skin/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
 ser_sha="$(cat "$INSTALL_DIR/swaps.ser/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
-printf '%s shadowset=%s sc_sha=%s ptq=%s ser=%s ser_sha=%s ptrefl=%s skin=%s skinspec=%s skin_sha=%s tier=%s cache=%s payload=%s\n' \
+printf '%s shadowset=%s sc_sha=%s ptq=%s ser=%s ser_sha=%s ptrefl=%s refract=%s ptrefl_sha=%s skin=%s skinspec=%s skin_sha=%s tier=%s cache=%s payload=%s\n' \
     "$(date -Is)" "$shadow_set" "${sc_sha:-none}" "$ptq_state" \
-    "$ser_state" "$(case "$ser_state" in off*) echo none;; *:in-skin) echo in-skin;; *) echo "${ser_sha:-none}";; esac)" "$ptrefl" \
+    "$ser_state" "$(case "$ser_state" in off*) echo none;; *:in-skin) echo in-skin;; *) echo "${ser_sha:-none}";; esac)" "$ptrefl" "$refract_state" "${ptrefl_sha:-none}" \
     "$skin" "$skin_set" "${skin_sha:-none}" \
     "$tier" "${cache_action:-kept}" "$payload" \
     >> "$HOME/callisto_launches.log" 2>/dev/null || true
@@ -472,6 +514,8 @@ jnum() { grep -o "\"$1\": *[0-9]*" "$LAST_RUN" 2>/dev/null | grep -o '[0-9]*$' |
     echo "want_ptclamp=$ptclamp"
     echo "want_ptbounce=$ptbounce"
     echo "want_ptrefl=$ptrefl"
+    echo "want_refract=$refract_state"
+    echo "req_refract=$refract"
     echo "want_ptq=$ptq_state"
     echo "want_ser=$ser_state"
     echo "req_ser=$ser"

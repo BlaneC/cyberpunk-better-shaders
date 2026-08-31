@@ -32,6 +32,13 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- energy the lobe was always meant to have, so it is a fix,
                -- not a look trade. Off stays available for A/B.
                ptmsggx = "on",
+               -- Phase 0.5 glass refraction (handoff/20 par5b, 76): the traced
+               -- glass reflection ray repointed to the refracted direction.
+               -- A ladder of pre-built raygens (the bend is an OpConstant),
+               -- served THROUGH the reflection overlay above. Off by default:
+               -- it REPLACES the glass reflection while it is on, and it has
+               -- never been observed on screen.
+               refract = "off",
                -- Callisto Tier-3 skin gloss (handoff/27 Phase 2). Off until it
                -- has been confirmed on screen; the CET skin CVar panel could
                -- not produce this look at all (`27` §4), so this is the only
@@ -50,6 +57,7 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
 local SWITCHES = { "tier", "kernel", "skin", "shadowcull",
                    "shadowset", "skinspec",
                    "ptreg", "ptclamp", "ptbounce", "ptrefl", "ptmsggx",
+                   "refract",
                    -- 44: `ser` was missing here, so saveParams() dropped it
                    -- and SER could never be selected from this page.
                    "ser" }
@@ -183,6 +191,21 @@ local SHADOW_LABELS, SHADOW_INDEX = {}, {}
 for i, e in ipairs(SHADOW_SETS) do
     SHADOW_LABELS[i] = e.label
     SHADOW_INDEX[e.id] = i
+end
+
+-- Phase 0.5 glass refraction ladder (handoff/76). Pre-built raygens parked in
+-- refract.set/ by dev/build_refract.sh; the eta is an OpConstant baked at
+-- build time (the inert-slider trap again), so this is a set picker, not a
+-- slider. Ids must match build_refract.sh's levels.
+local REFRACT_SETS = {
+    { id = "off",   label = "Off -- mirror reflection (A/B control)" },
+    { id = "eta15", label = "Refracted, glass n=1.5 (physical)" },
+    { id = "eta20", label = "Refracted, n=2.0 (exaggerated, for A/B)" },
+}
+local REFRACT_LABELS, REFRACT_INDEX = {}, {}
+for i, e in ipairs(REFRACT_SETS) do
+    REFRACT_LABELS[i] = e.label
+    REFRACT_INDEX[e.id] = i
 end
 
 local function loadParams()
@@ -355,6 +378,26 @@ local function warnLines()
         add("WARNING: path-tracing quality (" .. ptq .. ") was live last "
             .. "launch but 0 raygen swaps applied -- the path tracer may not "
             .. "have run at all (RT: Overdrive off?).")
+    end
+    -- refract: want_refract is the STATE sync materialized (this launch, no
+    -- lag); a refusal is encoded as off:<reason> and must not hide here.
+    local rq = status.req_refract
+    if rq and rq ~= "off" and status.want_refract ~= rq then
+        add(string.format("NOTE: glass refraction '%s' is not running -- "
+            .. "sync reported '%s'. off:rung-missing means run "
+            .. "dev/build_refract.sh --install; off:needs-ptrefl means the "
+            .. "reflection bounce-mask switch (or the master switch) is off.",
+            rq, tostring(status.want_refract)))
+    end
+    -- last_want_refract comes off the cache stamp, so like the hit counts it
+    -- describes LAST launch -- the right pair for last_refl.
+    if status.last_want_refract and status.last_want_refract ~= "off"
+       and not status.last_want_refract:find(":") and num("last_refl") == 0
+       and status.last_layer == "loaded" then
+        add("NOTE: glass refraction was selected last launch but 0 "
+            .. "reflection raygen swaps applied -- the transparent "
+            .. "reflection pass never ran (render mode without standalone "
+            .. "RT reflections?), so the refraction could not have shown.")
     end
     if status.last_want_ptrefl == "on" and num("last_refl") == 0 then
         add("NOTE: reflection bounce mask was on last launch but 0 "
@@ -579,6 +622,26 @@ registerForEvent("onInit", function()
                          num("last_refl")),
         brdf.ptrefl ~= "off", true,
         function(state) brdf.ptrefl = state and "on" or "off" saveParams() end)
+    nativeSettings.addSelectorString("/callistoSSS/pt",
+        "Glass refraction experiment (next launch)",
+        "Repoints the traced glass reflection ray through the surface "
+        .. "instead of off it (Snell's law at the G-buffer normal), so "
+        .. "windows and glassware carry a path-traced view THROUGH the "
+        .. "glass where the mirror image was. The raster see-through "
+        .. "underneath is untouched, so expect the two views to stack; "
+        .. "this launch answers whether that reads as real refraction "
+        .. "(warping at grazing angles, magnification through curved "
+        .. "glass) or as a ghosted double image. While it is on, glass "
+        .. "loses its RT mirror reflection -- that is the trade being "
+        .. "tested, not a bug. n=2.0 bends twice as hard as physical "
+        .. "window glass; use it to find the effect, then judge n=1.5. "
+        .. "Needs the reflection switch above ON. Applies on next launch."
+        .. string.format(" [running now: %s]", status.want_refract or "unknown"),
+        REFRACT_LABELS, REFRACT_INDEX[brdf.refract] or 1, 1,
+        function(i)
+            brdf.refract = (REFRACT_SETS[i] or REFRACT_SETS[1]).id
+            saveParams()
+        end)
     nativeSettings.addSwitch("/callistoSSS/pt", "Firefly clamp (indirect) (next launch)",
         "Cap what a single indirect path segment may contribute (16 units, "
         .. "well above any plausible surface and ~64x below where the pass's "
