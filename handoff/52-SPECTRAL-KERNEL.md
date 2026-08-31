@@ -433,3 +433,10 @@ copies it into `$(R4E_DST)/kernels/`.
 | centre taps sample the same texel (their split is cosmetic) | **medium** | follows from their offsets being exactly 0.0 under the documented model; not verified in the shader |
 | `USED_TAPS = {0: 6}` — the runtime reads only 6 taps | **low** | a code comment with no supporting document; it changes the *predicted* look materially (§6) |
 | that `spectral` looks better than `detail` | **unknown** | never been on screen. That is the next session's only job here |
+
+> **2026-08-30 night, user verdict on screen:** the user ran the A/B
+> themselves the same night and both new rungs win by eye (*"A/B tested
+> myself and these are the shit"*). Settings unrecorded (user-driven
+> session); no radiometric claims ride on this. Look-confirmed.
+> Later, unprompted: *"The bleed shader and better skin shader was
+> incredible."*

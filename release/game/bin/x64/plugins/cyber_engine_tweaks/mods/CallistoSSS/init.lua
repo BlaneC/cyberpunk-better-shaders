@@ -99,6 +99,9 @@ local SKIN_LEVELS = {
     { id = "gi-100",      label = "REAL-GLOSS + GI skin c1 at full strength" },
     -- 53: gi-50's raygens byte-verbatim + real-gloss-bleed compute (needs ser=class)
     { id = "gi-50-bleed",      label = "GI-50 + terminator bleed" },
+    -- 55: G-U5 payload sentinel (diagnostic; read handoff/55 sec 4 BEFORE launching)
+    { id = "sentinel",   label = "SENTINEL: injected-trace probe A -- magenta = trace runs" },
+    { id = "sentinel-b", label = "SENTINEL-B: probe B (only if A dark) -- cyan = trace runs" },
 }
 local SKIN_LABELS, SKIN_INDEX = {}, {}
 for i, e in ipairs(SKIN_LEVELS) do

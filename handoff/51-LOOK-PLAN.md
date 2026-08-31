@@ -106,13 +106,29 @@ this the most important item; it amplifies the already-won rung.
 
 ## 7. The ear-glow route (traced transmission) — for when the itch returns
 
+**The design target, user's words (2026-08-30 night):** *"I want ears to go
+full red when light from the sun is being cast through them. Like for them to
+illuminate… Same with noses."* Note the physics delivers this for free: with
+per-channel extinction from the same Jensen coefficients as `52`/`53`
+(ld = 3.67/1.37/0.68 mm), a ~5 mm ear transmits red and kills green/blue —
+the saturated red glow IS the spectral falloff, no tint knob needed.
+
 `39` §6's two reopening conditions, and the plan agreed 2026-08-30:
 
-1. **G-U3, offline, zero launches:** name the writer of the skipped
-   `R8_UINT` at `registers[1]+3` and what it holds. `EMM_SurfaceTranslucency`
-   is a named candidate (`38` §1.1/U3) — if the engine already writes
-   per-pixel translucency there, the thickness-input problem is solved free.
-2. **G-U5, payload sentinel, one small launch** (`29` §B5, unrun for four
+1. ~~**G-U3, offline, zero launches**~~ **DONE 2026-08-30 night (`54`) —
+   answered NEGATIVE.** The slot is the per-pixel **light-channel bitmask**
+   (`EMM_LightChannels`), written by volume proxies late in the frame and
+   read every pixel by the colour-writing ReSTIR-GI resolver (`38`'s
+   "unread in both GI resolvers" was wrong). NOT translucency, NOT free to
+   write — `38` U3/B2 retire. No free thinness input exists; step 2 is the
+   only honest route. Side-finding: material subtypes gate live GI (hair
+   family → bit 512, eye subtype 25 → bit 1024) — partial subtype decode
+   before `probe-both` ever launches.
+2. **G-U5, payload sentinel — BUILT AND PARKED 2026-08-30 night (`55`),
+   launch pending.** Two rungs: `sentinel` (A, magenta = full pass) and
+   `sentinel-b` (B, only if A dark; cyan = trace runs, miss mapping
+   failed). Interpretation table pre-registered in `55` §4; identity-when-
+   dead is the negative control. Originally (`29` §B5, unrun for four
    documents): miss shader writes a constant into the payload, read back
    after iteration 2, written somewhere visible. Gates traced thickness AND
    all of `29` Part B. Note `26` §7d: a *second static* `OpTraceRayKHR`
@@ -137,3 +153,68 @@ this the most important item; it amplifies the already-won rung.
   `dev/kernels/kernel.*.bin` via wildcard; no Makefile change needed.
 - Nothing in `52`/`53` is *working* until an on-screen A/B says so — built,
   validated, parked is the ceiling for a subagent.
+
+## 9. Post-launch analysis runbook (written 2026-08-30 night, pre-launch)
+
+State at time of writing: everything below is **deployed and cmp-verified**
+(`make install` backup `20260830-231725`; `init.lua` in the game dir is
+byte-identical to root; `skin.set/` carries `probe-both`, `sentinel`,
+`sentinel-b`). All of tonight's work is **uncommitted** — `git status` shows
+it; nothing was committed on purpose (house rule). The two launches below
+were NOT run yet as of this writing. A clean session picking up afterwards:
+read this section, then the doc each step names. **Trust the journal and the
+audit before trusting any pixel** — serve first, then look.
+
+### 9.1 Launch: `probe-both` (G-U4 + A2/A3 gate)
+
+- Selected by hand-editing `brdf_params.txt` (`skin=on`,
+  `skinspec=probe-both`) — NOT in the CET selector, and CET resets the file
+  after every launch, so re-write it each time. The CET warning
+  "running 'probe-both' but the selector says 'off'" is the **confirmation
+  it served** (`40` §launch runbook). Launch through Steam so sync runs.
+- Verify serve: `./dev/ab_launch_audit.py 1` — expect the compute skin
+  overlay serving 76 modules (the 77th, `ab0bc2fe`, writes an int
+  sample-index buffer and is correctly absent — `46` §12), 0 rejects.
+- Captures → `a-b-testing/probe-both/S*.png` (skin, cloth, chrome
+  cyberware, eyes, hair in frame if possible).
+- Decode: `./dev/patch_subtype_probe.sh --legend-md` prints the
+  palette↔value key; `40` §0 carries the pre-registered falsifier table
+  (vanilla-looking `sub` next to painting `cls` = the sub-enum read is
+  broken; uniform single colour = constant field, a different and
+  interesting result). **Calibration anchors from `54`:** hair-family
+  subtypes and eye subtype 25 are independently confirmed live in GI's
+  light-channel logic — the decoded legend must be consistent with those
+  two or the decode is wrong.
+- What the outcomes gate: sheen paints ⇒ A3 peach fuzz buildable (`51` §5
+  caveat: additive, must modulate the existing highlight — `0d`);
+  chrome has its own subtype ⇒ A8 gate passes; subtype meanings ⇒ G-U4
+  closed, `40` §10 has the follow-on table.
+
+### 9.2 Launch: `sentinel` (G-U5 — the gate for traced-thickness ear glow)
+
+- Selected from the CET Skin build selector (registered). Settings contract
+  = `gi-50`: PT on, `ser=class`, `shadowset=full-shadow`, standing PT
+  switches, RR pinned and verified in the collect snapshot. Sync refuses
+  the rung otherwise.
+- Verify serve: `./dev/ab_launch_audit.py 1` — expect 12 `rgs_reference` +
+  4 `rgs_restirgi` + **10 `ms_empty_main`** HITs, 0 rejects, manifest echo
+  `sentinel …`.
+- Readout is binary, by eye, pre-registered in **`55` §4** (read it BEFORE
+  interpreting anything):
+  | saw | means | next |
+  |---|---|---|
+  | magenta | injected trace + payload round trip work | build traced transmission (§7 step 3); skip B |
+  | dark, frame == gi-50 | trace dead OR miss mapping failed | launch `sentinel-b` |
+  | (B) cyan on geometry, dark sky | traces execute; only miss-0 mapping failed | transmission still viable — it rides the CHS path B proves |
+  | (B) dark too | injected static traces don't execute in this family | G-U5 fails; fallback is B4 screen-space thickness (worse, tile-quantised) — re-read `39` §6 before building anything |
+- On a pass: the transmission build spec is §7 step 3 + the design target
+  quote above; per-channel extinction constants come from the same Jensen
+  set as `52`/`53` (ld = 3.67/1.37/0.68 mm). Site machinery: `50` §1 and
+  `dev/build_gi_bleed.sh` are the templates; `55`'s handshake pattern is
+  how the thickness ray reports back.
+
+### 9.3 The rest of the board, unchanged
+
+`kernel=spectral` and the bleed family are look-confirmed (user A/B, this
+page item 5). D3 waits on its consumer-naming read (§4). M1 waits on the
+RR-off falsifier (§6). A8 waits on 9.1's legend. U3/B2 are retired (`54`).

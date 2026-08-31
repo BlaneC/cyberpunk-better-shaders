@@ -120,10 +120,16 @@ for reach. In order of look-payoff:
 4. Whenever convenient: E8 sun size (live, no launch) · E11 probe legend
    decode (offline, `44` §2.9).
 5. **The look plan is `51`** (2026-08-30 night): A6 spectral kernel (`52`)
-   and A7 terminator bleed (`53`) are **built, validated, parked, registered
-   in `init.lua` — never on screen**. Next look session: `kernel=spectral`
-   vs `detail`, then `gi-50-bleed` vs `gi-50` (`53` §8; `make install`
-   first). D3 / A8 / M1 and the ear-glow route resume from `51` §4–§7.
+   and A7 terminator bleed (`53`) — **user A/B'd both by eye the same night
+   and both win** (*"A/B tested myself and these are the shit… skin shader
+   looks great too"*, later *"incredible"*; user's own session, settings unrecorded — no
+   radiometric claims ride on it). `kernel=spectral` and the bleed family
+   are look-confirmed rungs. Same night: **G-U3 answered negative** (`54` —
+   the R8_UINT is the light-channel mask, U3/B2 retired) and the **G-U5
+   sentinel is built, parked, registered and deployed** (`55`; two rungs,
+   interpretation pre-registered). Next: two launches — `probe-both`, then
+   `sentinel` — and the post-launch analysis runbook is **`51` §9** (a
+   clean session starts there). D3 / M1 resume from `51` §4/§6.
    **E9 SER frame-time: closed by the user 2026-08-30** (*"noticeably faster
    by feel… that's enough"*). **The probe-gi launch (19:36) is the first to
    actually serve a SER splice** — `ser=class:in-skin` (the hints ride the

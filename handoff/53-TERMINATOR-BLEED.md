@@ -256,3 +256,10 @@ both directions).
 - Zero shared-consumer collisions dump-wide, so the one-replace-per-id rule
   (`31` §4.1) holds with room to spare; the dup guard in the pass should
   never fire and is there for the day it does.
+
+> **2026-08-30 night, user verdict on screen:** the user ran the A/B
+> themselves the same night and both new rungs win by eye (*"A/B tested
+> myself and these are the shit"*). Settings unrecorded (user-driven
+> session); no radiometric claims ride on this. Look-confirmed.
+> Later, unprompted: *"The bleed shader and better skin shader was
+> incredible."*
