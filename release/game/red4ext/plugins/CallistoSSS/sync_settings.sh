@@ -142,10 +142,15 @@ if [[ -d "$INSTALL_DIR/skin.set" ]]; then
     # missing, the previous launch's rung must not stay behind and get served
     # under the new name.
     mkdir -p "$INSTALL_DIR/swaps.skin"
-    rm -f "$INSTALL_DIR/swaps.skin/"*.spv
+    rm -f "$INSTALL_DIR/swaps.skin/"*.spv "$INSTALL_DIR/swaps.skin/MANIFEST.txt"
     if [[ -d "$INSTALL_DIR/skin.set/$want_skin" ]]; then
         cp -pf "$INSTALL_DIR/skin.set/$want_skin/"*.spv \
               "$INSTALL_DIR/swaps.skin/" 2>/dev/null && skin_set=$want_skin
+        # probe-gi ships a MANIFEST.txt (provenance for the guard below; the
+        # layer echoes line 1 into the journal). Other rungs ship none.
+        [[ -f "$INSTALL_DIR/skin.set/$want_skin/MANIFEST.txt" ]] && \
+            cp -pf "$INSTALL_DIR/skin.set/$want_skin/MANIFEST.txt" \
+                   "$INSTALL_DIR/swaps.skin/" 2>/dev/null
     fi
 elif [[ "$want_skin" != "off" ]]; then
     echo "[CallistoSSS] skinspec=$want_skin but no skin.set/ is parked --" >&2
@@ -228,6 +233,52 @@ else
     ptq_state=off
 fi
 
+# --- raygen-bearing skin rungs (probe-gi, handoff/48 §8 / 50) ---------------
+# A skin rung that ships rgs_* files owns ids that ser (above skin) and ptq
+# (below it) also serve. First-file-wins makes that a stack of traps, each of
+# which this repo has already paid for once:
+#   * its rgs_reference_main files MUST be built on the ser.set (which is
+#     built on the served ptq combo), or serving them un-patches ptq+SER for
+#     those ids ("an overlay reject must fall through, never to vanilla");
+#   * swaps.ser MUST NOT be materialised while it serves, or ser wins the
+#     race and the rung's raygen files are dead with no error anywhere;
+#   * its vanilla-based rgs_restirgi_* files collide with shadowset=full
+#     (which patches those 8 ids); only full-shadow is compatible;
+#   * a PT-switch change after the rung was built re-creates the stale-ser
+#     trap one overlay up, so the provenance in the rung's MANIFEST.txt is
+#     verified here EVERY launch, exactly like swaps.ser's own manifest.
+# On any mismatch the rung is refused loudly (skinspec reads off:gi-*) --
+# a probe served over the wrong base is worse than no probe.
+skin_owns_raygens=0
+if [[ "$skin" != "off" ]] && compgen -G "$INSTALL_DIR/swaps.skin/"'*.rgs_*.spv' >/dev/null; then
+    skin_owns_raygens=1
+fi
+gi_refuse() {
+    echo "[CallistoSSS] skinspec=$skin_set REFUSED: $1" >&2
+    rm -f "$INSTALL_DIR/swaps.skin/"*.spv "$INSTALL_DIR/swaps.skin/MANIFEST.txt"
+    skin_set="off:$2"
+    skin_owns_raygens=0
+}
+if (( skin_owns_raygens )); then
+    GIM="$INSTALL_DIR/swaps.skin/MANIFEST.txt"
+    gi_src="$(sed -n 's/.*src_ser="\([^"]*\)".*/\1/p' "$GIM" 2>/dev/null | head -1)"
+    gi_ser_sha="$(sed -n 's/.*ser_sha=\([0-9a-f]*\).*/\1/p' "$GIM" 2>/dev/null | head -1)"
+    gi_ptq_sha="$(sed -n 's/.*ptq_sha=\([0-9a-f]*\).*/\1/p' "$GIM" 2>/dev/null | head -1)"
+    gi_ser_now="$(cat "$INSTALL_DIR/$gi_src"/*.rgs_reference_main.spv 2>/dev/null | sha256sum | cut -c1-16)"
+    gi_ptq_now="$(cat "$INSTALL_DIR/swaps.ptq/"*.rgs_reference_main.spv 2>/dev/null | sha256sum | cut -c1-16)"
+    if [[ -z "$gi_ser_sha" || -z "$gi_ptq_sha" || -z "$gi_src" ]]; then
+        gi_refuse "raygen-bearing rung has no readable provenance MANIFEST.txt" "gi-no-manifest"
+    elif [[ "$gi_ser_now" != "$gi_ser_sha" ]]; then
+        gi_refuse "built on $gi_src which has since changed ($gi_ser_sha -> ${gi_ser_now:-empty}); rebuild: ./dev/build_probe_gi.sh --install" "gi-stale-ser"
+    elif [[ "$gi_ptq_now" != "$gi_ptq_sha" ]]; then
+        gi_refuse "baked against ptq $gi_ptq_sha but this launch serves ${gi_ptq_now:-empty} (ptq=$ptq_state); restore the PT switches or rebuild the probe" "gi-stale-ptq"
+    elif compgen -G "$INSTALL_DIR/swaps.skin/"'*.rgs_restirgi_*.spv' >/dev/null && [[ "$shadow_set" != "full-shadow" ]]; then
+        gi_refuse "ships vanilla-based rgs_restirgi_* but shadowset=$shadow_set patches those ids; set shadowset=full-shadow" "gi-shadowset"
+    elif [[ "$ser" == "off" ]]; then
+        gi_refuse "carries SER splices (built on $gi_src) but ser=off was requested; set ser=class" "gi-needs-ser"
+    fi
+fi
+
 # ser -- the Shader Execution Reordering overlay (handoff/41), off by default.
 # `ser` names a HINT RUNG the way `skinspec` names a gloss build: off, class,
 # byte, hit, class+hit. dev/patch_ser.sh --install parks all four in ser.set/,
@@ -256,7 +307,16 @@ fi
 # --install ships it disabled on purpose so the first launch is the A/B control.
 SER="$INSTALL_DIR/swaps.ser"
 ser_state=off
-if [[ "$ser" != "off" && "$tier" != "off" ]]; then
+if [[ "$ser" != "off" && "$tier" != "off" && "$skin_owns_raygens" == "1" ]]; then
+    # The skin rung owns the twelve rgs_reference_main ids and carries the
+    # SER splices itself (provenance verified above). Materialising swaps.ser
+    # here would put the SAME ids in an overlay that outranks skin, and the
+    # rung's files -- the whole point of the launch -- would be dead with no
+    # error anywhere. So the hints ride the skin overlay and swaps.ser stays
+    # empty and disabled.
+    mkdir -p "$SER"; rm -f "$SER"/*.spv "$SER/MANIFEST.txt"
+    ser_state="$ser:in-skin"
+elif [[ "$ser" != "off" && "$tier" != "off" ]]; then
     # Materialise the requested rung, exactly as ptq and skin.set do. The
     # overlay is emptied whether or not the rung exists: an older swaps.ser/
     # left in place would otherwise pass every check below under its own
@@ -294,8 +354,9 @@ if [[ "$ser" != "off" && "$tier" != "off" ]]; then
         ser_state="${ser_var:-$ser}"
     fi
 fi
-if [[ "$ser_state" == off* ]]; then echo 1 > "$INSTALL_DIR/ser.disable"
-else rm -f "$INSTALL_DIR/ser.disable"; fi
+if [[ "$ser_state" == off* || "$ser_state" == *:in-skin ]]; then
+    echo 1 > "$INSTALL_DIR/ser.disable"     # in-skin: the DIR is empty; the
+else rm -f "$INSTALL_DIR/ser.disable"; fi   # hints serve from swaps.skin
 
 # ptrefl -- the same cullMask widening on the three reflection raygens. Nothing
 # else patches those modules, so it is an ordinary independent overlay.
@@ -373,7 +434,7 @@ skin_sha="$(cat "$INSTALL_DIR/swaps.skin/"*.spv 2>/dev/null | sha256sum | cut -c
 ser_sha="$(cat "$INSTALL_DIR/swaps.ser/"*.spv 2>/dev/null | sha256sum | cut -c1-16)"
 printf '%s shadowset=%s sc_sha=%s ptq=%s ser=%s ser_sha=%s ptrefl=%s skin=%s skinspec=%s skin_sha=%s tier=%s cache=%s payload=%s\n' \
     "$(date -Is)" "$shadow_set" "${sc_sha:-none}" "$ptq_state" \
-    "$ser_state" "$([[ "$ser_state" == off* ]] && echo none || echo "${ser_sha:-none}")" "$ptrefl" \
+    "$ser_state" "$(case "$ser_state" in off*) echo none;; *:in-skin) echo in-skin;; *) echo "${ser_sha:-none}";; esac)" "$ptrefl" \
     "$skin" "$skin_set" "${skin_sha:-none}" \
     "$tier" "${cache_action:-kept}" "$payload" \
     >> "$HOME/callisto_launches.log" 2>/dev/null || true

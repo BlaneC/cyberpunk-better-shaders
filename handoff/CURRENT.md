@@ -1,4 +1,4 @@
-# CallistoSSS — current state (2026-08-30, after the L1–L8 A/B session)
+# CallistoSSS — current state (2026-08-30 night, after the gi-50 A/B)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
@@ -21,7 +21,8 @@ resumes the work with zero prior context.
 | feature | switch | doc |
 |---|---|---|
 | SSS diffusion kernel, `detail` preset (engine radius; shipped one was 10×) | `kernel=detail` (selector since 44) | `33` §1 |
-| Skin BRDF tier-1 `c1` in the compute resolvers — **confirmed on screen, but on directly-lit skin only** (`46` §14: +1.8% above ~106 lum, nothing below; `46` §12/L2: the class gate passes, but the painted modules write the direct-light term only). Bounce-lit skin is still unreached — `42` does **not** close. | `skin` | `02`, `03`, `46` §12, §14 |
+| Skin BRDF tier-1 `c1` in the compute resolvers — **confirmed on screen, but on directly-lit skin only** (`46` §14: +1.8% above ~106 lum, nothing below; `46` §12/L2: the class gate passes, but the painted modules write the direct-light term only). Bounce-lit skin reached separately by `gi-50` below — `42` **closes**. | `skin` | `02`, `03`, `46` §12, §14 |
+| **`skinspec=gi-50`** — real-gloss + class-gated `c1` on the ReSTIR-GI diffuse raygens. **Standing rung, decided on screen 2026-08-30 night** (`50` §6): user prefers it over `R2-real-gloss` (*"more complexity in the shading of the face"*); S3 corroborates (+1.2..1.8% face lum vs three matched controls, achromatic, structured toward the bounce-lit lower face). Needs `ser=class` (in-skin) + `shadowset=full-shadow`; sync refuses otherwise. | `skinspec=gi-50` | `50` |
 | Hair shadow-leak fix, direct shadow rays only | `shadowcull` / `full-shadow` | `26` §7 |
 | PT: bounce cull mask 1→255, reflection mask, firefly clamp | `ptbounce`, `ptrefl`, `ptclamp` | `26` §4 |
 | MS-GGX rough-metal energy compensation | `ptmsggx` | `28` |
@@ -96,15 +97,17 @@ Collapsed by the peer review (`47` §11): the radiometric-ledger phase is
 over — the eye is the instrument for direction, probes and the serve audit
 for reach. In order of look-payoff:
 
-1. **Static GI-writer search — DONE, read `48`.** Bounce-lit skin is shaded
-   in the **raygen stage**, not compute: the ReSTIR-GI diffuse raygens
-   (`006ba4e3…` ×4) and `rgs_reference_main` ×12. The anchor hunt missed
-   them because `patch_compute_skin.sh` globs `*.dxil.spv` — 26 of the 110
-   anchor-pair modules are raygens it never sees. Confirmation is **one
-   launch**: `skinspec=probe-gi` (hue-coded per family — reference green,
-   restirgi-diffuse red, restirgi-spec blue), shot in S2 + S1; the hue on
-   the S2 face names the writer. Splice plan in `48` §9. Also: `ab0bc2fe`
-   never dispatches at all, and only 31/84 anchored compute modules do.
+1. ~~**GI-writer probe + splice**~~ **DONE 2026-08-30 night (`50`).** The
+   probe named **ReSTIR-GI diffuse** as the bounce-lit skin writer (`50`
+   §2); the Site A splice launched and **won the A/B** — `gi-50` is the
+   standing rung (see the confirmed table; `50` §6 for the S3 numbers and
+   the two disqualified scenes: S2 crowd drift, S1 sun drift — a
+   cross-session pair only lighting-matches under stationary light).
+   Three `48` §9 claims died on the way (no NoV in scope, NoL not at the
+   write, spatial≠spatiotemporal shape) — `50` §3 before touching those
+   modules again. Left parked: `gi-100` (one look if the user wants it
+   louder), reference-green Site B (only after an observation demands
+   it), the spec family (nil share).
 2. ~~**One eyeball ladder session**~~ **DONE 2026-08-30 (`49`)** — `real-gloss`
    wins, unanimous, no single-axis fallback needed. Kernel presets still to
    ride along.
@@ -116,10 +119,11 @@ for reach. In order of look-payoff:
 4. Whenever convenient: E8 sun size (live, no launch) · E11 probe legend
    decode (offline, `44` §2.9).
    **E9 SER frame-time: closed by the user 2026-08-30** (*"noticeably faster
-   by feel… that's enough"*) — **but the live `brdf_params.txt` and every
-   audited launch to date carry `ser=off`, so no SER splice has ever been
-   served.** Whatever the feel is measuring, it is not SER. If SER is wanted,
-   set `ser=class` in CET; until a launch serves it, `41` stays unproven.
+   by feel… that's enough"*). **The probe-gi launch (19:36) is the first to
+   actually serve a SER splice** — `ser=class:in-skin` (the hints ride the
+   skin rung's raygen files; `50` §1), zero rejects. `41`'s serve path is
+   proven; its perf claim is still unmeasured. `ser=class` is now standing
+   config per the user.
 
 `collect.sh` now snapshots `UserSettings.json` into each rung dir, so RR
 state and regime breaks are recorded facts from here on, not inferences.

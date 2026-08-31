@@ -26,6 +26,11 @@ Tiers
                  exact paint is what produced pics/panam_working_small.png
   --tier sheen   the ungated Charlie sheen, nothing else
   --tier both    sub + sheen in one module (38 sec 7's one-launch merge)
+  --tier gi      handoff/48 sec 8: per-FAMILY hue paint at the RAYGEN
+                 radiance writes (reference green, restirgi-diffuse red,
+                 restirgi-specular blue), class-1 gated. Raygen modules
+                 only -- driven by dev/build_probe_gi.sh, not by the
+                 compute wrapper.
 
 Nothing here is a feature. Every tier is a diagnostic and every one of them
 is meant to look wrong.
@@ -517,10 +522,405 @@ def build_sheen(mod, cfg, knobs):
     return consts, edits, rep
 
 
+# ------------------------------------------------- probe-gi (handoff/48 §8)
+# Hue-coded, class-1-gated paint at the RAYGEN radiance writes, one colour
+# per FAMILY, to name the writer of bounce-lit skin in one launch:
+#
+#   rgs_reference_main            x12  green  x(0.30, 3.00, 0.30)
+#   rgs_restirgi_* diffuse        x4   red    x(3.00, 0.30, 0.30)
+#   rgs_restirgi_* specular       x4   blue   x(0.30, 0.30, 3.00)
+#
+# The compute probe is OFF in this rung -- the launch is only about raygens.
+#
+# Structure, measured offline 2026-08-30 (handoff/50), where it corrects 48:
+#
+#   * 48 §4 says the restirgi class shift "dominates the image write". It
+#     does NOT, in any of the 8: dxil-spirv guards the G-buffer fetch and
+#     the write reads through 1-2 levels of guarded-fetch OpPhi (the GOTCHAS
+#     "value a shader tests is not the value it computed" trap, again). The
+#     dominating form is the phi; every operand is the class or %uint_0, and
+#     0 is not skin, so gating on it is safe. find_gi_class walks phis to a
+#     fixpoint and each write is gated on a form PROVEN to dominate it.
+#
+#   * 48 §4's "the specular variants write YCoCg" is a half-truth that would
+#     have broken the paint: in each restirgi family of 4, two permutations
+#     write plain RGB (single arm, NMin/NMax fp16-clamped) and two carry
+#     BOTH encodings and pick at runtime from a CBV word -- an RGB arm and a
+#     YCoCg dot-product arm merged by phis at the write. A channel multiply
+#     at such a write would tint one encoding and corrupt the other. Both
+#     arms consume one guarded RGB triple (e.g. %1433/34/35 in 038867e9),
+#     so the paint goes THERE, upstream of the encode split: multiply the
+#     triple, replace its downstream uses, and both arms carry the hue.
+#     The shape is DETECTED per write, never assumed from the family.
+#
+#   * Two rgs_reference_main permutations (40c6faab, ab7f1822) write NO
+#     image radiance at all: they accumulate fixed-point (x10000) radiance
+#     through OpAtomicIAdd into an SSBO at registers[5]+9, and their only
+#     image writes are constant-zero early-outs. Painting an unread atomic
+#     contract is the GOTCHAS rule-5 trap; both had 0 dispatches in every
+#     journal to date. They ship in the rung as UNPAINTED passthroughs of
+#     the SER source so the serve stays uniform. If the launch journal shows
+#     either one dispatching, a green null on the S2 face is NOT
+#     interpretable as "reference does not write it".
+GI_TINTS = {
+    'reference':   (0.30, 3.00, 0.30),
+    'gi-diffuse':  (3.00, 0.30, 0.30),
+    'gi-specular': (0.30, 0.30, 3.00),
+}
+GI_FAMILY = {}
+for _h in ('d622fb9e1dcb8cd0', 'd002cc05eb940591', '4270b745d11a5e8a',
+           '40c6faab52a13874', '3d871a3170bc5815', '25b54fc4a17688df',
+           '996a3b16253c3e7f', '852b31a841b85b26', '4103c8860c3909e4',
+           '21a92f1a77eb4c22', '1271d3815051da17', 'ab7f1822eeb0331b'):
+    GI_FAMILY[_h] = 'reference'
+for _h in ('006ba4e3c8c05205', '038867e9a3bf0626', '5e1e98e44d854712',
+           'fc60b8a0b56529b8'):
+    GI_FAMILY[_h] = 'gi-diffuse'
+for _h in ('1ca55ed0fc70d56f', 'a3b07b0f4f4f79b8', '174dee89ec119981',
+           '9d117caf3ef46c59'):
+    GI_FAMILY[_h] = 'gi-specular'
+GI_PASSTHROUGH = ('40c6faab52a13874', 'ab7f1822eeb0331b')
+
+FP16_MAX = 65504.0
+YCC_ROLES = {'Y': (0.25, 0.5, 0.25), 'Co': (0.5, 0.0, -0.5),
+             'Cg': (-0.25, 0.5, -0.25)}
+
+
+def find_gi_class(mod, family):
+    """(class_value, dominating_forms, how) for the paint gate.
+
+    reference: the IEqual-consumed `gbuf.y >> 5` (find_class_shift; 48 §5's
+    %439). restirgi: the shift consumed by the module's single material-class
+    OpSwitch (cases 1=skin and 4=hair) -- these modules also test NEIGHBOUR
+    pixels' classes through IEqual, so the switch, not the first IEqual, is
+    what names the primary surface. The returned set is the shift plus every
+    OpPhi %uint whose operands are all in the set or %uint_0 (guarded-fetch
+    merges), to a fixpoint; the caller picks whichever form dominates a
+    given site.
+    """
+    if family == 'reference':
+        shift, _ = P.find_class_shift(mod)
+        how = 'ieq-shift'
+    else:
+        hits = []
+        for ln in mod.lines:
+            m = re.match(r'\s*OpSwitch (%\d+) %\d+((?: \d+ %\d+)+)\s*$', ln)
+            if not m:
+                continue
+            if not {'1', '4'} <= set(re.findall(r'(\d+)(?= %)', m.group(2))):
+                continue
+            sid = m.group(1)
+            _, sd = mod.find_def(sid)
+            m2 = re.match(r'OpShiftRightLogical %uint (%\d+) %uint_5\s*$',
+                          sd or '')
+            if not m2:
+                continue
+            _, ed = mod.find_def(m2.group(1))
+            m3 = re.match(r'OpCompositeExtract %uint (%\d+) 1\s*$', ed or '')
+            if not m3:
+                continue
+            _, fd = mod.find_def(m3.group(1))
+            if not (fd and fd.startswith('OpImageFetch %v4uint')):
+                continue
+            hits.append(sid)
+        if len(hits) != 1:
+            die(f"{mod.name}: expected exactly one material-class OpSwitch "
+                f"(cases 1 and 4 on a fetched >>5), found {len(hits)}")
+        shift, how = hits[0], 'class-switch'
+    vals = {shift}
+    changed = True
+    while changed:
+        changed = False
+        for ln in mod.lines:
+            m = re.match(r'\s*(%\w+)\s*=\s*OpPhi %uint (.+)$', ln)
+            if not m or m.group(1) in vals:
+                continue
+            ops = [v for v, _b in re.findall(r'(%\w+) (%\w+)', m.group(2))]
+            if ops and all(v in vals or v == '%uint_0' for v in ops):
+                vals.add(m.group(1))
+                changed = True
+    return shift, vals, how
+
+
+def _gi_float_const(mod, tok):
+    _, d = mod.find_def(tok)
+    m = re.match(r'OpConstant %float (\S+)\s*$', d or '')
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _gi_vec3(mod, vid):
+    """(v0, v1, v2) floats if vid is a 3-vector of float constants."""
+    _, d = mod.find_def(vid)
+    m = re.match(r'Op(?:CompositeConstruct|ConstantComposite) %v3float '
+                 r'(%\S+) (%\S+) (%\S+)\s*$', d or '')
+    if not m:
+        return None
+    vals = [_gi_float_const(mod, t) for t in m.groups()]
+    return None if None in vals else tuple(vals)
+
+
+def _gi_leaves(mod, cid, depth=4):
+    """Resolve cid through float OpPhis: (dot_ids, plain_ids). Constant
+    leaves are dropped (a zero arm is not evidence of anything)."""
+    dots, plains = [], []
+    _, d = mod.find_def(cid)
+    if d is None:
+        plains.append(cid)
+        return dots, plains
+    if d.startswith('OpDot %float'):
+        dots.append(cid)
+    elif d.startswith('OpPhi %float') and depth > 0:
+        ops = [v for v, _b in re.findall(r'(%\w+) (%\w+)',
+                                         d[len('OpPhi %float'):])]
+        for v in ops:
+            if _gi_float_const(mod, v) is not None:
+                continue
+            sub = _gi_leaves(mod, v, depth - 1)
+            dots += sub[0]
+            plains += sub[1]
+    elif d.startswith('OpConstant '):
+        pass
+    else:
+        plains.append(cid)
+    return dots, plains
+
+
+def _gi_dot_parts(mod, dot_id):
+    """(role, triple) for one encode dot: which YCoCg row its constant
+    vector is, and the 3 value ids the other operand constructs."""
+    _, d = mod.find_def(dot_id)
+    m = re.match(r'OpDot %float (%\S+) (%\S+)\s*$', d or '')
+    if not m:
+        return None, None
+    role = triple = None
+    for vid in m.groups():
+        vec = _gi_vec3(mod, vid)
+        if vec is not None:
+            for rname, ref in YCC_ROLES.items():
+                if all(abs(a - b) < 1e-4 for a, b in zip(vec, ref)):
+                    role = rname
+            continue
+        _, cd = mod.find_def(vid)
+        mc = re.match(r'OpCompositeConstruct %v3float (%\S+) (%\S+) (%\S+)\s*$',
+                      cd or '')
+        if mc:
+            triple = mc.groups()
+    return role, triple
+
+
+def _gi_zeroish(mod, comp):
+    return comp == '%float_0' or _gi_float_const(mod, comp) == 0.0
+
+
+def build_gi_paint(mod, cfg, writes):
+    """The per-family hue multiply, gated on material class 1, at every
+    radiance write. Constant-zero early-out writes and scalar-broadcast
+    hit-distance writes are skipped and reported; everything else either
+    paints or DIES -- an unpaintable radiance write would make the launch
+    read as a family null, which is worse than no build."""
+    h = (mod.ident or '').split('.')[0]
+    family = GI_FAMILY.get(h)
+    if family is None:
+        die(f"{mod.name}: {h} is not a probe-gi target module")
+    if h in GI_PASSTHROUGH:
+        die(f"{mod.name}: atomic-SSBO accumulator permutation -- ship the "
+            f"source unpainted (the wrapper does); painting its atomic "
+            f"contract is not built")
+    tint = GI_TINTS[family]
+
+    glsl = mod.glsl
+    if glsl is None:
+        for ln in mod.lines:
+            m = re.match(r'\s*(%\w+)\s*=\s*OpExtInstImport "GLSL.std.450"', ln)
+            if m:
+                glsl = m.group(1)
+                break
+    if glsl is None:
+        die(f"{mod.name}: no GLSL.std.450 import -- cannot emit clamps")
+
+    consts, edits = [], []
+
+    def C(v):
+        nid, c = mod.const(v)
+        if c:
+            consts.append(c)
+        return nid
+
+    one = C(1.0)
+    fmax, fmin = C(FP16_MAX), C(-FP16_MAX)
+    tids = [C(x) for x in tint]
+    uid1, ud = mod.uconst(1)
+    if ud:
+        consts.append(ud)
+
+    shift, cands, how = find_gi_class(mod, family)
+    rep = {"family": family, "tint": list(tint), "class_how": how,
+           "class_value": shift, "painted": [], "skipped_zero": [],
+           "skipped_scalar": [], "skipped_dom": []}
+    I = mod.new_id
+
+    def clamp(ins, x):
+        a, b = I(), I()
+        ins.append(f"        {a} = OpExtInst %float {glsl} NMax {x} {fmin}")
+        ins.append(f"        {b} = OpExtInst %float {glsl} NMin {a} {fmax}")
+        return b
+
+    def gate_for(line, what):
+        ok = sorted(x for x in cands if cfg.dominates_line(x, line))
+        if not ok:
+            rep["skipped_dom"].append(line + 1)
+            die(f"{mod.name}: no class form dominates {what} at line "
+                f"{line + 1} -- the paint cannot be gated there")
+        g = I()
+        return ok[0], g, f"        {g} = OpIEqual %bool {ok[0]} {uid1}"
+
+    # Classify every write BEFORE any emission: the dual-arm paint rewrites
+    # uses in place (replace_all_uses), and a detector that walks defs after
+    # that would dead-end silently (GOTCHAS rule 12).
+    plans = []
+    for w in writes:
+        if w['comps'] is None:
+            die(f"{mod.name}: image write at line {w['line'] + 1} has a "
+                f"non-construct texel -- unrecognized, refusing")
+        c = w['comps']
+        if all(_gi_zeroish(mod, x) for x in c[:3]):
+            rep["skipped_zero"].append(w['line'] + 1)
+            continue
+        if c[0] == c[1] == c[2]:
+            rep["skipped_scalar"].append(w['line'] + 1)
+            continue
+        leaves = [_gi_leaves(mod, x) for x in c[:3]]
+        dots = [d for dd, _p in leaves for d in dd]
+        if not dots:
+            plans.append(('rgb', w, None))
+            continue
+        # At least one runtime-selected encode arm. Paint every SOURCE the
+        # arms read: the YCoCg encode's input triple, plus each plain arm's
+        # leaf values, each bound to the channel its comp position implies.
+        # (The arms are sibling NaN-guard/clamp copies of one base radiance;
+        # the ancestry check below dies if that ever stops being true, since
+        # nested targets would tint twice.)
+        roles, triples = set(), set()
+        for d in dots:
+            role, triple = _gi_dot_parts(mod, d)
+            if role is None or triple is None:
+                die(f"{mod.name}: encode dot {d} at write line "
+                    f"{w['line'] + 1} has no recognizable YCoCg row vector "
+                    f"or no value triple -- refusing")
+            roles.add(role)
+            triples.add(triple)
+        if roles != {'Y', 'Co', 'Cg'} or len(triples) != 1:
+            die(f"{mod.name}: write at line {w['line'] + 1}: encode dots "
+                f"give roles {sorted(roles)} over {len(triples)} distinct "
+                f"triples -- not one YCoCg encode, refusing")
+        triple = triples.pop()
+        targets = {}          # id -> channel
+
+        def bind(tid, ch, wline):
+            if targets.get(tid, ch) != ch:
+                die(f"{mod.name}: write at line {wline + 1}: {tid} feeds "
+                    f"two different colour channels -- refusing")
+            targets[tid] = ch
+        for ch2, tid in enumerate(triple):
+            bind(tid, ch2, w['line'])
+        for ch2, (_dd, pp) in enumerate(leaves):
+            for tid in pp:
+                bind(tid, ch2, w['line'])
+        plans.append(('dual', w, targets))
+
+    # id -> def line, computed once (find_def is a linear scan; the ancestry
+    # walk below would be quadratic through it on a 75k-line module)
+    def_line = {}
+    for i, ln in enumerate(mod.lines):
+        m = re.match(r'\s*(%\w+)\s*=', ln)
+        if m:
+            def_line[m.group(1)] = i
+    painted_ids, painted_results = {}, set()
+    for kind, w, kind_targets in plans:
+        if kind == 'rgb':
+            c = w['comps']
+            ins = []
+            cand, g, gline = gate_for(w['line'], "the radiance write")
+            ins.append(gline)
+            newc = []
+            for ch in range(3):
+                s, n = I(), I()
+                ins.append(f"        {s} = OpSelect %float {g} {tids[ch]} {one}")
+                ins.append(f"        {n} = OpFMul %float {c[ch]} {s}")
+                newc.append(clamp(ins, n))
+            nt = I()
+            ins.append(f"        {nt} = OpCompositeConstruct %v4float "
+                       f"{newc[0]} {newc[1]} {newc[2]} {c[3]}")
+            edits.append((w['line'] - 1, ins))
+            mod.lines[w['line']] = re.sub(
+                r'(OpImageWrite %\w+ %\w+ )%\w+\s*$', r'\g<1>' + nt,
+                mod.lines[w['line']])
+            rep["painted"].append({"line": w['line'] + 1, "kind": "rgb",
+                                   "gate_on": cand})
+        else:
+            done = []
+            for tid, ch in sorted(kind_targets.items()):
+                if tid in painted_ids:
+                    if painted_ids[tid] != ch:
+                        die(f"{mod.name}: {tid} painted for channel "
+                            f"{painted_ids[tid]} by an earlier write, now "
+                            f"wanted for channel {ch} -- refusing")
+                    continue
+                # No target may derive from another: replace_all_uses on the
+                # ancestor would already tint this one, and painting it again
+                # would square the tint.
+                seen, queue = set(), [tid]
+                while queue:
+                    x = queue.pop()
+                    dl = def_line.get(x)
+                    if dl is None:
+                        continue
+                    for ref in re.findall(r'%\w+', mod.lines[dl])[1:]:
+                        if ref in seen:
+                            continue
+                        seen.add(ref)
+                        if (ref in kind_targets and ref != tid) or \
+                           ref in painted_ids or ref in painted_results:
+                            die(f"{mod.name}: paint target {tid} derives "
+                                f"from paint target {ref} -- nested targets "
+                                f"would tint twice, refusing")
+                        if len(seen) < 400:
+                            queue.append(ref)
+                at = def_line.get(tid)
+                if at is None:
+                    die(f"{mod.name}: paint target {tid} has no definition")
+                ins = []
+                cand, g, gline = gate_for(at, f"paint target {tid}")
+                ins.append(gline)
+                s, n = I(), I()
+                ins.append(f"        {s} = OpSelect %float {g} {tids[ch]} {one}")
+                ins.append(f"        {n} = OpFMul %float {tid} {s}")
+                p = clamp(ins, n)
+                edits.append((at, ins))
+                uses = replace_all_uses(mod, tid, p, at)
+                painted_ids[tid] = ch
+                painted_results.add(p)
+                done.append({"id": tid, "channel": ch, "at_line": at + 1,
+                             "uses_rewritten": uses, "gate_on": cand})
+            rep["painted"].append({"line": w['line'] + 1, "kind": "dual-arm",
+                                   "targets": done})
+
+    if not rep["painted"]:
+        die(f"{mod.name}: no radiance write painted "
+            f"({len(rep['skipped_zero'])} zero, "
+            f"{len(rep['skipped_scalar'])} scalar writes skipped)")
+    return consts, edits, rep
+
+
 # ------------------------------------------------------------------ driver
 KNOBS = dict(k_sheen=8.0, a_sheen=0.35, sheen_max=25.0,
              gain_hi=3.2, gain_lo=0.45, gain_black=0.05)
-TIERS = ('sub', 'c1sub', 'cls', 'sheen', 'both')
+TIERS = ('sub', 'c1sub', 'cls', 'sheen', 'both', 'gi')
 
 
 def process(path, outdir, tier, knobs, do_rt=True, hunt_classes=None):
@@ -547,6 +947,8 @@ def process(path, outdir, tier, knobs, do_rt=True, hunt_classes=None):
     consts, edits = [], []
     if tier == 'sheen':
         consts, edits, rep['sheen'] = build_sheen(mod, cfg, knobs)
+    elif tier == 'gi':
+        consts, edits, rep['gi'] = build_gi_paint(mod, cfg, writes)
     elif tier == 'cls':
         consts, edits, rep['hunt'] = build_hunt_writes(
             mod, cfg, writes, hunt_classes or P.HUNT_DEFAULT)

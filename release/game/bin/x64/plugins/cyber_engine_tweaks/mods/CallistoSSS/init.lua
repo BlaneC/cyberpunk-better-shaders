@@ -87,6 +87,11 @@ local SKIN_LEVELS = {
     { id = "eyes-glassy", label = "Glassy eyes only (cap 0.04, diagnostic)" },
     { id = "real",        label = "REAL: rougher x1.3 + coupling + micro + wet eyes" },
     { id = "real-gloss",  label = "REAL-GLOSS: glossier x0.7 + coupling + micro + wet eyes" },
+    -- 48 §8 diagnostic: hue-paints skin per GI writer family (needs ser=class)
+    { id = "probe-gi",    label = "PROBE: GI writer hue paint -- ref green / GI-diff red / GI-spec blue" },
+    -- 50: real-gloss + tier-1 c1 on bounce-lit skin (ReSTIR-GI diffuse; needs ser=class)
+    { id = "gi-50",       label = "REAL-GLOSS + GI skin c1 at half strength" },
+    { id = "gi-100",      label = "REAL-GLOSS + GI skin c1 at full strength" },
 }
 local SKIN_LABELS, SKIN_INDEX = {}, {}
 for i, e in ipairs(SKIN_LEVELS) do
