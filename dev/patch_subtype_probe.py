@@ -25,6 +25,10 @@ Tiers
                  writes, imported not copied) -- the POSITIVE CONTROL: this
                  exact paint is what produced pics/panam_working_small.png
   --tier sheen   the ungated Charlie sheen, nothing else
+  --tier peach   the ONE exception to "nothing here is a feature": the
+                 class-1-gated peach fuzz A2/A3 unlocked (handoff/58).
+                 --peach-mode add is the sheen LOBE (default); mul is the
+                 58-era multiplicative form, kept for reproduction.
   --tier both    sub + sheen in one module (38 sec 7's one-launch merge)
   --tier gi      handoff/48 sec 8: per-FAMILY hue paint at the RAYGEN
                  radiance writes (reference green, restirgi-diffuse red,
@@ -314,6 +318,87 @@ def _def(mod, i):
     return mod.find_def(i)[1] or ''
 
 
+def _nonneg(mod, i, depth=4):
+    """True when %i is provably >= 0 from its definition alone.
+
+    Read-only and deliberately conservative: anything it cannot prove comes
+    back False and the caller emits a clamp. Four shapes cover every cosine
+    the 77 compute modules actually build -- NClamp(x, 0, 1), NMax(x, eps),
+    NMin of such, a square, and an OpPhi of any of those.
+    """
+    if depth < 0:
+        return False
+    d = _def(mod, i)
+    m = re.match(r'OpExtInst %float %\w+ NClamp (%\S+) (%\S+) (%\S+)\s*$', d)
+    if m:
+        lo = _gi_float_const(mod, m.group(2))
+        return lo is not None and lo >= 0.0
+    m = re.match(r'OpExtInst %float %\w+ NMax (%\S+) (%\S+)\s*$', d)
+    if m:                                       # max(x, c>=0) >= 0
+        for t in m.groups():
+            v = _gi_float_const(mod, t)
+            if v is not None and v >= 0.0:
+                return True
+            if v is None and _nonneg(mod, t, depth - 1):
+                return True
+        return False
+    m = re.match(r'OpExtInst %float %\w+ NMin (%\S+) (%\S+)\s*$', d)
+    if m:                                       # min(a, b) >= 0 needs both
+        for t in m.groups():
+            v = _gi_float_const(mod, t)
+            if not ((v is not None and v >= 0.0)
+                    or (v is None and _nonneg(mod, t, depth - 1))):
+                return False
+        return True
+    m = re.match(r'OpFMul %float (%\S+) (%\S+)\s*$', d)
+    if m and m.group(1) == m.group(2):
+        return True                             # a square
+    m = re.match(r'OpPhi %float (.*)$', d)
+    if m:
+        ops = [v for v, _b in re.findall(r'(%\S+) (%\S+)', m.group(1))]
+        return bool(ops) and all(_nonneg(mod, v, depth - 1) for v in ops)
+    v = _gi_float_const(mod, i)
+    return v is not None and v >= 0.0
+
+
+def _in_unit(mod, i, depth=4):
+    """True when %i is provably a SATURATED cosine, i.e. in [0, 1].
+
+    Census over the 77 anchored compute modules (457 sheen-shaped sites, two
+    cosines each): 457 are NMin(NMax(x, 1e-6), 1) and 337 are NClamp(x, 0, 1)
+    -- provably saturated. The remaining 120 are an OpPhi (104) or a bare
+    OpDot (16). A bare dot is NOT saturated: N.L goes negative on any pixel
+    whose shading normal faces away from the light, and V_neubelt's
+    denominator (NoL + NoV - NoL*NoV) then goes NEGATIVE, is caught by the
+    NMax(q, 1e-4) floor, and the lobe evaluates at its CEILING exactly where
+    the surface is backlit. That is the "lightbulb behind the ear" failure
+    (handoff/69 sec 1) waiting to happen, so those sites get a real clamp.
+    """
+    if depth < 0:
+        return False
+    d = _def(mod, i)
+    m = re.match(r'OpExtInst %float %\w+ NClamp (%\S+) (%\S+) (%\S+)\s*$', d)
+    if m:
+        lo = _gi_float_const(mod, m.group(2))
+        hi = _gi_float_const(mod, m.group(3))
+        return (lo is not None and hi is not None and lo >= 0.0 and hi <= 1.0)
+    m = re.match(r'OpExtInst %float %\w+ NMin (%\S+) (%\S+)\s*$', d)
+    if m:
+        capped = False
+        for t in m.groups():
+            v = _gi_float_const(mod, t)
+            if (v is not None and v <= 1.0) or (v is None
+                                                and _in_unit(mod, t, depth - 1)):
+                capped = True
+        return capped and _nonneg(mod, i, depth)
+    m = re.match(r'OpPhi %float (.*)$', d)
+    if m:
+        ops = [v for v, _b in re.findall(r'(%\S+) (%\S+)', m.group(1))]
+        return bool(ops) and all(_in_unit(mod, v, depth - 1) for v in ops)
+    v = _gi_float_const(mod, i)
+    return v is not None and 0.0 <= v <= 1.0
+
+
 def find_sheen_inputs(mod, s):
     """(NoH, NoL, NoV, vis_id, spec_id) at one GGX site, or None.
 
@@ -331,7 +416,9 @@ def find_sheen_inputs(mod, s):
                                                 + NoL*sqrt(NoV^2(1-a2)+a2))
               H  the cheap approximation  0.25 / ((NoL+NoV)(1-alpha/2)+alpha)
             V_neubelt is symmetric in NoL and NoV, so which is which does not
-            matter and is not guessed at.
+            matter to the lobe and is not guessed at. Where the DIFFERENCE
+            matters -- folding the site's own light cosine into an additive
+            lobe -- _fold_cosine reads it off the D chain instead of guessing.
 
       spec  the unique OpFMul that consumes the Vis. Measured: 464 of 464
             resolvable sites have exactly one. That product is where the
@@ -431,27 +518,167 @@ def find_sheen_inputs(mod, s):
                 spec=spec, spec_line=cons[0])
 
 
-def build_sheen(mod, cfg, knobs):
-    """Estevez & Kulla "Charlie" sheen + Neubelt visibility, added UNGATED.
+def _fold_cosine(mod, site, f):
+    """The cosine the SITE ITSELF folds into D before Vis (i.e. its NoL), or
+    None when it folds none.
+
+    Census over the 77 anchored compute modules (457 sheen-shaped sites):
+
+        401   vd = D * NoL   and   spec = vd * Vis
+         56   vd = D * Vis   and   spec = vd        (the cheap-Vis form)
+
+    An additive lobe must carry the same cosine the site carries, or it does
+    not vanish where the site's own specular vanishes. Folding NoL into the
+    first family puts the fuzz on the same terminator as the GGX lobe it
+    rides. The second family folds no cosine HERE (it is applied downstream,
+    outside this splice's reach), and the two cosines it does have are not
+    labelled -- V_neubelt is symmetric, so nothing in the shape says which is
+    NoL. The caller then folds min(c0, c1), which is <= NoL whichever one it
+    is: conservative by construction, and it still dies at the terminator
+    rather than holding the fuzz at full strength on backlit skin the way an
+    unfolded lobe would (24 of 77 modules, 56 of 457 sites).
+    """
+    m = re.match(r'OpFMul %float (%\S+) (%\S+)\s*$', _def(mod, site['vd']))
+    if not m:
+        return None
+    other = m.group(1) if m.group(2) == site['d'] else m.group(2)
+    return other if other in (f['nol'], f['nov']) else None
+
+
+def _emit_fuzz_lobe(mod, gl, ins, noh, c0, c1, k):
+    """Estevez & Kulla "Charlie" D x Neubelt V at one site, capped.
 
         D_charlie(a, NoH) = (2 + 1/a) * (1 - NoH^2)^(1/(2a)) / (2*pi)
         V_neubelt(NoL,NoV) = 1 / (4 * (NoL + NoV - NoL*NoV))
-        spec' = spec + k * D_charlie * V_neubelt
+
+    Appends its instructions to `ins` and returns the capped lobe id. `k` is
+    the caller's dict of interned constant ids: one, eps, four, den_min,
+    inv2a, pre, cap -- where pre folds (2 + 1/a)/(2*pi) (and, for the
+    ungated probe, the gain) at build time, so the per-site cost is 15
+    instructions.
 
     Zeltner, Burley & Chiang (SIGGRAPH 2022) fit an LTC to a multiple-
     scattering sheen VOLUME and that is the better model, but its fit lives
     in a 3-parameter table -- a texture, i.e. a descriptor, i.e. U1, which is
     not built. The analytic Charlie lobe needs no resource and has the same
     grazing-widening behaviour that separates cloth from plastic, so it is
-    what this probe splices. Stated here so nobody reads "LTC sheen" in the
-    handoff and goes looking for a fit table in the module.
+    what ships. Stated here so nobody reads "LTC sheen" in the handoff and
+    goes looking for a fit table in the module.
 
-    (2 + 1/a)/(2*pi) and 1/(2a) are folded at build time, so the per-site
-    cost is 16 instructions and one of them is the add itself.
+    The cosines must already be saturated -- the caller clamps the ones
+    _in_unit cannot prove. The NMax(q, den_min) floor below is then a
+    division guard on a genuinely small denominator, not a sign fixup.
+    """
+    I = mod.new_id
+    t, u, um, lg, xe, dc = [I() for _ in range(6)]
+    sm, pr, q, q4, qm, vn = [I() for _ in range(6)]
+    sh, sn, shc = I(), I(), I()
+    ins += [
+        f"        {t} = OpFMul %float {noh} {noh}",
+        f"        {u} = OpFSub %float {k['one']} {t}",
+        f"        {um} = OpExtInst %float {gl} NMax {u} {k['eps']}",
+        f"        {lg} = OpExtInst %float {gl} Log2 {um}",
+        f"        {xe} = OpFMul %float {lg} {k['inv2a']}",
+        f"        {dc} = OpExtInst %float {gl} Exp2 {xe}",
+        f"        {sm} = OpFAdd %float {c0} {c1}",
+        f"        {pr} = OpFMul %float {c0} {c1}",
+        f"        {q} = OpFSub %float {sm} {pr}",
+        f"        {q4} = OpFMul %float {q} {k['four']}",
+        f"        {qm} = OpExtInst %float {gl} NMax {q4} {k['den_min']}",
+        f"        {vn} = OpFDiv %float {k['one']} {qm}",
+        f"        {sh} = OpFMul %float {dc} {vn}",
+        f"        {sn} = OpFMul %float {sh} {k['pre']}",
+        # Bounded before it reaches the base term, not after: the modules that
+        # clamp their specular do it downstream of this point, and the ones
+        # that do not would carry an unbounded 1/eps into an fp16 store.
+        f"        {shc} = OpExtInst %float {gl} NMin {sn} {k['cap']}",
+    ]
+    return shc
+
+
+def _emit_defres(mod, gl, ins, noh, c0, c1, k, zero, beta_id):
+    """The TARGETED weight w = 1 - beta*(1-VoH)^5, from the site's own values.
+
+    Why it exists. The lobe is spliced UPSTREAM of the module's own Schlick
+    multiply, so F(VoH) weights it: ~0.028 in the front-lit sheen band (VoH
+    ~ 1) and up to ~0.87 on a BACKLIT silhouette (VoH ~ 0.05), a 30x swing
+    that has nothing to do with sheen. That swing is what put a blown white
+    edge on the rim -- exactly the pixels where the terminator bleed's deep
+    red lives -- while the cheek band the fuzz is FOR sat at a few percent.
+    Multiplying by (1 - p5) cancels the Schlick ramp: the net weight
+    F*(1-p5) is 1.00x of F where VoH >= 0.8 (the sheen band is untouched),
+    0.41x at VoH 0.1 and 0.23x at 0.05. Peak net weight 0.2465 at VoH ~ 0.1
+    against 0.87 unweighted -- a 3.5x cut confined to the rim.
+
+    VoH is not read from the module and is not a new unknown: for a unit
+    bisector, L + V = 2*VoH*H, so dotting with N gives EXACTLY
+
+        VoH = (NoL + NoV) / (2 * NoH)
+
+    and all three are already at the site. The expression is SYMMETRIC in the
+    two cosines, so the NoL/NoV labelling ambiguity that _fold_cosine has to
+    work around does not exist here -- it is exact at all 457 sites, the 56
+    cheap-Vis ones included.
+
+    Guards: NMax(2*NoH, eps) is a division guard (NoL+NoV = 2*VoH*NoH
+    vanishes with NoH, so the quotient stays finite in the limit), and the
+    NClamp keeps VoH in [0,1] where a negative or stale NoH would otherwise
+    steer the power. Both regions are ones where the site's own folded
+    cosine is already 0, so the whole added term is 0 there regardless.
+    """
+    I = mod.new_id
+    sm, nh2, nhm, voh, vs = [I() for _ in range(5)]
+    om, o2, o4, p5 = [I() for _ in range(4)]
+    ins += [
+        f"        {sm} = OpFAdd %float {c0} {c1}",
+        f"        {nh2} = OpFAdd %float {noh} {noh}",
+        f"        {nhm} = OpExtInst %float {gl} NMax {nh2} {k['eps']}",
+        f"        {voh} = OpFDiv %float {sm} {nhm}",
+        f"        {vs} = OpExtInst %float {gl} NClamp {voh} {zero} {k['one']}",
+        f"        {om} = OpFSub %float {k['one']} {vs}",
+        f"        {o2} = OpFMul %float {om} {om}",
+        f"        {o4} = OpFMul %float {o2} {o2}",
+        f"        {p5} = OpFMul %float {o4} {om}",
+    ]
+    if beta_id is None:                     # beta == 1: no constant, no FMul
+        pb = p5
+    else:
+        pb = I()
+        ins.append(f"        {pb} = OpFMul %float {p5} {beta_id}")
+    w = I()
+    ins.append(f"        {w} = OpFSub %float {k['one']} {pb}")
+    return w
+
+
+def _saturate_cosines(mod, gl, ins, one, zero, f):
+    """(c0, c1, n_clamped) -- the site's two cosines, provably in [0, 1].
+
+    Emits an NClamp only where _in_unit cannot prove saturation, so a module
+    whose cosines are already clamped assembles byte-for-byte as before.
+    """
+    out, n = [], 0
+    for cid in (f['nol'], f['nov']):
+        if _in_unit(mod, cid):
+            out.append(cid)
+            continue
+        cl = mod.new_id()
+        ins.append(f"        {cl} = OpExtInst %float {gl} NClamp {cid} {zero} {one}")
+        out.append(cl)
+        n += 1
+    return out[0], out[1], n
+
+
+def build_sheen(mod, cfg, knobs):
+    """The ungated probe: Charlie sheen ADDED at every GGX site.
+
+        spec' = spec + min(k * D_charlie * V_neubelt, cap)
 
     NO CLASS GATE, deliberately. That is the whole point (22 sec 8): an
     ungated lobe removes the gate from the list of things that can explain a
-    null result. It is wrong as a feature and correct as a probe.
+    null result. It is wrong as a feature and correct as a probe -- and it
+    passed on screen (handoff/58: white grazing sheen on cloth, vegetation
+    and skin), which is what made the gated feature in build_peach a build
+    rather than a gate.
     """
     consts, edits = [], []
 
@@ -466,17 +693,16 @@ def build_sheen(mod, cfg, knobs):
     gl = mod.glsl
     a = float(knobs['a_sheen'])
     k = float(knobs['k_sheen'])
-    one = C(1.0)
-    eps = C(1e-6)
-    four = C(4.0)
-    den_min = C(1e-4)
-    inv2a = C(1.0 / (2.0 * a))
-    pre = C(k * (2.0 + 1.0 / a) / (2.0 * math.pi))
-    cap = C(float(knobs['sheen_max']))
+    K = dict(one=C(1.0), eps=C(1e-6), four=C(4.0), den_min=C(1e-4),
+             inv2a=C(1.0 / (2.0 * a)),
+             pre=C(k * (2.0 + 1.0 / a) / (2.0 * math.pi)),
+             cap=C(float(knobs['sheen_max'])))
+    zero = C(0.0)
 
     sites = P.find_ggx_sites(mod)
-    rep = {"ggx_sites": len(sites), "sheen_sites": 0,
-           "skipped_shape": [], "skipped_dom": []}
+    rep = {"ggx_sites": len(sites), "sheen_sites": 0, "clamped": 0,
+           "skipped_shape": [], "skipped_dom": [], "skipped_dup": []}
+    seen = set()
     for s in sites:
         f = find_sheen_inputs(mod, s)
         if not f:
@@ -488,36 +714,203 @@ def build_sheen(mod, cfg, knobs):
         if bad:
             rep["skipped_dom"].append({"line": line + 1, "ids": bad})
             continue
-        I = mod.new_id
-        t, u, um, lg, xe, dc = [I() for _ in range(6)]
-        sm, pr, q, q4, qm, vn = [I() for _ in range(6)]
-        sh, shk, shc, out = [I() for _ in range(4)]
-        ins = [
-            f"        {t} = OpFMul %float {f['noh']} {f['noh']}",
-            f"        {u} = OpFSub %float {one} {t}",
-            f"        {um} = OpExtInst %float {gl} NMax {u} {eps}",
-            f"        {lg} = OpExtInst %float {gl} Log2 {um}",
-            f"        {xe} = OpFMul %float {lg} {inv2a}",
-            f"        {dc} = OpExtInst %float {gl} Exp2 {xe}",
-            f"        {sm} = OpFAdd %float {f['nol']} {f['nov']}",
-            f"        {pr} = OpFMul %float {f['nol']} {f['nov']}",
-            f"        {q} = OpFSub %float {sm} {pr}",
-            f"        {q4} = OpFMul %float {q} {four}",
-            f"        {qm} = OpExtInst %float {gl} NMax {q4} {den_min}",
-            f"        {vn} = OpFDiv %float {one} {qm}",
-            f"        {sh} = OpFMul %float {dc} {vn}",
-            f"        {shk} = OpFMul %float {sh} {pre}",
-            # Bounded before it is added, not after: the modules that clamp
-            # their specular do it downstream of this point, and the ones
-            # that do not would carry an unbounded 1/eps into an fp16 store.
-            f"        {shc} = OpExtInst %float {gl} NMin {shk} {cap}",
-            f"        {out} = OpFAdd %float {f['spec']} {shc}",
-        ]
+        if f['spec'] in seen:
+            # Two sites resolving to ONE product: the second edit would be a
+            # silent no-op (the 08-DUAL-LOBE lesson) while still counting as
+            # coverage. Census says zero; report it rather than trust it.
+            rep["skipped_dup"].append(line + 1)
+            continue
+        seen.add(f['spec'])
+        ins = []
+        c0, c1, nc = _saturate_cosines(mod, gl, ins, K['one'], zero, f)
+        rep["clamped"] += nc
+        lobe = _emit_fuzz_lobe(mod, gl, ins, f['noh'], c0, c1, K)
+        out = mod.new_id()
+        ins.append(f"        {out} = OpFAdd %float {f['spec']} {lobe}")
         replace_all_uses(mod, f['spec'], out, line)
         edits.append((line, ins))
         rep["sheen_sites"] += 1
     if rep["sheen_sites"] == 0:
         die(f"{mod.name}: no GGX site could take the sheen "
+            f"({len(sites)} sites, all declined)")
+    return consts, edits, rep
+
+
+def build_peach(mod, cfg, knobs, mode='add'):
+    """Class-1-gated peach fuzz (A3) -- a real sheen LOBE on skin.
+
+        fuzz  = min(D_charlie(a, NoH) * V_neubelt(NoL, NoV) * (2+1/a)/2pi, cap)
+        add:  spec' = spec + select(class 1, k * fuzz * cos_site, 0)
+        mul:  spec' = spec * select(class 1, 1 + k * fuzz,        1)
+
+    where cos_site is the light cosine the SITE ITSELF folds into D
+    (_fold_cosine), or min(NoL, NoV) where it folds none.
+
+    `add` is the feature; `mul` is the 58-era form, kept because the rung
+    built from it is on screen and A/B'd (handoff/58, 51 sec 10).
+
+    Why the form changed. Multiplying is bounded by the term it multiplies,
+    and at a silhouette -- no mirror alignment -- that term is nearly zero,
+    so 1 + k*fuzz brightens nothing. dev/fuzz_model.py evaluates the 58-era
+    constants over the (view, light) hemisphere: the factor is 1.0000-1.0466
+    across the whole face and reaches 1.24 only within ~2 deg of the
+    silhouette with the light equally grazing. Peach fuzz is exactly the
+    thing the base lobe does NOT have, so it has to arrive as its own lobe,
+    added. The user's read of that rung -- "extremely subtle" -- is what the
+    arithmetic says it must be; it was not a tuning miss.
+
+    What keeps `add` honest (the 38 0d / 39 sec 3.3 tile-grid lesson):
+
+      * it is spliced at the site's OWN D*Vis product, so everything the
+        module multiplies downstream -- Fresnel, light colour, shadow, the
+        NMin(x, 100) firefly clamp -- lands on the fuzz too. Nothing is
+        painted into an unlit pixel: shadowed and unlit skin stay black
+        because the LIGHT is zero, not because the lobe is.
+      * the Fresnel multiply downstream weights it toward a RIM rather
+        than a wash for free -- but only the front-lit half of that is
+        wanted. On a BACKLIT silhouette F reaches ~0.87, a ~30x swing
+        over the f0 floor the sheen band sits at, and that is what put a
+        blown white edge over the terminator bleed's red on screen. The
+        `defres` knob cancels that share of the ramp (_emit_defres); at
+        defres=1 the front-lit band is unchanged and the rim peak drops
+        2.5x.
+      * it carries the site's own light cosine (_fold_cosine), so it dies at
+        the terminator with the term it rides.
+      * the cosines are saturated first (_in_unit), so a backfacing shading
+        normal cannot drive V_neubelt to its ceiling -- the "lightbulb"
+        failure mode of handoff/69 sec 1.
+      * it is class-1 gated, so non-skin pixels are the parent rung's bytes.
+
+    Magnitude. `k` is measured AT THE SPLICE POINT, which is upstream of the
+    module's own Fresnel multiply -- and in the geometry where this lobe
+    lives (light on the viewer's side, both vectors grazing) the half vector
+    sits between two nearly parallel vectors, so VoH ~ 1 and F is at its
+    FLOOR, f0 ~ 0.028. The fuzz is therefore attenuated ~36x by a term that
+    has nothing to do with it, which is why k of order 1 is the right
+    magnitude here and 0.1 is not. dev/fuzz_model.py evaluates all of this
+    offline; at k=1.0 the added lobe is, as a fraction of the LOCAL DIFFUSE:
+
+        head-on            0.0 - 2%      (invisible: no wash)
+        cheek / jaw rim    5 - 17%       (the feature)
+        backlit silhouette 159%          (at the shipped defres=1, peach_max
+                                          =0.5; it was 781% at the 72-era
+                                          defres=0, cap=1, and THAT is what
+                                          the user's A/B called blown out)
+
+    against the 58-era multiplicative rung's 0.0-1.5% over the same face --
+    which is what "extremely subtle" measured to.
+
+    Not energy-compensated (no (1 - F_sheen) on the base): at this amplitude
+    the error is far below the dither.
+    """
+    from patch_compute_skin import acquire_class_shift
+    consts, edits = [], []
+
+    def C(v):
+        nid, c = mod.const(v)
+        if c:
+            consts.append(c)
+        return nid
+
+    if mod.glsl is None:
+        die(f"{mod.name}: no GLSL.std.450 set -- cannot emit the peach fuzz")
+    if mode not in ('add', 'mul'):
+        die(f"unknown peach mode {mode}")
+    gl = mod.glsl
+    a = float(knobs['a_peach'])
+    k = float(knobs['k_peach'])
+    K = dict(cap=C(float(knobs['peach_max'])), one=C(1.0), eps=C(1e-6),
+             four=C(4.0), den_min=C(1e-4), inv2a=C(1.0 / (2.0 * a)),
+             pre=C((2.0 + 1.0 / a) / (2.0 * math.pi)))
+    kc = C(k)
+    zero = C(0.0)
+    beta = float(knobs.get('defres', 0.0))
+    if not 0.0 <= beta <= 1.0:
+        die(f"defres must be in [0, 1], got {beta}")
+    # mode mul is the 58-era rung's reproduction: it takes no weight, so that
+    # build stays byte-comparable. beta == 1 needs no constant (see _emit_defres).
+    beta_on = mode == 'add' and beta > 0.0
+    beta_id = C(beta) if beta_on and beta != 1.0 else None
+
+    # Class gate (class 1 = skin), lifted onto a dominating phi where needed.
+    # Detected before any emission: find_ggx_sites / find_sheen_inputs are
+    # read-only, and replace_all_uses below rewrites mod.lines in place.
+    shift, ins_line, pre_ins, pre_consts, dom_id = acquire_class_shift(mod, cfg)
+    consts.extend(pre_consts)
+    u1, ud = mod.uconst(1)
+    if ud:
+        consts.append(ud)
+    skin_gate = mod.new_id()
+    edits.append((ins_line, pre_ins +
+                  [f"        {skin_gate} = OpIEqual %bool {shift} {u1}"]))
+
+    sites = P.find_ggx_sites(mod)
+    rep = {"ggx_sites": len(sites), "peach_sites": 0, "mode": mode,
+           "defres": beta if beta_on else 0.0, "defres_sites": 0,
+           "folded": 0, "folded_min": 0, "clamped": 0,
+           "skipped_shape": [], "skipped_dom": [], "skipped_dup": []}
+    seen = set()
+    for s in sites:
+        f = find_sheen_inputs(mod, s)
+        if not f:
+            rep["skipped_shape"].append(s['line'] + 1)
+            continue
+        line = f['spec_line']
+        fold = _fold_cosine(mod, s, f) if mode == 'add' else None
+        bad = [x for x in (f['noh'], f['nol'], f['nov'], dom_id)
+               if not cfg.dominates_line(x, line)]
+        if bad:
+            rep["skipped_dom"].append({"line": line + 1, "ids": bad})
+            continue
+        if f['spec'] in seen:
+            rep["skipped_dup"].append(line + 1)
+            continue
+        seen.add(f['spec'])
+        I = mod.new_id
+        ins = []
+        c0, c1, nc = _saturate_cosines(mod, gl, ins, K['one'], zero, f)
+        rep["clamped"] += nc
+        if mode == 'add':
+            if fold is not None:
+                # reuse the clamped id when this cosine is the one that was
+                # clamped, so the fold and the lobe cannot disagree
+                fold = c0 if fold == f['nol'] else c1
+                rep["folded"] += 1
+            else:
+                fold = mod.new_id()
+                ins.append(f"        {fold} = OpExtInst %float {gl} NMin {c0} {c1}")
+                rep["folded_min"] += 1
+        lobe = _emit_fuzz_lobe(mod, gl, ins, f['noh'], c0, c1, K)
+        if mode == 'mul':
+            fac, f1, g, m = I(), I(), I(), I()
+            ins += [
+                f"        {fac} = OpFMul %float {lobe} {kc}",
+                f"        {f1} = OpFAdd %float {K['one']} {fac}",
+                f"        {g} = OpSelect %float {skin_gate} {f1} {K['one']}",
+                f"        {m} = OpFMul %float {f['spec']} {g}",
+            ]
+        else:
+            ex = I()
+            ins.append(f"        {ex} = OpFMul %float {lobe} {kc}")
+            if beta_on:
+                w = _emit_defres(mod, gl, ins, f['noh'], c0, c1, K, zero, beta_id)
+                exw = I()
+                ins.append(f"        {exw} = OpFMul %float {ex} {w}")
+                ex = exw
+                rep["defres_sites"] += 1
+            exf = I()
+            ins.append(f"        {exf} = OpFMul %float {ex} {fold}")
+            ex = exf
+            g, m = I(), I()
+            ins += [
+                f"        {g} = OpSelect %float {skin_gate} {ex} {zero}",
+                f"        {m} = OpFAdd %float {f['spec']} {g}",
+            ]
+        replace_all_uses(mod, f['spec'], m, line)
+        edits.append((line, ins))
+        rep["peach_sites"] += 1
+    if rep["peach_sites"] == 0:
+        die(f"{mod.name}: no GGX site could take the peach fuzz "
             f"({len(sites)} sites, all declined)")
     return consts, edits, rep
 
@@ -919,11 +1312,21 @@ def build_gi_paint(mod, cfg, writes):
 
 # ------------------------------------------------------------------ driver
 KNOBS = dict(k_sheen=8.0, a_sheen=0.35, sheen_max=25.0,
-             gain_hi=3.2, gain_lo=0.45, gain_black=0.05)
-TIERS = ('sub', 'c1sub', 'cls', 'sheen', 'both', 'gi')
+             gain_hi=3.2, gain_lo=0.45, gain_black=0.05,
+             # peach: k_peach scales the ADDED lobe in --peach-mode add
+             # (5-17% of the local diffuse on a cheek rim -- dev/fuzz_model.py
+             # prints the table), and the multiplicative amplitude in mode
+             # mul, where the 58-era rung used 0.15. peach_max caps D*V before
+             # k: a division guard, and it only binds past ~85 deg of view.
+             # defres in [0,1] cancels that share of the module's own Schlick
+             # ramp on the ADDED lobe (0 = the wide 72-era rung, 1 = targeted:
+             # the front-lit band unchanged, the backlit rim cut 2.5x).
+             k_peach=1.0, a_peach=0.35, peach_max=0.5, defres=1.0)
+TIERS = ('sub', 'c1sub', 'cls', 'sheen', 'both', 'gi', 'peach')
 
 
-def process(path, outdir, tier, knobs, do_rt=True, hunt_classes=None):
+def process(path, outdir, tier, knobs, do_rt=True, hunt_classes=None,
+            peach_mode='add'):
     target_env = detect_target_env(path) or 'spv1.3'
     mod, problems = load_lenient(path)
     if not mod.ident:
@@ -942,11 +1345,13 @@ def process(path, outdir, tier, knobs, do_rt=True, hunt_classes=None):
     # pointing at an id whose definition is still pending in `edits`, and it
     # would dead-end SILENTLY -- reporting "no write found" and emitting
     # nothing, which from the chair is identical to the feature not working.
-    writes = find_image_writes(mod) if tier != 'sheen' else None
+    writes = find_image_writes(mod) if tier not in ('sheen', 'peach') else None
 
     consts, edits = [], []
     if tier == 'sheen':
         consts, edits, rep['sheen'] = build_sheen(mod, cfg, knobs)
+    elif tier == 'peach':
+        consts, edits, rep['peach'] = build_peach(mod, cfg, knobs, peach_mode)
     elif tier == 'gi':
         consts, edits, rep['gi'] = build_gi_paint(mod, cfg, writes)
     elif tier == 'cls':
@@ -1013,6 +1418,9 @@ def main():
     ap.add_argument('--outdir')
     ap.add_argument('--set', action='append', default=[], metavar='K=V')
     ap.add_argument('--hunt-classes', default='')
+    ap.add_argument('--peach-mode', default='add', choices=('add', 'mul'),
+                    help='--tier peach: add the sheen lobe (default) or the '
+                         '58-era multiplicative form')
     ap.add_argument('--no-roundtrip-check', action='store_true')
     ap.add_argument('--legend', action='store_true',
                     help='print the colour legend and exit')
@@ -1034,7 +1442,8 @@ def main():
 
     hunt = [int(x) for x in a.hunt_classes.split(',') if x.strip()] or None
     reports = [process(p, a.outdir, a.tier, knobs,
-                       do_rt=not a.no_roundtrip_check, hunt_classes=hunt)
+                       do_rt=not a.no_roundtrip_check, hunt_classes=hunt,
+                       peach_mode=a.peach_mode)
                for p in a.modules]
     print(json.dumps(reports, indent=1))
 

@@ -38,7 +38,19 @@ WORK="$MOD_DIR/dev/disasm/gi-c1"
 PY="$MOD_DIR/dev/patch_gi_c1.py"
 
 DO_INSTALL=0
-[[ "${1:-}" == "--install" ]] && DO_INSTALL=1
+BOUNCE=0
+for a in "$@"; do
+    case "$a" in
+        --install) DO_INSTALL=1 ;;
+        # 74: build gi-50b INSTEAD -- gi-50's exact c1 splice plus the
+        # terminator bleed (53's closed form, same amplitudes) at the ST
+        # pair's tail NoL, i.e. the bleed on BOUNCE light. The SP pair and
+        # the 12 reference files are byte-identical to gi-50's (asserted
+        # below), so gi-50 vs gi-50b is one variable: two files.
+        --bounce-bleed) BOUNCE=1 ;;
+        *) echo "unknown flag: $a" >&2; exit 2 ;;
+    esac
+done
 
 DIFF=(006ba4e3c8c05205 038867e9a3bf0626 5e1e98e44d854712 fc60b8a0b56529b8)
 
@@ -64,16 +76,19 @@ for h in "${DIFF[@]}"; do
     spirv-dis "$src" -o "$WORK/$(basename "${src%.spv}").spvasm"
 done
 
-for S in 50 100; do
-    if [[ "$S" == 100 ]]; then STR=1.0; else STR=0.5; fi
+RUNGS=(50 100); (( BOUNCE )) && RUNGS=(50b)
+for S in "${RUNGS[@]}"; do
+    STR=0.5; BLEED=0.0
+    [[ "$S" == 100 ]] && STR=1.0
+    [[ "$S" == 50b ]] && BLEED=1.0
     DEST="$MOD_DIR/swaps.gi.$S"
     rm -rf "$DEST"; mkdir -p "$DEST"
-    python3 "$PY" --strength "$STR" --out "$DEST" "$WORK"/*.spvasm
+    python3 "$PY" --strength "$STR" --bleed "$BLEED" --out "$DEST" "$WORK"/*.spvasm
 
     # --- assertions from the patcher's own reports -------------------------
-    python3 - "$DEST" <<'PYA'
+    python3 - "$DEST" "$BLEED" <<'PYA'
 import json, glob, sys
-d = sys.argv[1]
+d, bleed = sys.argv[1], float(sys.argv[2])
 reps = [json.load(open(f)) for f in sorted(glob.glob(d + '/*.json'))]
 assert len(reps) == 4, f"{len(reps)} reports, want 4"
 st = [r for r in reps if r['gi_c1']['mode'] == 'st-lit-arm']
@@ -84,11 +99,17 @@ for r in reps:
 for r in st:
     s = r['gi_c1']['spliced']
     assert len(s) == 3 and all(x['uses_rewritten'] >= 2 for x in s), r['ident']
+    assert r['gi_c1'].get('bleed_k', 0.0) == bleed, r['ident']
+    if bleed > 0:
+        # the bleed is per-channel; a wrong or unproven channel identity
+        # must fail the BUILD, never ship a guessed R/B (39's rule).
+        assert sorted(x['chan'] for x in s) == [0, 1, 2], r['ident']
 for r in sp:
     g = r['gi_c1']
     assert g['painted'] and not g['skipped_dom'], r['ident']
     assert g['flat_factor'] > 1.0, r['ident']
-print("  reports: 2 st-lit-arm + 2 sp-flat, all clean")
+print("  reports: 2 st-lit-arm + 2 sp-flat, all clean"
+      + (", bleed chans {0,1,2} on both ST" if bleed > 0 else ""))
 PYA
 
     # --- assemble the rung: real-gloss + ser reference + the 4 splices -----
@@ -99,13 +120,36 @@ PYA
     for f in "$DEST"/*.spv; do spirv-val "$f" || { echo "spirv-val FAILED: $f" >&2; exit 1; }; done
 
     flat=$(python3 -c "import sys; sys.path.insert(0,'$MOD_DIR/dev'); from patch_gi_c1 import cbar; print('%.4f' % cbar($STR))")
+    BTOK=""; (( BOUNCE )) && BTOK="bounce_bleed=$BLEED "
     {
-      printf 'gi-%s restirgi_c1=4(st=2,sp-flat=2) strength=%s flat=%s compute=77(real-gloss) ref=12(pass-through) src_ser="ser.set/class" ser_sha=%s ptq_sha=%s restirgi_src=dump declares_ser=1 built=%s\n' \
-        "$S" "$STR" "$flat" "$ser_sha" "$ptq_sha" "$(date -Iseconds)"
+      printf 'gi-%s restirgi_c1=4(st=2,sp-flat=2) strength=%s flat=%s %scompute=77(real-gloss) ref=12(pass-through) src_ser="ser.set/class" ser_sha=%s ptq_sha=%s restirgi_src=dump declares_ser=1 built=%s\n' \
+        "$S" "$STR" "$flat" "$BTOK" "$ser_sha" "$ptq_sha" "$(date -Iseconds)"
       echo '# tier-1 c1 (NoL-half / flat mean) on ReSTIR-GI diffuse skin; see handoff/50'
+      (( BOUNCE )) && echo '# + terminator bleed (53 closed form) at the ST tail NoL -- bleed on BOUNCE light; see handoff/74'
       echo '# sync_settings.sh verifies ser_sha+ptq_sha at every launch and refuses on mismatch'
     } > "$DEST/MANIFEST.txt"
     echo "  built swaps.gi.$S: 93 modules, all spirv-val clean"
+
+    # gi-50b's one-variable guarantee against the PARKED gi-50: the two ST
+    # raygens differ (the bleed reached them), the SP pair and the 12
+    # reference files are byte-identical, the 77 compute byte-identical.
+    if (( BOUNCE )); then
+        G50="$INSTALL_DIR/skin.set/gi-50"
+        [[ -d "$G50" ]] || { echo "no parked gi-50 to compare gi-50b against" >&2; exit 1; }
+        d=0; dn=""
+        for f in "$G50"/*.rgs_*.spv; do
+            cmp -s "$f" "$DEST/$(basename "$f")" || { d=$((d+1)); dn="$dn $(basename "$f")"; }
+        done
+        [[ "$d" == 2 ]] || { echo "gi-50b differs from gi-50 in $d of 16 raygens ($dn) -- want exactly the 2 ST" >&2; exit 1; }
+        case "$dn" in *spatiotemporal*spatiotemporal*) ;; *)
+            echo "gi-50b's raygen delta is not the ST pair:$dn" >&2; exit 1 ;; esac
+        dc=0
+        for f in "$G50"/*.dxil.spv; do
+            cmp -s "$f" "$DEST/$(basename "$f")" || dc=$((dc+1))
+        done
+        [[ "$dc" == 0 ]] || { echo "gi-50b's compute differs from gi-50 in $dc modules -- NOT one variable" >&2; exit 1; }
+        echo "  gi-50b vs gi-50: raygen delta =$dn; compute 0/77 differ (one variable)"
+    fi
 
     if [[ "$DO_INSTALL" == 1 ]]; then
         park="$INSTALL_DIR/skin.set/gi-$S"

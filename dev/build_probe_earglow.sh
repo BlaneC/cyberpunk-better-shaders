@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Ear-glow gate-attribution PROBE (handoff/66; scores 65's two-suspect split):
-# NOTE: since v4 (handoff/68) the shared patcher emits the v4 one-sided
-# consistency gate and albedo 0.25 -- a REBUILD of this probe measures the
-# v4 gates. The rung PARKED from the 66 build still carries the v3 gates
+# NOTE: since v5 (handoff/71) the shared patcher emits the FLIPPED ray
+# (sunward, CullFront 32) with NO consistency gate -- a REBUILD of this
+# probe measures the v5 terms: RED = the 1.5mm min-thickness floor fails
+# (a card's own backface), YELLOW = floor AND albedo fail, and "cons" in
+# the palette comments below reads as "floor". The rung PARKED from the 66
+# build still carries the v3 gates
 # (|Delta|^2 < (5mm)^2, albedo 0.10) -- 67's readings are against those.
 # the v3 gate chain evaluated per pixel, but every gate measured
 # INDEPENDENTLY (thickness trace fires on class+backlit+bounce0, vis ray on
@@ -97,9 +100,9 @@ for f in sorted(glob.glob(os.path.join(dest, '*.rgs_reference_main.spv'))):
     traces = re.findall(r'OpTraceRayKHR (.+)', asm)
     if len(traces) != van.count('OpTraceRayKHR') + 2:
         fails.append(f'{h}: trace count {len(traces)} != base+2 (thickness+visibility)'); continue
-    inj = [t for t in traces if t.split()[1] == '%uint_16']
+    inj = [t for t in traces if t.split()[1] == '%uint_32']
     if len(inj) != 1:
-        fails.append(f'{h}: {len(inj)} flags-16 injected traces, expected 1'); continue
+        fails.append(f'{h}: {len(inj)} flags-32 injected traces, expected 1'); continue
     tmax = inj[0].split()[9]
     m = re.search(re.escape(tmax) + r' = OpConstant %float ([0-9.e+-]+)', asm)
     if not m or abs(float(m.group(1)) - 0.018) > 1e-6:
@@ -135,11 +138,15 @@ for f in sorted(glob.glob(os.path.join(dest, '*.rgs_reference_main.spv'))):
     if lt_count(asm, 2.5e-5, 1e-9) != lt_count(van, 2.5e-5, 1e-9):
         fails.append(f'{h}: stale v3 2.5e-5 consistency compare present')
     if len(re.findall(r'OpDot %float ', asm)) != \
-       len(re.findall(r'OpDot %float ', van)) + 3:
-        fails.append(f'{h}: Dot count != base+3')
+       len(re.findall(r'OpDot %float ', van)) + 1:
+        fails.append(f'{h}: Dot count != base+1 (v5: oct-decode only)')
     if len(re.findall(r'OpExtInst %float %\w+ Sqrt ', asm)) != \
-       len(re.findall(r'OpExtInst %float %\w+ Sqrt ', van)) + 1:
-        fails.append(f'{h}: Sqrt count != base+1')
+       len(re.findall(r'OpExtInst %float %\w+ Sqrt ', van)):
+        fails.append(f'{h}: Sqrt count changed -- v4 tan term leaked into v5')
+    flr = [c for c in re.findall(r'OpConstant %float ([0-9.e+-]+)', asm)
+           if abs(float(c) - 0.0015) < 1e-9]
+    if not flr:
+        fails.append(f'{h}: v5 min-thickness floor constant 0.0015 missing')
     if len(re.findall(r'OpFOrdEqual %bool %\w+ %float_10000\b', asm)) != \
        len(re.findall(r'OpFOrdEqual %bool %\w+ %float_10000\b', van)) + 1:
         fails.append(f'{h}: visibility ==10000 compare count != base+1')

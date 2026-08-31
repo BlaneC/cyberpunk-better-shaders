@@ -110,6 +110,37 @@ on the leak side (s < -eps_eff, re-trace hit nearer the camera), with
 eps_eff = EPS0 + B*t + A*t*sqrt(1-mu^2)/max(mu,CMIN) -- see the CONS_*
 constants block. D/t/N are harvested from the module's own NEE-offset and
 prehit chains with cross-checks. Also in v4: ALBEDO_EPS back to 0.25.
+
+V5 (handoff/71; 70's W1+W3): the ray is FLIPPED. The reversed segment above
+was v1's founding assumption -- "a forward ray would need back-face hits
+from inside the flesh, a configuration no engine ray exercises" -- and its
+material blindness is what v2's albedo gate, v3's consistency gate and v4's
+one-sided distance-aware gate were all patching. 56 overturned the fear's
+premise class (an injected trace with overridden operands executes and
+round-trips the CHS), so v5 tests the configuration directly and carries
+the BVH-strips-interior-backfaces risk as its pre-registered falsifier
+(everything dark -> revert to v4 machinery + the s-band probe, 69 sec 2).
+  origin    = the sun-NEE trace's own origin operand VERBATIM (P + the
+              engine's self-hit offset)
+  direction = the sun-NEE trace's own direction operand VERBATIM (S)
+  flags     = 32 (CullFrontFacingTrianglesKHR), tmax = T_SEG
+The entering front face is culled; inside real backlit flesh the first
+visible surface is the sun-side wall seen FROM WITHIN -- a backface at
+exactly t = the true sun-path flesh thickness. Validity = TH_FLOOR < t <
+T_VALID. The leak classes die by geometry: a card's own backface sits at
+~0.2-0.5mm (under TH_FLOOR); a face-behind-strand pixel finds no backface
+within T_SEG through the head; strand stacks still fail the sun-visibility
+ray. THE CONSISTENCY GATE IS GONE (find_raster_position is no longer
+called); the albedo gate (b3) and the visibility ray (a) stay, with the
+vis-ray offset mirror's D now = S (the flipped ray's direction). In probe
+mode the min-thickness floor stands where cons stood in the palette: RED =
+floor fails only (a card's own backface), YELLOW = floor AND albedo fail.
+W3 (--wide/--wrap, the soft rungs): raw Beer-Lambert maps 2-3mm of
+thickness to a 3-20x brightness cliff -- 69's "lightbulb". The soft
+transfer is 0.5*(exp(-t/ld) + exp(-t/(wide*ld))) per channel (t in [1,8]mm
+spans ~2-3x on red), and the k select is multiplied by a smoothstep wrap
+w = smoothstep(0, WRAP, -N.S) on the module's own primary normal, so the
+backlit border feathers instead of snapping.
 """
 import argparse, hashlib, json, os, re, subprocess, sys
 
@@ -124,11 +155,11 @@ from patch_subtype_probe import _gi_zeroish
 #     evidenced by tmin 1e-6 / radiance tmax 10000 / NEE-to-light dynamic tmax
 #     in these modules and RED engine convention) -------------------------
 LD_M   = (0.00367, 0.00137, 0.00068)   # ld in meters (3.67/1.37/0.68 mm)
-T_CAP  = 0.02          # segment length: thickness cap, 2 cm
-T_SEG  = 0.018         # trace tmax: stops 2 mm short of P (no self-hit)
+T_SEG  = 0.018         # trace tmax = max measurable sun-path thickness (v5
+                       # traces FROM the surface TOWARD the sun; miss = thick)
 T_VALID = 0.0179       # hitT below this = real hit (miss writes 10000)
-TH_MIN = 0.002         # thinnest measurable thickness (the 2 mm the segment
-                       # cannot see; exp(-2/3.67)=0.58 R ceiling)
+TH_FLOOR = 0.0015      # v5 min-thickness floor: a primary card's own backface
+                       # sits at ~0.2-0.5 mm, the thinnest real ear at ~2 mm
 CLAMP  = 100.0         # contribution ceiling per channel (fp16 headroom)
 ALBEDO_EPS = 0.25      # v4: back to v2's value (67 item 3 -- 0.10 killed
                        # plain-skin ear rims, YELLOW at two S4 sites; every
@@ -146,29 +177,9 @@ PROBE_PALETTE = (
     ("blue",    (0.0, 0.4, 3.2)),   # all pass (v3's surviving glow set)
 )
 
-# V4 consistency gate (handoff/68; deployed-binary read). v3's two-sided
-# |Delta|^2 < (5mm)^2 killed flat-on faces at ~2m (67). The read found NO
-# additive along-ray systematic in the compare's construction -- prehit is
-# the exact traced hit (chs m3 = BuiltIn RayTmaxKHR stored unmodified; the
-# trace origin is the position phi verbatim; the c1*D back-off cancels in
-# the re-hit) -- but praster carries a LATERAL registration error (NDC =
-# pixel+0.5 with no jitter re-applied, checkerboarded depth registration,
-# plus the engine's own c0*N*clamp(0.005*sqrt(t),.005,.1) origin slide,
-# which converts to |Delta| = deltaN*tan(theta), zero flat-on, and biases
-# s POSITIVE i.e. behind/safe for c0>0). A norm compare sees the lateral
-# error through local slope; the one-sided along-ray form projects it out:
-#   s = Delta . D_hat      (D_hat = the module's own bounce-0 direction)
-#   kill <=> s < -eps_eff  (a leak is strictly in FRONT: s negative)
-#   eps_eff = EPS0 + B*t + A*t*sqrt(1-mu^2)/max(mu, CMIN), mu = |N.D_hat|
-# tan shape (not the flat a*t/mu) because the residual IS lateral*tan:
-# it vanishes flat-on, keeping flat-on leak sensitivity at EPS0+B*t.
-CONS_EPS0 = 0.003      # m; registration/quantization crumbs at t->0
-CONS_B    = 0.0015     # m/m; along-ray residuals (raster-vs-RT geometry,
-                       # matrix/linearization mismatch -- unverifiable offline)
-CONS_A    = 0.0022     # p*theta_px: p=2 internal px at theta_px=1.1e-3
-                       # (67 sec 2's 3-5mm/m over tan(45-70deg) face slopes)
-CONS_CMIN = 0.10       # mu floor: caps tan at ~10x; rims beyond ~85 deg
-                       # stay gated (registered row, 68)
+# V5 (handoff/71): the consistency gate and its CONS_* constants are GONE
+# -- the flipped ray measures sun-path thickness directly and the leak
+# classes it thresholded against die by geometry (see the docstring).
 
 TRACE_RE = re.compile(r'^(\s*)OpTraceRayKHR\s+(.+?)\s*$')
 
@@ -720,7 +731,7 @@ def clone_chain(mod, root, safe_ids, fresh, out, fs):
     return nid
 
 
-def build(mod, k, probe=False):
+def build(mod, k, probe=False, soft=None):
     consts, edits = [], []
     eline, fid = _entry(mod, 'RayGenerationKHR')
     fs, fe = _func_span(mod, fid)
@@ -738,7 +749,7 @@ def build(mod, k, probe=False):
     boolt = _ensure_line(mod, consts, r'\s*(%\w+)\s*=\s*OpTypeBool\s*$',
         lambda n: f"    {n} = OpTypeBool")
 
-    rep = {"k": None if probe else k, "t_cap": T_CAP, "t_seg": T_SEG,
+    rep = {"k": None if probe else k, "t_seg": T_SEG,
            "ld_m": LD_M, "mode": "probe" if probe else "glow"}
     if probe:
         rep["palette"] = {n: v for n, v in PROBE_PALETTE}
@@ -750,8 +761,7 @@ def build(mod, k, probe=False):
     counter = find_bounce_counter(mod, fs, fe, nee["line"])
     fetch_root = find_class_fetch(mod, fs, fe)
     radiance = find_radiance_trace(mod, fs, fe, nee["line"])       # v2
-    offctor = find_origin_offset(mod, nee)                         # v2
-    raster = find_raster_position(mod, fs, fe, nee, offctor["prehit"])  # v3
+    offctor = find_origin_offset(mod, nee)                         # v2/v5
     eb_lab, eb_term = entry_block_span(mod, fs, fe)
     safe = set()
     for i in range(fs, eb_term):
@@ -766,11 +776,8 @@ def build(mod, k, probe=False):
     rep["radiance_payload"] = radiance["payload"]
     rep["offset_cbv_slot"] = offctor["slot"]
     rep["albedo_eps"] = ALBEDO_EPS
-    rep["cons"] = {"eps0": CONS_EPS0, "b": CONS_B, "a": CONS_A,
-                   "cmin": CONS_CMIN}
-    rep["prehit"] = offctor["prehit"]
-    rep["praster"] = raster["praster"]
-    rep["sky_merge_line"] = raster["merge_line"] + 1
+    rep["th_floor"] = TH_FLOOR
+    rep["soft"] = {"wide": soft[0], "wrap": soft[1]} if soft else None
 
     # ---- constants --------------------------------------------------------
     u0 = _uc(mod, consts, 0)
@@ -779,18 +786,20 @@ def build(mod, k, probe=False):
     u16 = _uc(mod, consts, 16)
     u32 = _uc(mod, consts, 32)
     f0 = _fc(mod, consts, 0.0)
-    fcap = _fc(mod, consts, T_CAP)
     fseg = _fc(mod, consts, T_SEG)
+    fflr = _fc(mod, consts, TH_FLOOR)
     fvalid = _fc(mod, consts, T_VALID)
     f10000 = _fc(mod, consts, 10000.0)
     if probe:
         pconst = [[(_fc(mod, consts, c) if c != 0.0 else None) for c in v]
                   for _, v in PROBE_PALETTE]
     else:
-        fthmin = _fc(mod, consts, TH_MIN)
         fclamp = _fc(mod, consts, CLAMP)
         fk = _fc(mod, consts, k)
         finv = [_fc(mod, consts, 1.0 / ld) for ld in LD_M]
+        if soft:
+            finv2 = [_fc(mod, consts, 1.0 / (soft[0] * ld)) for ld in LD_M]
+            fwrap = _fc(mod, consts, soft[1])
     # v2 constants (all dedup against the module's own by f32 value)
     u2 = _uc(mod, consts, 2)
     u8 = _uc(mod, consts, 8)
@@ -808,9 +817,6 @@ def build(mod, k, probe=False):
     finv255 = _fc(mod, consts, 1.0 / 255.0)
     finv2047 = _fc(mod, consts, 1.0 / 2047.5)
     feps = _fc(mod, consts, ALBEDO_EPS)
-    fce0 = _fc(mod, consts, CONS_EPS0)
-    fcb = _fc(mod, consts, CONS_B)
-    fca = _fc(mod, consts, CONS_A)
 
     # ---- entry block: fresh payload + 3 glow accumulators -----------------
     spay = mod.new_id()
@@ -842,51 +848,22 @@ def build(mod, k, probe=False):
     g_b0 = nid(); ins.append(f"{ind}{g_b0} = OpIEqual {boolt} {counter} {u0}")
     g_a1 = nid(); ins.append(f"{ind}{g_a1} = OpLogicalAnd {boolt} {g_skin} {nee['backlit']}")
     g_a2 = nid(); ins.append(f"{ind}{g_a2} = OpLogicalAnd {boolt} {g_a1} {g_b0}")
-    # v4 consistency gate (handoff/68): one-sided, distance- and slope-
-    # aware. s = (prehit - praster) . D_hat; kill only on the leak side
-    # (re-trace hit nearer the camera) beyond eps_eff. Every id is the
-    # module's own (prehit/praster as v3; D/t/N harvested and cross-
-    # checked by find_origin_offset), in scope by structured dominance.
-    cd = []
-    for i in range(3):
-        d = nid(); ins.append(f"{ind}{d} = OpFSub %float {offctor['prehit'][i]} {raster['praster'][i]}")
-        cd.append(d)
-    cv = nid(); ins.append(f"{ind}{cv} = OpCompositeConstruct %v3float {' '.join(cd)}")
-    dv = nid(); ins.append(f"{ind}{dv} = OpCompositeConstruct %v3float {' '.join(offctor['dir'])}")
-    sdt = nid(); ins.append(f"{ind}{sdt} = OpDot %float {cv} {dv}")
-    nv4 = nid(); ins.append(f"{ind}{nv4} = OpCompositeConstruct %v3float {' '.join(offctor['normal'])}")
-    ndt = nid(); ins.append(f"{ind}{ndt} = OpDot %float {nv4} {dv}")
-    mua = nid(); ins.append(f"{ind}{mua} = OpExtInst %float {glsl} FAbs {ndt}")
-    muc = nid(); ins.append(f"{ind}{muc} = OpExtInst %float {glsl} NMax {mua} {f01}")
-    mu2 = nid(); ins.append(f"{ind}{mu2} = OpFMul %float {mua} {mua}")
-    om1 = nid(); ins.append(f"{ind}{om1} = OpFSub %float {f1} {mu2}")
-    omc = nid(); ins.append(f"{ind}{omc} = OpExtInst %float {glsl} NMax {om1} {f0}")
-    sq4 = nid(); ins.append(f"{ind}{sq4} = OpExtInst %float {glsl} Sqrt {omc}")
-    tnq = nid(); ins.append(f"{ind}{tnq} = OpFDiv %float {sq4} {muc}")
-    at4 = nid(); ins.append(f"{ind}{at4} = OpFMul %float {fca} {offctor['t']}")
-    slp = nid(); ins.append(f"{ind}{slp} = OpFMul %float {at4} {tnq}")
-    bt4 = nid(); ins.append(f"{ind}{bt4} = OpFMul %float {fcb} {offctor['t']}")
-    ep0 = nid(); ins.append(f"{ind}{ep0} = OpFAdd %float {fce0} {bt4}")
-    epf = nid(); ins.append(f"{ind}{epf} = OpFAdd %float {ep0} {slp}")
-    nef = nid(); ins.append(f"{ind}{nef} = OpFNegate %float {epf}")
-    cons = nid(); ins.append(f"{ind}{cons} = OpFOrdGreaterThan {boolt} {sdt} {nef}")
-    g_a3 = nid(); ins.append(f"{ind}{g_a3} = OpLogicalAnd {boolt} {g_a2} {cons}")
-    # probe: the thickness trace must fire on ALL g_a2 pixels so cons/albedo
-    # can be read out independently; glow: cons gates the trace (v3)
+    # v5 (handoff/71, W1): no consistency gate. The thickness ray is the
+    # FLIPPED one -- origin/direction are the sun-NEE trace's own operands
+    # VERBATIM (ops[6]/ops[8]: P + the engine's self-hit offset, toward the
+    # sun), flags CullFrontFacingTriangles (32): the entering front face is
+    # culled and the first hit is the far wall's BACKFACE at t = the true
+    # sun-path thickness. Validity = TH_FLOOR < t < T_VALID, post-trace.
     g_msk = nid(); ins.append(
-        f"{ind}{g_msk} = OpSelect %uint {g_a2 if probe else g_a3} %uint_39 {u0}")
+        f"{ind}{g_msk} = OpSelect %uint {g_a2} %uint_39 {u0}")
 
-    # reversed segment from the NEE trace's own origin/direction composites
-    o_c, d_c, s_c, oo, dd = [], [], [], ops[6], ops[8]
+    # component extracts of the flipped ray (Q construction and the W3
+    # wrap need them; the trace itself uses the composites verbatim)
+    o_c, s_c, oo, dd = [], [], ops[6], ops[8]
     for c in range(3):
         oe = nid(); ins.append(f"{ind}{oe} = OpCompositeExtract %float {oo} {c}")
         de = nid(); ins.append(f"{ind}{de} = OpCompositeExtract %float {dd} {c}")
-        sc = nid(); ins.append(f"{ind}{sc} = OpFMul %float {de} {fcap}")
-        ad = nid(); ins.append(f"{ind}{ad} = OpFAdd %float {oe} {sc}")
-        ng = nid(); ins.append(f"{ind}{ng} = OpFNegate %float {de}")
-        o_c.append(ad); d_c.append(ng); s_c.append(de)
-    oC = nid(); ins.append(f"{ind}{oC} = OpCompositeConstruct %v3float {' '.join(o_c)}")
-    dC = nid(); ins.append(f"{ind}{dC} = OpCompositeConstruct %v3float {' '.join(d_c)}")
+        o_c.append(oe); s_c.append(de)
 
     # payload member chains (member 0 = albedo pack, 1 = oct-normal pack,
     # 2 = cone float, 3 = hitT) and the thickness-trace pre-arm: member 3
@@ -901,10 +878,16 @@ def build(mod, k, probe=False):
     ins.append(f"{ind}OpStore {m1c} {u0}")
     ins.append(f"{ind}OpStore {m2c} {f0}")
     ins.append(f"{ind}OpStore {pa} {f10000}")
-    ins.append(f"{ind}OpTraceRayKHR {ops[0]} {u16} {g_msk} {u1} {u1} {u0} "
-               f"{oC} {ops[7]} {dC} {fseg} {spay}")
+    ins.append(f"{ind}OpTraceRayKHR {ops[0]} {u32} {g_msk} {u1} {u1} {u0} "
+               f"{oo} {ops[7]} {dd} {fseg} {spay}")
     t = nid(); ins.append(f"{ind}{t} = OpLoad %float {pa}")
-    vd = nid(); ins.append(f"{ind}{vd} = OpFOrdLessThan {boolt} {t} {fvalid}")
+    vdh = nid(); ins.append(f"{ind}{vdh} = OpFOrdLessThan {boolt} {t} {fvalid}")
+    # v5 min-thickness floor; stands where cons stood in the probe palette
+    cons = nid(); ins.append(f"{ind}{cons} = OpFOrdGreaterThan {boolt} {t} {fflr}")
+    if probe:
+        vd = vdh
+    else:
+        vd = nid(); ins.append(f"{ind}{vd} = OpLogicalAnd {boolt} {vdh} {cons}")
     ha = nid(); ins.append(f"{ind}{ha} = OpLoad %uint {m0c}")
     hn = nid(); ins.append(f"{ind}{hn} = OpLoad %uint {m1c}")
 
@@ -968,10 +951,11 @@ def build(mod, k, probe=False):
         nvec.append(r)
 
     # ---- v2 (a): Q + the ENGINE'S OWN self-hit offset, mirrored ----------
-    # Q_i = thicknessOrigin_i + t*(-S)_i; then offset with the module's own
-    # scheme (find_origin_offset verified the shape; c0/c1 cloned from its
-    # own cbv slot): + c0*N*clamp(0.005*sqrt(t),.005,.1)*[N.z>0]
-    #                - c1*D*(1+9*clamp(t*0.001,0,1)),  D = -S, N = nvec.
+    # Q_i = thicknessOrigin_i + t*S_i (v5: the ray runs TOWARD the sun);
+    # then offset with the module's own scheme (find_origin_offset verified
+    # the shape; c0/c1 cloned from its own cbv slot):
+    #   + c0*N*clamp(0.005*sqrt(t),.005,.1)*[N.z>0]
+    #   - c1*D*(1+9*clamp(t*0.001,0,1)),  D = S (the flipped ray), N = nvec.
     cloned2 = []
     ld2 = clone_chain(mod, offctor["load"], safe, {}, cloned2, fs)
     for cid, body in cloned2:
@@ -993,9 +977,9 @@ def build(mod, k, probe=False):
     nm2 = nid(); ins.append(f"{ind}{nm2} = OpFMul %float {nmg} {gs}")
     qv = []
     for i in range(3):
-        td = nid(); ins.append(f"{ind}{td} = OpFMul %float {t} {d_c[i]}")
+        td = nid(); ins.append(f"{ind}{td} = OpFMul %float {t} {s_c[i]}")
         qi = nid(); ins.append(f"{ind}{qi} = OpFAdd %float {o_c[i]} {td}")
-        d1 = nid(); ins.append(f"{ind}{d1} = OpFMul %float {c1e} {d_c[i]}")
+        d1 = nid(); ins.append(f"{ind}{d1} = OpFMul %float {c1e} {s_c[i]}")
         d2 = nid(); ins.append(f"{ind}{d2} = OpFMul %float {d1} {dsc}")
         n1 = nid(); ins.append(f"{ind}{n1} = OpFMul %float {c0e} {nvec[i]}")
         n2 = nid(); ins.append(f"{ind}{n2} = OpFMul %float {n1} {nm2}")
@@ -1008,7 +992,7 @@ def build(mod, k, probe=False):
         vc0 = nid(); ins.append(f"{ind}{vc0} = OpLogicalAnd {boolt} {g_a2} {vd}")
         vmk = nid(); ins.append(f"{ind}{vmk} = OpSelect %uint {vc0} {u39} {u0}")
     else:
-        vc0 = nid(); ins.append(f"{ind}{vc0} = OpLogicalAnd {boolt} {g_a3} {vd}")
+        vc0 = nid(); ins.append(f"{ind}{vc0} = OpLogicalAnd {boolt} {g_a2} {vd}")
         vc1 = nid(); ins.append(f"{ind}{vc1} = OpLogicalAnd {boolt} {vc0} {sim}")
         vmk = nid(); ins.append(f"{ind}{vmk} = OpSelect %uint {vc1} {u39} {u0}")
     ins.append(f"{ind}OpStore {m0c} {u0}")
@@ -1055,17 +1039,35 @@ def build(mod, k, probe=False):
             gs2 = nid(); ins.append(f"{ind}{gs2} = OpFAdd %float {gl} {acc}")
             ins.append(f"{ind}OpStore {gv[c]} {gs2}")
     else:
-        # ---- the k select: v1's thin term AND similar AND sunlit ---------
+        # ---- the k select: thin AND similar AND sunlit; t IS thickness ---
         ok0 = nid(); ins.append(f"{ind}{ok0} = OpLogicalAnd {boolt} {vd} {sim}")
         ok = nid(); ins.append(f"{ind}{ok} = OpLogicalAnd {boolt} {ok0} {vis}")
-        th0 = nid(); ins.append(f"{ind}{th0} = OpFSub %float {fcap} {t}")
-        th = nid(); ins.append(f"{ind}{th} = OpExtInst %float {glsl} NClamp {th0} {fthmin} {fcap}")
         kg = nid(); ins.append(f"{ind}{kg} = OpSelect %float {ok} {fk} {f0}")
+        if soft:
+            # W3 wrap: feather the backlit border -- w = smoothstep(0,
+            # WRAP, -N.S) on the module's own primary normal and sun dir
+            nvp = nid(); ins.append(f"{ind}{nvp} = OpCompositeConstruct %v3float {' '.join(offctor['normal'])}")
+            svp = nid(); ins.append(f"{ind}{svp} = OpCompositeConstruct %v3float {' '.join(s_c)}")
+            nds = nid(); ins.append(f"{ind}{nds} = OpDot %float {nvp} {svp}")
+            bnd = nid(); ins.append(f"{ind}{bnd} = OpFNegate %float {nds}")
+            wrp = nid(); ins.append(f"{ind}{wrp} = OpExtInst %float {glsl} SmoothStep {f0} {fwrap} {bnd}")
+            kw = nid(); ins.append(f"{ind}{kw} = OpFMul %float {kg} {wrp}")
+        else:
+            kw = kg
         for c in range(3):
-            e1 = nid(); ins.append(f"{ind}{e1} = OpFMul %float {th} {finv[c]}")
+            e1 = nid(); ins.append(f"{ind}{e1} = OpFMul %float {t} {finv[c]}")
             e2 = nid(); ins.append(f"{ind}{e2} = OpFNegate %float {e1}")
             e3 = nid(); ins.append(f"{ind}{e3} = OpExtInst %float {glsl} Exp {e2}")
-            m1 = nid(); ins.append(f"{ind}{m1} = OpFMul %float {e3} {kg}")
+            if soft:
+                # W3 transfer: 0.5*(exp(-t/ld) + exp(-t/(wide*ld)))
+                e4 = nid(); ins.append(f"{ind}{e4} = OpFMul %float {t} {finv2[c]}")
+                e5 = nid(); ins.append(f"{ind}{e5} = OpFNegate %float {e4}")
+                e6 = nid(); ins.append(f"{ind}{e6} = OpExtInst %float {glsl} Exp {e5}")
+                e7 = nid(); ins.append(f"{ind}{e7} = OpFAdd %float {e3} {e6}")
+                tr = nid(); ins.append(f"{ind}{tr} = OpFMul %float {e7} {fhalf}")
+            else:
+                tr = e3
+            m1 = nid(); ins.append(f"{ind}{m1} = OpFMul %float {tr} {kw}")
             m2 = nid(); ins.append(f"{ind}{m2} = OpFMul %float {m1} {sunrad[c]}")
             m3 = nid(); ins.append(f"{ind}{m3} = OpExtInst %float {glsl} NMin {m2} {fclamp}")
             gl = nid(); ins.append(f"{ind}{gl} = OpLoad %float {gv[c]}")
@@ -1109,7 +1111,7 @@ def build(mod, k, probe=False):
     return consts, edits, rep
 
 
-def process(path, outdir, k, probe=False):
+def process(path, outdir, k, probe=False, soft=None):
     target_env = detect_target_env(path) or 'spv1.4'
     mod, problems = load_lenient(path)
     if not mod.ident:
@@ -1118,7 +1120,7 @@ def process(path, outdir, k, probe=False):
     rep = dict(module=mod.name, ident=mod.ident)
     if problems:
         rep['module_warnings'] = problems
-    consts, edits, rep['earglow'] = build(mod, k, probe=probe)
+    consts, edits, rep['earglow'] = build(mod, k, probe=probe, soft=soft)
     apply_edits(mod, consts, edits)
     os.makedirs(outdir, exist_ok=True)
     asm_out = os.path.join(outdir, mod.ident + '.spvasm')
@@ -1148,10 +1150,18 @@ def main():
     ap.add_argument('--outdir', required=True)
     ap.add_argument('--probe', action='store_true',
                     help='gate-attribution paint instead of the glow '
-                         '(handoff/66)')
+                         '(handoff/66; v5 semantics -- RED is the '
+                         'min-thickness floor, not cons)')
+    ap.add_argument('--wide', type=float,
+                    help='W3 soft transfer: second-lobe widening factor')
+    ap.add_argument('--wrap', type=float,
+                    help='W3 wrap: smoothstep upper edge on -N.S')
     args = ap.parse_args()
+    if (args.wide is None) != (args.wrap is None):
+        ap.error('--wide and --wrap must be given together')
+    soft = (args.wide, args.wrap) if args.wide is not None else None
     print(json.dumps(process(args.spvasm, args.outdir, args.k,
-                             probe=args.probe)))
+                             probe=args.probe, soft=soft)))
 
 
 if __name__ == '__main__':

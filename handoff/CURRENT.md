@@ -4,8 +4,120 @@ One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
 *working* — only an on-screen A/B is.
 
-**Newest first (2026-08-30 23:57 → 2026-08-31 01:46, five launches):**
+**Newest first (2026-08-30 23:57 → 2026-08-31 01:46, five launches; then the
+2026-08-31 14:17 oil+fuzz build, its first look, the 14:57 rebuild, its
+launch, and the 15:57 half-oil + bounce-bleed rebuild):**
 
+- **USER VERDICT ON THE STACK: KEEP IT. Fuzz "incredible like 99 percent
+  of the time" — the sun-only gate was requested, PROVEN feasible, then
+  withdrawn and parked (`75`).** The indoor complaint (16:32 screenshot,
+  verified served `gi-50b-bleed-oil-sheen`) prompted "make the fuzz
+  sun-only"; the discriminator was established by census — unlooped GGX
+  sites read an exclusive bindless-cbuffer slot 5 (the sun direction) in
+  75/76 U-bearing modules, looped light-list sites never do — and then the
+  user reversed: keep as-is. Nothing to undo (investigation was
+  read-only). Discriminator + exceptions (`ab0bc2fe` 0 U sites,
+  `99bb7c26` unprovable) + build sketch recorded in `75` so it's a
+  one-session build if ever wanted. Everything below committed + pushed
+  at the user's request.
+- **73's candidate WINS with two dials and one structural gap — half oil,
+  half fuzz, and the BLEED NOW RIDES BOUNCE LIGHT. Built + parked + deployed
+  15:57, unlaunched (`74`).** User on `gi-50-bleed-oil-sheen` (launch
+  verified via status.txt; the oil's first time on screen): *"literally
+  perfect... except I need about half the amount of oil"*, baby hairs too
+  strong in dim light, *"skin is becoming hazy and loses that rosy tint in
+  dim lighting/indoors"*, and — the user's own diagnosis, correct — *"make
+  sure that bounce lighting is hitting the baby hair sheen/proper-bleed-
+  skin-shader/oil aswell"*. It wasn't hitting ANY of them: bleed/oil/fuzz
+  all ride the compute modules' direct-light term. The indoor haze is three
+  achromatic mechanisms stacking (`74` §0), and the rosy-tint loss is the
+  bleed diluting exactly where bounce dominates. Changes: (1) half oil =
+  `real-gloss-bleed-oilh` (n_s 0.55 → grazing F +22% not +52%; cap 0.45 →
+  bites only authored roughness >0.538 at 1.55× not 2.5×); (2) fuzz
+  `k_peach` 1.0 → **0.5**, the new default (hemisphere median 0.72%, max
+  79% of local diffuse); (3) **`gi-50b`** = gi-50's raygens + the `53`
+  closed form at the ST pair's own tail NoL — the terminator bleed on
+  bounce light, channel identity walked to the albedo fetch and asserted
+  {0,1,2} (die-on-guess), emitted math machine-evaluated 28/28, `--bleed 0`
+  byte-inert vs parked gi-50. Oil and fuzz CANNOT ride bounce and there is
+  nothing to ride: no view vector exists in the diffuse raygens (`50` §3)
+  and the GI spec family's share is nil (`50` §2) — documented, closed.
+  Rungs rebuilt IN PLACE (candidate + both attribution rungs at half
+  levels); 73-era candidate parked as `…-oil-sheen-hot`;
+  **`gi-50b-bleed-oil-sheen` is the indoor-depth candidate** — 2 raygen
+  files from the rebuilt candidate, compute byte-identical.
+  `verify_gi_ladder` ALL PASS both bases; sync accepted both candidates;
+  live selection unchanged, so a relaunch shows the halving with no setting
+  change. A/B runbook + pre-registered failures: `74` §5. **Shoot a DIM
+  INTERIOR face for the gi-50b pair — direct sun is predicted to not move.**
+- **The blown rim was the module's own FRESNEL, not the lobe — cancelled at
+  the rim only; both added-lobe rungs rebuilt in place (`73`).** First
+  on-screen read of `72`'s build: *"a bit too blown out. Losing the nicer
+  deep red"*. `72` §7.1 had pre-registered exactly this, at exactly these
+  pixels — the splice sits upstream of the module's Schlick multiply, and F
+  runs 0.028 in the front-lit sheen band to **0.87 on a backlit rim**, a 30×
+  amplification of a term that has nothing to do with Fresnel, painted white
+  over the pixels where the terminator bleed's red lives. (`NoL` cancels out
+  of fuzz/diffuse, so that swing is *all* Fresnel — the mechanism is not a
+  guess.) Fix: multiply the lobe by `w = 1 − (1−VoH)^5` at the splice, where
+  **`VoH = (NoL+NoV)/(2·NoH)` is exact** (unit bisector) and symmetric in the
+  two cosines, so it holds at all 457 sites including the 56 unlabelled
+  cheap-Vis ones; plus `peach_max` 1.0 → 0.5. Net weight is **1.00× wherever
+  VoH ≥ 0.8** — the cheek/jaw response is unchanged to 4 decimals; hemisphere
+  median 1.45% → 1.45%, p90 8.0% → 7.9%, **max 781% → 159%** of the local
+  diffuse (worst-pixel add 0.0217 → 0.0088). Works on the oil rung too
+  (0.45×/0.24× at VoH 0.1/0.05 under its reshaped Fresnel). `k_peach` stays
+  1.0 deliberately: the complaint was the peak, not the level. New build gate
+  — β must agree across modules and **457 of 457** sites must carry the
+  weight, or the build fails. `gi-50-bleed-sheen2` and `gi-50-bleed-oil-sheen`
+  rebuilt **in place** (same selector ids); the 72-era bytes parked and
+  selectable as `…-wide` because targeted-vs-wide is now the A/B. verify →
+  ALL PASS on six rungs. **Shoot a BACKLIT face — a front-lit A/B will show
+  nothing, and that is the prediction.**
+- **Peach fuzz was invisible BY CONSTRUCTION; rebuilt as a real lobe, and an
+  OIL layer added — BUILT + PARKED + DEPLOYED, unlaunched (`72`).** The user's
+  A/B call on `gi-50-bleed-sheen` (*"extremely subtle"*, vanilla skin *"looks
+  super dry"*) is exactly what its arithmetic predicts: the 58-era rung is
+  **multiplicative**, and measures **1.0000–1.0466×** over the whole face
+  (1.24× only within ~2° of silhouette). No `k` fixes that — a factor cannot
+  create the grazing energy GGX has none of. Rebuilt as the same Charlie ×
+  Neubelt lobe **ADDED** at the site's own `D·Vis`, class-1 gated, carrying
+  the site's **own** light cosine so it dies at the terminator (401 sites fold
+  the true `NoL`; 56 cheap-Vis sites fold `min(c0,c1)`, conservative). Code
+  review found four defects, one real: **16 bare `OpDot` cosines** drove
+  `V_neubelt` to its ceiling on backlit skin — the `69` "lightbulb" waiting to
+  happen; now clamped, and only where `_in_unit` cannot prove saturation (all
+  104 `OpPhi`s pass). Amplitude calibrated offline against the one on-screen
+  anchor — `58`'s `k=8` probe computes to 316% of local diffuse ("blown
+  white"); shipping `k=1.0` gives 0–2% head-on, 5–17% on a cheek rim, 35–53%
+  on the last degree of silhouette (`dev/fuzz_model.py` prints all of it).
+  The **oil** is the tier-3 gloss that has been inert in every `gi-*` rung
+  (`G0` is the identity): `n_s=0.60, alpha_max=0.16` → mirror-band highlight
+  1.20–1.28× tighter/brighter, grazing F +52% at 60°. Three new rungs form a
+  one-variable ladder off `gi-50-bleed`: **`gi-50-bleed-oil`**,
+  **`gi-50-bleed-sheen2`**, **`gi-50-bleed-oil-sheen`** (the candidate).
+  `./dev/verify_gi_ladder.sh` → ALL PASS (16/16 raygens byte-identical to
+  `gi-50` in every rung, 77/77 compute deltas pairwise, `gi_refuse`
+  provenance clean). **Live `brdf_params.txt` has `skin=off` — these are dead
+  until it is `on`**; full required-settings block in `72` §6. Nothing on
+  screen yet; do not promote any of it without a launch.
+- **Ear glow v5 BUILT and PARKED, unlaunched — the ray is FLIPPED (`70` W1,
+  build `71`).** The reversed segment — v1's founding assumption and the
+  material blindness every gate generation patched — is replaced by a
+  sunward trace from the module's own NEE origin/direction VERBATIM,
+  CullFront (32), tmax 18mm: the first hit is the flesh's far wall seen
+  from inside, a backface at t = the TRUE sun-path thickness. Leak classes
+  die by geometry (card backface < 1.5mm floor; face-behind-strand finds
+  no backface through the head); **the consistency gate exits the design**.
+  Albedo (0.25) + vis ray kept. W3 rides along: `-lo` = W1 + raw
+  Beer–Lambert (isolates the flip), `earglow` = dual-exp transfer (red
+  ~2× over 1–6mm, not ~20×) + smoothstep backlit wrap 0.35, `-hi` =
+  wider lobe + wrap 0.5. All k=0.22 — the ladder is design, not strength.
+  Pre-registered falsifier: all-dark = BVH strips interior backfaces →
+  revert v4 (git) + s-band probe. Probe semantics under a REBUILD are now
+  v5 (RED = floor, not cons); the parked probe rung is still v3's. `71`
+  §5 is the outcome table. W2 (jittered entry) not built. One launch,
+  contract unchanged (ser=class, shadowset=full-shadow, ptreg ON).
 - **Ear glow: nose + coverage WIN (v4), sliver leaks RETURN + "lightbulb"
   transfer look; two tracks proposed — `60`→`69`.** `earglow-hi`
   (user-run, 01:46, serve + settings verified): glow under clothing, at the
@@ -99,6 +211,9 @@ resumes the work with zero prior context.
 |---|---|---|
 | Skin **realism** axes: roughness scale, energy coupling, micro-shadowing, wet eyes; combined as `real` / `real-gloss` | `skinspec=` 9 new rungs | `44` §1, §3 |
 | Oily/wet skin gloss ladder (roughness *ceiling*, flattens variation) | `skinspec=subtle…extreme` | `33` §2 |
+| Peach fuzz (added Charlie×Neubelt lobe, class-1 gated, **Schlick ramp cancelled**, now at **half strength**) and the **half** oil layer, as a one-variable ladder off the standing `gi-50-bleed`. The 73-era full-strength candidate won its A/B modulo "half the oil / too hazy in dim light" and is parked as `-hot` | `skinspec=gi-50-bleed-oil` / `-sheen2` / `-oil-sheen` (+ `…-hot` = 73 levels, `…-wide` = the 72-era rim) | `72`, `73`, `74` |
+| **Terminator bleed on BOUNCE light** — the `53` closed form at the ReSTIR-GI ST pair's own tail NoL, so the rosy terminator cue survives indoors where bounce dominates. `gi-50b` = bounce bleed alone (attribution); `gi-50b-bleed-oil-sheen` = **the indoor-depth candidate**, 2 raygen files from `gi-50-bleed-oil-sheen` | `skinspec=gi-50b` / `gi-50b-bleed-oil-sheen` | `74` |
+| Peach fuzz, 58-era **multiplicative** form — measures 1.00–1.05× on the face; superseded, kept only for reproducibility | `skinspec=gi-50-bleed-sheen` | `58`, `72` §1 |
 | SSS kernel presets `balanced` / `callisto` / `vanilla` (tooling check) | `kernel=` | `44`, `33` §1 |
 | Sun angular size / visibility / scattering (live CVars) | PT panel | `44`, `43` M3 |
 | SER restoration — now selectable from CET, and no longer un-patches ptq | `ser=class…` | `41`, `44` §2.1 |

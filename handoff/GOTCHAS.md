@@ -643,3 +643,52 @@ sample noise, and a tighter specular lobe raises them without adding detail.
 *Rung-vs-rung beats rung-vs-baseline* — the floor is a near-uniform relative
 offset, so it cancels between two rungs; the one S1 result that survived was
 a differential (E2a→E2b, flat face, +3.2% on the top-3% highlight).
+
+### A multiplicative term cannot create energy the base lobe does not have
+
+`gi-50-bleed-sheen` shipped as `spec · (1 + k·fuzz)` and measured **1.0000–
+1.0466×** over an entire face (`72` §1) — the user read it as "extremely
+subtle" because it *is* nothing. Grazing sheen, rim light, peach fuzz: the
+whole point is energy where the base term is ~0, so the factor is ~1 there by
+definition, and raising `k` only brightens the highlight you did not want to
+touch. **Add the lobe; do not scale by it.** Corollary: before shipping an
+amplitude, evaluate the actual expression over the actual hemisphere
+(`dev/fuzz_model.py`) — the docstring that shipped with that rung claimed a
+"~30% rim boost" and was wrong by ~30×.
+
+### Splicing upstream of Fresnel means Fresnel weights your term too
+
+**Confirmed on screen 2026-08-31** (`73`): the 72-era fuzz rung read as "too
+blown out, losing the nicer deep red" at precisely the backlit rim the model
+put its maximum at. The cure is `w = 1 - (1 - VoH)^5` multiplied into the
+spliced term, and **VoH costs nothing to obtain**: for a unit half vector
+`L + V = 2*(V.H)*H`, so dotting with N gives exactly
+
+    VoH = (NoL + NoV) / (2 * NoH)
+
+from three values every GGX site already has. It is symmetric in the two
+cosines, so it survives the NoL/NoV labelling ambiguity that plagues the
+V_neubelt family, and its numerator vanishes with its denominator, so the
+NMax division guard cannot distort the limit.
+
+The skin specular splice point sits before the module's own Schlick multiply.
+In the grazing/backlit geometry a sheen lobe lives in, `VoH ≈ 1`, so `F` sits
+at `f0 ≈ 0.028` across the whole band — a **36× attenuation** of anything
+added there, which is why `k` of order 1 is correct at that site and 0.1 is
+invisible. The same weighting swings to 0.87 at the silhouette, so the added
+term is ~30× stronger on the last degree of rim than on a cheek. Both facts
+are properties of the splice point, not of the tuning.
+
+### `patch_compute_skin.sh --sets` deletes every non-probe rung in `skin.set/`
+
+It `rm -rf`s the directory before rebuilding the ladder — including the
+composed rungs (`gi-*`, `earglow`, `sentinel`) that other scripts built and
+that no `--sets` run can recreate. Use `--only NAME` to add one compute rung
+without touching anything else.
+
+### `swaps.ptq/` is empty between launches — a stale-ptq check must not read it
+
+`sync_settings.sh` materialises it at launch time. An offline provenance check
+that hashes `swaps.ptq/` will report STALE-PTQ for **every** rung, including
+the standing one that serves fine. Match the manifest's `ptq_sha` against the
+parked `ptq/<combo>/` directories instead (`dev/verify_gi_ladder.sh`).

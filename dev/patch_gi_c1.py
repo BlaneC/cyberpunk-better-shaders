@@ -52,6 +52,19 @@ SP = ('5e1e98e44d854712', 'fc60b8a0b56529b8')   # spatial: re-weight only
 RHO_F, RHO_R, EXPO = 1.35, 1.25, 2.5
 LUM = ('0_212599993', '0_715200007', '0_0722000003')
 
+# 74: the terminator colour bleed (handoff/53), on BOUNCE light. Same closed
+# form and the same amplitudes as the compute-side bleed -- w = sat(1 -
+# NoL/0.35)^2, m_R = 1 + 0.336k*w, m_B = 1 - 0.101k*w, m_G = 1 -- but NoL here
+# is the ST tail's own cosine against the RESERVOIR's sample direction, so the
+# warm edge appears where indirect light grazes the skin. This is what the
+# compute bleed structurally cannot do: those modules write the direct-light
+# term only (46 s12), so indoors, where bounce dominates, the rosy terminator
+# cue washed out. The SP pair carries NO bleed: it has no angle in scope, and
+# the flat cosine-weighted expectation E[m_R] = 1.007 / E[m_B] = 0.998 is an
+# order of magnitude below the S3 measurement floor -- emitting it would be
+# a variable that cannot be seen.
+BLEED_R, BLEED_B, BLEED_BAND = 0.336, 0.101, 0.35
+
 
 def rhos(strength):
     return 1.0 + (RHO_F - 1.0) * strength, 1.0 + (RHO_R - 1.0) * strength
@@ -154,8 +167,98 @@ def find_st_shading_triple(mod, wline):
     return hits[0]      # (nol_id, [(result, line) x3])
 
 
+# ---------------------------------------------------- ST channel identity
+def _st_albedo_channel(mod, alb):
+    """The unique (fetch, component) an ST albedo channel id roots at.
+
+    The compute-side rule (39: never guess a channel from operand order)
+    applied to the raygen tail. Bounded multi-path walk over the idioms
+    measured on both ST modules (2026-08-31): the frontier/ladder OpPhi
+    chains, the diffuse-colour FSub (albedo - albedo*metal -- follow the
+    MINUEND only, the subtrahend roots at the metalness fetch), the
+    white-override OpSelect, the sRGB squaring decode (FMul x x), and
+    literal-scaled FMul/FAdd. Returns None unless EVERY path lands on ONE
+    component of ONE v4float image fetch."""
+    roots, seen, stack = set(), set(), [(alb, 0)]
+    while stack:
+        cur, depth = stack.pop()
+        if cur in seen:
+            continue
+        if depth > 12:
+            return None
+        seen.add(cur)
+        _, d = mod.find_def(cur)
+        if d is None:
+            return None
+        me = re.match(r'OpCompositeExtract %float (%[\w$]+) (\d+)\s*$', d)
+        if me:
+            roots.add((me.group(1), int(me.group(2))))
+            continue
+        mp = re.match(r'OpPhi %float((?:\s+%[\w$]+)+)\s*$', d)
+        if mp:
+            stack += [(op, depth + 1) for op in set(mp.group(1).split()[0::2])
+                      if not op.startswith('%float_')]
+            continue
+        ms = re.match(r'OpFSub %float (%[\w$]+) (%[\w$]+)\s*$', d)
+        if ms:
+            stack.append((ms.group(1), depth + 1))
+            continue
+        msel = re.match(r'OpSelect %float %[\w$]+ (%[\w$]+) (%[\w$]+)\s*$', d)
+        if msel:
+            stack += [(op, depth + 1) for op in msel.groups()
+                      if not op.startswith('%float_')]
+            continue
+        mm = re.match(r'OpF(?:Mul|Add) %float (%[\w$]+) (%[\w$]+)\s*$', d)
+        if mm:
+            a, b = mm.groups()
+            if a == b:
+                stack.append((a, depth + 1))
+            elif a.startswith('%float_'):
+                stack.append((b, depth + 1))
+            elif b.startswith('%float_'):
+                stack.append((a, depth + 1))
+            else:
+                return None
+            continue
+        return None
+    if len(roots) != 1:
+        return None
+    vec, idx = next(iter(roots))
+    _, dv = mod.find_def(vec)
+    if not re.match(r'OpImageFetch %v4float ', dv or ''):
+        return None
+    return (vec, idx)
+
+
+def st_triple_channels(mod, triple):
+    """{triple result id: albedo component} for the three shading FMuls, or
+    die: each is pi_prod x NoL, pi_prod is albedo_ch x 1/pi, and the walk
+    must name all three channels {0,1,2} distinct off ONE fetch."""
+    out, fetches = {}, set()
+    for r, _ in triple:
+        _, d = mod.find_def(r)
+        m = re.match(r'OpFMul %float (%[\w$]+) (%[\w$]+)\s*$', d or '')
+        if not m:
+            die(f"{mod.name}: triple member {r} is not a 2-op FMul")
+        _, dp = mod.find_def(m.group(1))
+        mp = re.match(r'OpFMul %float (%[\w$]+) %float_0_318309873\s*$',
+                      dp or '')
+        if not mp:
+            die(f"{mod.name}: {r}'s first operand is not albedo*(1/pi)")
+        root = _st_albedo_channel(mod, mp.group(1))
+        if root is None:
+            die(f"{mod.name}: albedo channel walk failed for {r} -- "
+                f"cannot prove R/B identity, refusing to guess")
+        fetches.add(root[0])
+        out[r] = root[1]
+    if len(fetches) != 1 or sorted(out.values()) != [0, 1, 2]:
+        die(f"{mod.name}: triple channels are not {{0,1,2}} of one fetch: "
+            f"{out} over {fetches}")
+    return out
+
+
 # ------------------------------------------------------------- ST builder
-def build_st(mod, cfg, writes, strength):
+def build_st(mod, cfg, writes, strength, bleed=0.0):
     rf, rr = rhos(strength)
     glsl = mod.glsl
     if glsl is None:
@@ -182,6 +285,7 @@ def build_st(mod, cfg, writes, strength):
     if not ok:
         die(f"{mod.name}: no class form dominates the shading triple at "
             f"line {at + 1}")
+    chans = st_triple_channels(mod, triple) if bleed > 0.0 else {}
 
     consts, edits = [], []
 
@@ -217,21 +321,49 @@ def build_st(mod, cfg, writes, strength):
         f"        {c1} = OpFMul %float {cf} {cr}",
         f"        {g} = OpSelect %float {g0} {c1} {one}",
     ]
+    gr = gb = None
+    if bleed > 0.0:
+        # w = sat(1 - NoL/0.35)^2 off the SAME NoL the c1 factor consumes --
+        # the band and the factor cannot disagree. Gated on the same class
+        # bool; identity off skin, identity for NoL >= 0.35.
+        inv, zero = C(1.0 / BLEED_BAND), C(0.0)
+        kr, kb = C(BLEED_R * bleed), C(BLEED_B * bleed)
+        b1, b2, b3, w, wr, wb, mr, mb = (I() for _ in range(8))
+        gr, gb = I(), I()
+        ins += [
+            f"        {b1} = OpFMul %float {nol} {inv}",
+            f"        {b2} = OpFSub %float {one} {b1}",
+            f"        {b3} = OpExtInst %float {glsl} NClamp {b2} {zero} {one}",
+            f"        {w} = OpFMul %float {b3} {b3}",
+            f"        {wr} = OpFMul %float {w} {kr}",
+            f"        {wb} = OpFMul %float {w} {kb}",
+            f"        {mr} = OpFAdd %float {one} {wr}",
+            f"        {mb} = OpFSub %float {one} {wb}",
+            f"        {gr} = OpSelect %float {g0} {mr} {one}",
+            f"        {gb} = OpSelect %float {g0} {mb} {one}",
+        ]
     done = []
     for r, _ in triple:
         n = I()
         ins.append(f"        {n} = OpFMul %float {r} {g}")
-        uses = replace_all_uses(mod, r, n, at)
-        done.append({"id": r, "uses_rewritten": uses})
+        fin, ch = n, chans.get(r)
+        if ch == 0:
+            fin = I()
+            ins.append(f"        {fin} = OpFMul %float {n} {gr}")
+        elif ch == 2:
+            fin = I()
+            ins.append(f"        {fin} = OpFMul %float {n} {gb}")
+        uses = replace_all_uses(mod, r, fin, at)
+        done.append({"id": r, "chan": ch, "uses_rewritten": uses})
     edits.append((at, ins))
     return consts, edits, {
         "mode": "st-lit-arm", "strength": strength, "rho_f": rf, "rho_r": rr,
-        "nol": nol, "site_line": at + 1, "class_how": how,
+        "bleed_k": bleed, "nol": nol, "site_line": at + 1, "class_how": how,
         "gate_on": ok[0], "spliced": done}
 
 
 # ---------------------------------------------------------------- driver
-def process(path, outdir, strength):
+def process(path, outdir, strength, bleed=0.0):
     target_env = detect_target_env(path) or 'spv1.3'
     mod, problems = load_lenient(path)
     if not mod.ident:
@@ -245,7 +377,8 @@ def process(path, outdir, strength):
         rep['module_warnings'] = problems
 
     if h in ST:
-        consts, edits, rep['gi_c1'] = build_st(mod, cfg, writes, strength)
+        consts, edits, rep['gi_c1'] = build_st(mod, cfg, writes, strength,
+                                               bleed=bleed)
     elif h in SP:
         flat = cbar(strength)
         saved = PSP.GI_TINTS['gi-diffuse']
@@ -270,18 +403,26 @@ def process(path, outdir, strength):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--strength', type=float, required=True)
+    ap.add_argument('--bleed', type=float, default=0.0,
+                    help='terminator bleed on the ST pair (bleed_k; 0 = off, '
+                         'byte-identical to a pre-74 build)')
     ap.add_argument('--out', required=True)
     ap.add_argument('files', nargs='+')
     a = ap.parse_args()
     if not (0.0 < a.strength <= 1.0):
         die(f"--strength {a.strength} outside (0,1]")
+    if not (0.0 <= a.bleed <= 3.0):
+        die(f"--bleed {a.bleed} outside [0,3]")
     for p in a.files:
-        r = process(p, a.out, a.strength)
+        r = process(p, a.out, a.strength, bleed=a.bleed)
         gc = r['gi_c1']
-        print("%s  %s  %s" % (r['ident'], gc['mode'],
+        print("%s  %s  %s%s" % (r['ident'], gc['mode'],
               "site@%d" % gc['site_line'] if 'site_line' in gc
               else "painted=%d flat=%.4f" % (len(gc['painted']),
-                                             gc['flat_factor'])))
+                                             gc['flat_factor']),
+              "  bleed_k=%.2f chans=%s" % (gc['bleed_k'],
+                  [x['chan'] for x in gc['spliced']])
+              if gc.get('bleed_k') else ""))
 
 
 if __name__ == '__main__':

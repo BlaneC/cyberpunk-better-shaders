@@ -99,6 +99,37 @@ local SKIN_LEVELS = {
     { id = "gi-100",      label = "REAL-GLOSS + GI skin c1 at full strength" },
     -- 53: gi-50's raygens byte-verbatim + real-gloss-bleed compute (needs ser=class)
     { id = "gi-50-bleed",      label = "GI-50 + terminator bleed" },
+    -- A3: gi-50-bleed + class-1 peach-fuzz sheen (multiplicative Charlie; needs ser=class)
+    -- Kept for the record: 72 measured this form at 1.00-1.05x over the whole
+    -- face, which is the "extremely subtle" the user read on screen.
+    { id = "gi-50-bleed-sheen", label = "GI-50 + bleed + peach fuzz (58-era, measures near-invisible)" },
+    -- 72: the oil + fuzz ladder, each rung ONE variable over gi-50-bleed.
+    -- oil = the tier-3 wet-skin gloss (Fresnel reshape + roughness ceiling),
+    -- fuzz = the same Charlie lobe as above but ADDED, not multiplied.
+    -- 73: the fuzz lobe now cancels the module's own Schlick ramp (defres=1,
+    -- peach_max 1.0 -> 0.5). The user's A/B of the 72-era build: "a bit too
+    -- blown out. Losing the nicer deep red". That was the BACKLIT rim, where
+    -- F reaches ~0.87 and the terminator bleed's red lives; the front-lit
+    -- cheek band it did not touch is unchanged here.
+    -- 74: the user's A/B of 73's candidate ("literally perfect except"):
+    -- oil halved (n_s 0.60 -> 0.55, roughness cap 0.40 -> 0.45) and fuzz
+    -- halved (k_peach 1.0 -> 0.5) -- both were achromatic haze on dim/indoor
+    -- skin. The three rungs below are REBUILT IN PLACE at the new levels;
+    -- the 73-era candidate is parked as ...-hot.
+    { id = "gi-50-bleed-oil",       label = "GI-50 + bleed + HALF oil (v4 wet-skin gloss)" },
+    { id = "gi-50-bleed-sheen2",    label = "GI-50 + bleed + peach fuzz v4 (half strength)" },
+    { id = "gi-50-bleed-oil-sheen", label = "GI-50 + bleed + half OIL + half fuzz  <-- 74's candidate" },
+    -- 74: the bounce-light track. gi-50b = gi-50's raygens + the terminator
+    -- bleed ON BOUNCE LIGHT (the ReSTIR-GI diffuse ST pair's own NoL) --
+    -- indoors, where bounce dominates, the rosy terminator cue no longer
+    -- washes out. One variable (2 raygen files) vs the matching gi-50 rung.
+    { id = "gi-50b-bleed-oil-sheen", label = "GI-50b: candidate + bleed on BOUNCE light  <-- indoor depth" },
+    { id = "gi-50b",                 label = "GI-50b alone (bounce bleed, no oil/fuzz) -- attribution" },
+    -- the 73-era full-strength candidate, parked for the halving A/B
+    { id = "gi-50-bleed-oil-sheen-hot",  label = "  ^ 73-era FULL oil + full fuzz (too hot indoors)" },
+    -- the 72-era wide builds, parked for the A/B that decides the rim (73 §6)
+    { id = "gi-50-bleed-sheen2-wide",    label = "  ^ fuzz v2 wide rim (72-era, blown)" },
+    { id = "gi-50-bleed-oil-sheen-wide", label = "  ^ OIL + fuzz v2 wide rim (72-era, blown)" },
     -- 59: traced-thickness ear glow (A/B vs gi-50-bleed; read handoff/59 sec 6 BEFORE launching)
     { id = "earglow-lo",  label = "Ear glow lo (traced thickness, k=0.10)" },
     { id = "earglow",     label = "Ear glow (traced thickness, k=0.22)" },

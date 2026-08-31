@@ -4,6 +4,8 @@
 #
 #   ./dev/patch_compute_skin.sh              # c1 only (the shipping build)
 #   ./dev/patch_compute_skin.sh --sets       # the gloss STRENGTH LADDER, parked
+#   ./dev/patch_compute_skin.sh --only NAME  # ONE ladder rung, parked, and
+#                                            # nothing else in skin.set touched
 #   ./dev/patch_compute_skin.sh --hunt       # 10-class palette (diagnostic)
 #
 # --sets is the one to use for the Tier-3 skin gloss (handoff/27 Phase 2). The
@@ -93,13 +95,32 @@ LEVELS=(
     "bleed:off:$G0,bleed_k=1.0"
     "bleed-x:bleed:$G0,bleed_k=3.0"
     "real-gloss-bleed:real-gloss:$G0,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064,bleed_k=1.0"
+    # 71: the OIL layer. real-gloss-bleed carries $G0 -- the tier-3 gloss is
+    # OFF in it and emits nothing -- so switching it on is one conceptual
+    # variable (n_s + spec_gain + alpha_max) over the standing compute build,
+    # with alpha_scale/dcouple/micro/eyes/bleed held at the parent's values.
+    # `oil` starts subtle on purpose: the cap flattens the authored roughness
+    # variation above it (33 s5), and 0.1600 (roughness 0.40) only bites the
+    # rougher half of skin once alpha_scale=0.7 has already been applied.
+    # `oil-x` is the next rung up if the user wants it louder, not a diagnostic.
+    "real-gloss-bleed-oil:real-gloss-bleed:n_s=0.60,spec_gain=1.0,alpha_max=0.1600,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064,bleed_k=1.0"
+    "real-gloss-bleed-oil-x:real-gloss-bleed-oil:n_s=0.70,spec_gain=1.2,alpha_max=0.0900,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064,bleed_k=1.0"
+    # 74: HALF oil -- the user's on-screen read of full oil ("need about half
+    # the amount", achromatic grazing haze on dim/indoor skin). n_s=0.55 is
+    # the Fresnel half-step (exponent 4.5: +22% F at 60 deg vs full oil's
+    # +52%); alpha_max=0.2025 (roughness cap 0.45) halves the ceiling's
+    # reach -- it bites authored roughness >0.538 instead of >0.478, at
+    # ~60% of the magnitude (2.5x -> 1.55x at authored 0.60). Numbers from
+    # dev/fuzz_model.py.
+    "real-gloss-bleed-oilh:real-gloss-bleed-oil:n_s=0.55,spec_gain=1.0,alpha_max=0.2025,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064,bleed_k=1.0"
 )
 
-TIER=skin; EXTRA=(); SETS=0; SKINSPEC=0
+TIER=skin; EXTRA=(); SETS=0; SKINSPEC=0; ONLY=()
 while (( $# )); do
     case "$1" in
         --hunt) TIER=hunt ;;
         --tint) TIER=tint ;;
+        --only) ONLY+=("${2:?--only needs a level name}"); shift ;;
         # forwarded verbatim, so a tuning sweep is one command:
         #   ./dev/patch_compute_skin.sh --sets --set alpha_max=0.12
         --set) EXTRA+=(--set "${2:?--set needs K=V}"); shift ;;
@@ -116,6 +137,12 @@ fi
 if (( SETS && SKINSPEC )); then
     echo "--sets already builds the with-skinspec variant; drop --with-skinspec" >&2
     exit 2
+fi
+if (( ${#ONLY[@]} )); then
+    # NB: plain `(( SETS )) && { ...; }` would return 1 when SETS=0 and take
+    # `set -e` with it. Keep the test inside an `if`.
+    if (( SETS )); then echo "--only and --sets are exclusive" >&2; exit 2; fi
+    [[ "$TIER" == skin ]] || { echo "--only only applies to the skin tier" >&2; exit 2; }
 fi
 
 mapfile -t targets < <(python3 - "$DUMP_DIR" <<'PY'
@@ -281,6 +308,62 @@ COV
     RT_DONE=1
     (( BUILT > 0 )) || { echo "nothing patched" >&2; exit 1; }
 }
+
+# --only: build and park exactly the named ladder rung(s), and touch nothing
+# else. --sets OWNS skin.set/ -- it rm -rf's every non-probe dir in there on
+# every run -- which is right when it rebuilds the whole ladder and fatal when
+# all you want is one more compute rung: the composed rungs (gi-*, earglow,
+# sentinel) are built by other scripts from parked inputs and would go with it.
+# The served overlay (swaps.skin/) is left alone too; sync_settings.sh
+# materialises whichever rung `skinspec` names at the next launch.
+if (( ${#ONLY[@]} )); then
+    declare -A SPEC=()
+    for spec in "${LEVELS[@]}"; do
+        IFS=':' read -r lvl parent kv <<< "$spec"
+        SPEC[$lvl]="$parent:$kv"
+    done
+    for lvl in "${ONLY[@]}"; do
+        [[ -n "${SPEC[$lvl]:-}" ]] || { echo "--only '$lvl' is not a LEVELS entry" >&2; exit 2; }
+    done
+    for lvl in "${ONLY[@]}"; do
+        parent="${SPEC[$lvl]%%:*}"; kv="${SPEC[$lvl]#*:}"
+        setargs=(--with-skinspec)
+        IFS=',' read -ra kvs <<< "$kv"
+        for one in "${kvs[@]}"; do setargs+=(--set "$one"); done
+        echo "--- set '$lvl' (c1 + $kv; parent $parent) ---"
+        build_into "$MOD_DIR/swaps.skin.$lvl" "${setargs[@]}"
+        # Differ-from-parent, against the PARKED parent: --only does not
+        # rebuild the ladder, so the only honest comparison is against what is
+        # actually installed. Equal coverage is checked the same way -- a rung
+        # that patched a module its parent does not have is not an A/B.
+        pdir="$INSTALL_DIR/skin.set/$parent"
+        if [[ -d "$pdir" ]]; then
+            d=0; miss=0
+            for f in "$MOD_DIR/swaps.skin.$lvl"/*.spv; do
+                b="$(basename "$f")"
+                if [[ -f "$pdir/$b" ]]; then
+                    cmp -s "$f" "$pdir/$b" || d=$((d+1))
+                else
+                    miss=$((miss+1))
+                fi
+            done
+            (( miss == 0 )) || { echo "'$lvl' has $miss module(s) the parked '$parent' does not -- not a clean A/B" >&2; exit 1; }
+            (( d > 0 )) || { echo "'$lvl' is byte-identical to the parked '$parent'" >&2; exit 1; }
+            echo "  $lvl: $d of $(ls "$MOD_DIR/swaps.skin.$lvl"/*.spv | wc -l) module(s) differ from parked $parent"
+        else
+            echo "  NOTE: skin.set/$parent is not parked -- differ-from-parent check skipped" >&2
+        fi
+        vd="$INSTALL_DIR/skin.set/$lvl"
+        mkdir -p "$vd"; rm -f "$vd"/*.spv
+        # -p: the mtime must come from the build, not the copy (the cp -p
+        # GOTCHA -- otherwise every launch hashes a fresh payload).
+        cp -pf "$MOD_DIR/swaps.skin.$lvl"/*.spv "$vd/"
+        echo "  parked -> $vd"
+    done
+    echo "swaps.skin/ untouched; select it with skinspec=${ONLY[0]} (or compose it:"
+    echo "  ./dev/build_gi_bleed.sh --install --parent ${ONLY[0]} --name gi-50-...)"
+    exit 0
+fi
 
 if (( SETS )); then
     echo "--- set 'off' (tier-1 c1 only, the gloss-free baseline) ---"
