@@ -87,11 +87,18 @@ local SKIN_LEVELS = {
     { id = "eyes-glassy", label = "Glassy eyes only (cap 0.04, diagnostic)" },
     { id = "real",        label = "REAL: rougher x1.3 + coupling + micro + wet eyes" },
     { id = "real-gloss",  label = "REAL-GLOSS: glossier x0.7 + coupling + micro + wet eyes" },
+    -- 53: terminator colour bleed (43 A7 kept half): the shadow edge warms --
+    -- red diffuses further than green, blue less. Multiplicative, skin-gated.
+    { id = "bleed",            label = "Terminator bleed only -- warm shadow edge" },
+    { id = "bleed-x",          label = "Terminator bleed x3 -- diagnostic" },
+    { id = "real-gloss-bleed", label = "REAL-GLOSS + terminator bleed" },
     -- 48 §8 diagnostic: hue-paints skin per GI writer family (needs ser=class)
     { id = "probe-gi",    label = "PROBE: GI writer hue paint -- ref green / GI-diff red / GI-spec blue" },
     -- 50: real-gloss + tier-1 c1 on bounce-lit skin (ReSTIR-GI diffuse; needs ser=class)
     { id = "gi-50",       label = "REAL-GLOSS + GI skin c1 at half strength" },
     { id = "gi-100",      label = "REAL-GLOSS + GI skin c1 at full strength" },
+    -- 53: gi-50's raygens byte-verbatim + real-gloss-bleed compute (needs ser=class)
+    { id = "gi-50-bleed",      label = "GI-50 + terminator bleed" },
 }
 local SKIN_LABELS, SKIN_INDEX = {}, {}
 for i, e in ipairs(SKIN_LEVELS) do
@@ -108,6 +115,7 @@ local KERNEL_PRESETS = {
     { id = "balanced", label = "Balanced -- between detail and callisto" },
     { id = "callisto", label = "Callisto -- wide red tail, softest" },
     { id = "vanilla",  label = "Vanilla (re-authored) -- should match Off; a tooling check" },
+    { id = "spectral", label = "Spectral -- per-channel biophysical falloff (Jensen skin1)" },
 }
 local KERNEL_LABELS, KERNEL_INDEX = {}, {}
 for i, e in ipairs(KERNEL_PRESETS) do
@@ -404,6 +412,8 @@ registerForEvent("onInit", function()
         .. "(softest, most 'glow'); Balanced sits between. Vanilla is a "
         .. "re-authored copy of the engine kernel and should be "
         .. "indistinguishable from Off -- if it is not, the tooling is wrong. "
+        .. "Spectral gives each channel its own measured diffusion width (red "
+        .. "widest, blue tightest) at the engine's own blur radius. "
         .. "Engine data, not a shader: unaffected by the MASTER switch. "
         .. "Applies on next launch.",
         KERNEL_LABELS, KERNEL_INDEX[brdf.kernel] or 2, 1,

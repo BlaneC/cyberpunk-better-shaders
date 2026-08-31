@@ -86,6 +86,13 @@ LEVELS=(
     # the combined "realistic skin" candidates
     "real:rough-1.3:$G0,alpha_scale=1.3,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064"
     "real-gloss:gloss-0.7:$G0,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064"
+    # terminator colour bleed (43 A7 kept half; handoff/53). bleed-x is the
+    # DIAGNOSTIC rung ("is it working"), not a look candidate -- 33's ladder
+    # convention. real-gloss-bleed = the standing compute build + one variable,
+    # and dev/build_gi_bleed.sh composes it under gi-50's raygens.
+    "bleed:off:$G0,bleed_k=1.0"
+    "bleed-x:bleed:$G0,bleed_k=3.0"
+    "real-gloss-bleed:real-gloss:$G0,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064,bleed_k=1.0"
 )
 
 TIER=skin; EXTRA=(); SETS=0; SKINSPEC=0
@@ -213,7 +220,7 @@ build_into() {
 import glob, json, os, sys
 dest = sys.argv[1]
 tot = dict(mods=0, c1=0, chans=0, alphas=0, lifted=0, dcouple=0, micro=0,
-           micro_skipped=0)
+           micro_skipped=0, bleed=0, bleed_skipped=0, bleed_dup=0)
 bad = []
 micro_short = []
 for f in sorted(glob.glob(os.path.join(dest, '.skin.*.json'))):
@@ -234,6 +241,9 @@ for f in sorted(glob.glob(os.path.join(dest, '.skin.*.json'))):
     if nms:
         micro_short.append('%s:%d/%d' % (d['module'][:8], di.get('micro_sites', 0),
                                          di.get('micro_sites', 0) + nms))
+    tot['bleed'] += di.get('bleed_sites', 0)
+    tot['bleed_skipped'] += len(di.get('bleed_skipped', []))
+    tot['bleed_dup'] += len(di.get('bleed_dup', []))
     if 'OpPhi' in d.get('class_gate', {}).get('def', ''):
         tot['lifted'] += 1
     n = (len(di.get('skipped_dom', [])) + len(sp.get('skipped_dom', []))
@@ -254,6 +264,13 @@ if tot['dcouple'] or tot['micro'] or tot['micro_skipped']:
           'no reachable albedo: %s)' % (tot['dcouple'], tot['micro'],
                                          tot['micro_skipped'],
                                          ' '.join(micro_short) or '-'))
+if tot['bleed'] or tot['bleed_skipped'] or tot['bleed_dup']:
+    # bleed shares micro's structural limit: no reachable albedo triple means
+    # no channel identity, so those sites skip (never guess a channel). A
+    # nonzero dup count would mean two sites share a fan-out FMul -- census
+    # says zero; if it ever fires, read handoff/53 before trusting the rung.
+    print('  bleed: %d sites, %d skipped (no channel triple), %d dup-guarded'
+          % (tot['bleed'], tot['bleed_skipped'], tot['bleed_dup']))
 if bad:
     sys.stderr.write('  SITES SKIPPED -- the class gate does not reach the shading:\n')
     for m, why in bad[:10]:

@@ -380,6 +380,135 @@ def find_diffuse_colour(mod, cfg, site):
     return None
 
 
+
+def _albedo_channel_root(mod, trip_id):
+    """The unique (vector, component) the albedo operand of a diffuse-colour
+    id roots at. Multi-path bounded walk over the decode idioms measured on
+    the anchored set (2026-08-30 census, 150/150 eligible sites): the sRGB
+    squaring decode (FMul x x), literal-scaled FMul/FAdd, the material-guard
+    OpPhi, the white-override OpSelect, and the uint decode (ConvertUToF).
+    Fails -- returns None -- unless EVERY path lands on ONE component of ONE
+    v4 image fetch; a walk that reaches two different roots proves nothing
+    and must not guess (39: never guess a channel identity).
+    """
+    _, d = mod.find_def(trip_id)
+    mp = re.match(r'OpPhi %float((?:\s+%\w+)+)\s*$', d or '')
+    if mp:
+        vals = [v for v in mp.group(1).split()[0::2] if v != '%float_0']
+        if not vals:
+            return None
+        d = mod.find_def(vals[0])[1]
+    m = re.match(r'OpFSub %float (%\w+) (%\w+)\s*$', d or '')
+    if not m:
+        return None
+    roots, seen, stack = set(), set(), [(m.group(1), 0)]
+    while stack:
+        cur, depth = stack.pop()
+        if cur in seen:
+            continue
+        if depth > 6:
+            return None
+        seen.add(cur)
+        _, dx = mod.find_def(cur)
+        if dx is None:
+            return None
+        me = re.match(r'OpCompositeExtract %(?:float|uint) (%\w+) (\d+)\s*$', dx)
+        if me:
+            roots.add((me.group(1), int(me.group(2))))
+            continue
+        mm = re.match(r'OpF(?:Mul|Add) %float (%\w+) (%\w+)\s*$', dx)
+        if mm:
+            a, b = mm.groups()
+            if a == b:
+                stack.append((a, depth + 1))
+            elif a.startswith('%float_'):
+                stack.append((b, depth + 1))
+            elif b.startswith('%float_'):
+                stack.append((a, depth + 1))
+            else:
+                return None
+            continue
+        mc = re.match(r'OpConvertUToF %float (%\w+)\s*$', dx)
+        if mc:
+            stack.append((mc.group(1), depth + 1))
+            continue
+        ms = re.match(r'OpSelect %float %\w+ (%\w+) (%\w+)\s*$', dx)
+        if ms:
+            stack += [(op, depth + 1) for op in ms.groups()
+                      if not op.startswith('%float_')]
+            continue
+        mp2 = re.match(r'OpPhi %float((?:\s+%\w+)+)\s*$', dx)
+        if mp2:
+            stack += [(op, depth + 1) for op in set(mp2.group(1).split()[0::2])
+                      if not op.startswith('%float_')]
+            continue
+        return None
+    if len(roots) != 1:
+        return None
+    vec, idx = next(iter(roots))
+    _, dv = mod.find_def(vec)
+    if not re.match(r'OpImage(?:Fetch|Read) %v4(?:float|uint) ', dv or ''):
+        return None
+    return (vec, idx)
+
+
+def find_bleed_targets(mod, cfg, site):
+    """{channel: (result_id, def_line)} for a c1 site's three per-channel
+    fan-out FMuls, channel-identified by the albedo extract component.
+
+    Same walk as find_diffuse_colour (scalar -> up to 3 single-consumer hops
+    -> 3 FMul consumers -> the diffuse-colour triple), but it additionally
+    keeps the CONSUMER ids and names each one's channel by walking its
+    diffuse colour to the albedo fetch component (_albedo_channel_root).
+    Requires all three channels {0,1,2} distinct and from one fetch, else
+    None. Pure -- rewrites nothing, safe to run before any splice
+    (GOTCHAS 12). Census 2026-08-30 over the shipped 77: 173 sites, 150
+    eligible, 23 with no reachable albedo (the identical micro_k skip set),
+    0 sites where two sites share a consumer id.
+    """
+    cur = site['scalar']
+    cons = None
+    for _ in range(4):
+        c3 = _fmul_consumers(mod, cur)
+        if len(c3) == 3:
+            cons = c3
+            break
+        c1 = _fmul_consumers(mod, cur, ('OpFMul', 'OpFAdd'))
+        if len(c1) != 1:
+            break
+        cur = c1[0][0]
+    if not cons:
+        return None
+
+    def expand(idt, depth):
+        out = [idt]
+        if depth:
+            _, d = mod.find_def(idt)
+            m = re.match(r'OpFMul %float (%\w+) (%\w+)\s*$', d or '')
+            if m:
+                for op in m.groups():
+                    out += expand(op, depth - 1)
+        return out
+    trees = [expand(c[1], 4) for c in cons]
+    for k in range(min(len(t) for t in trees)):
+        trip = [t[k] for t in trees]
+        if len(set(trip)) == 3 and all(_is_diffuse_colour(mod, x) for x in trip) \
+                and all(cfg.dominates_line(x, site['line']) for x in trip):
+            chans = [_albedo_channel_root(mod, x) for x in trip]
+            if any(c is None for c in chans):
+                return None
+            if len(set(v for v, _ in chans)) != 1:
+                return None
+            if sorted(ix for _, ix in chans) != [0, 1, 2]:
+                return None
+            out = {}
+            for (rid, _), (_, ix) in zip(cons, chans):
+                rline, _ = mod.find_def(rid)
+                out[ix] = (rid, rline)
+            return out
+    return None
+
+
 def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
     """Tier-1 c1 at every Disney diffuse site, gated on skin (class 1).
 
@@ -424,6 +553,32 @@ def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
         mk = C(micro_k)
         wr, wg, wb = C(0.2126), C(0.7152), C(0.0722)
         rep["micro_sites"], rep["micro_skipped"] = 0, []
+    bleed_k = knobs.get("bleed_k", 0.0)
+    if bleed_k > 0.0:
+        # 43 A7 (the kept half): terminator colour bleed. Red diffuses
+        # further through skin than green, blue less, so the lit-side falloff
+        # at the terminator warms before it dies. Emitted as PER-CHANNEL
+        # multiplies on the site's three fan-out FMuls -- multiplicative
+        # only (38 0d / 39 s3.3): where the diffuse term is zero it stays
+        # zero, so the 720p tile grid cannot appear. Shape:
+        #   w   = sat(1 - NoL/0.35)^2          band: NoL in [0, 0.35)
+        #   m_R = 1 + k*0.336*w   m_G = 1   m_B = 1 - k*0.101*w
+        # Amplitude ratio 0.336:0.101 = (d_R-d_G):(d_G-d_B) from the
+        # Jensen-2001 skin1 diffuse mfp ratios d_RGB = 2.68:1:0.50 (the same
+        # physics the A6 spectral kernel uses; handoff/53 for the derivation).
+        # The band width is a FIXED stylization constant: physically it
+        # scales with curvature*d, but raw 720p depth taps cannot be
+        # calibrated to curvature without the projection constants, and an
+        # uncalibrated threshold knob is exactly the 39 s3.2 proxy trap.
+        # Detect BEFORE emitting anything (GOTCHAS 12), same as micro above.
+        bleed = {s['line']: find_bleed_targets(mod, cfg, s) for s in sites}
+        bleed_claimed = set()
+        invb = C(1.0 / 0.35)
+        bzero = C(0.0)
+        bR = C(bleed_k * 0.336)
+        bB = C(bleed_k * 0.101)
+        rep["bleed_sites"] = 0
+        rep["bleed_skipped"], rep["bleed_dup"] = [], []
     for s in sites:
         if not cfg.dominates_line(dom_id, s['line']):
             rep["skipped_dom"].append(s['line'] + 1)
@@ -517,9 +672,56 @@ def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
                 ]
                 fac = m3
                 rep["micro_sites"] += 1
+        bleed_ids = None
+        if bleed_k > 0.0:
+            tgt = bleed.get(s['line'])
+            if tgt is None:
+                rep["bleed_skipped"].append(s['line'] + 1)
+            elif tgt[0][0] in bleed_claimed or tgt[2][0] in bleed_claimed:
+                # Two sites walking to the same fan-out FMul would mean two
+                # replace_all_uses on one id -- the second is a silent no-op
+                # (31 s4.1). Census says this never happens on the shipped
+                # 77; guarded anyway, and the whole site skips so a face is
+                # never HALF-bled.
+                rep["bleed_dup"].append(s['line'] + 1)
+            else:
+                bleed_claimed.update((tgt[0][0], tgt[2][0]))
+                bq, bs0, bsat, bw, btR, btB, bmR0, bmB0 = [I() for _ in range(8)]
+                ins += [
+                    f"        {bq} = OpFMul %float {s['nol']} {invb}",
+                    f"        {bs0} = OpFSub %float {one} {bq}",
+                    f"        {bsat} = OpExtInst %float {gl} NClamp {bs0} {bzero} {one}",
+                    f"        {bw} = OpFMul %float {bsat} {bsat}",
+                    f"        {btR} = OpFMul %float {bw} {bR}",
+                    f"        {btB} = OpFMul %float {bw} {bB}",
+                    f"        {bmR0} = OpFAdd %float {one} {btR}",
+                    f"        {bmB0} = OpFSub %float {one} {btB}",
+                ]
+                if skin_gate is not None:
+                    bmR, bmB = I(), I()
+                    ins += [
+                        f"        {bmR} = OpSelect %float {skin_gate} {bmR0} {one}",
+                        f"        {bmB} = OpSelect %float {skin_gate} {bmB0} {one}",
+                    ]
+                else:
+                    bmR, bmB = bmR0, bmB0
+                bleed_ids = (tgt, bmR, bmB)
         ins.append(f"        {out} = OpFMul %float {s['scalar']} {fac}")
         replace_all_uses(mod, s['scalar'], out, s['line'])
         edits.append((s['line'], ins))
+        if bleed_ids:
+            tgt, bmR, bmB = bleed_ids
+            # The two multiplies land at the CONSUMER defs (per-channel), not
+            # at the site: each rewrites one per-site-unique fan-out id, so
+            # the one-replace-per-id rule holds by construction. The m ids
+            # are defined in the site's own block, which dominates every
+            # consumer (SSA: the scalar's def already dominates them).
+            for ix, mv in ((0, bmR), (2, bmB)):
+                rid, rline = tgt[ix]
+                nb = I()
+                edits.append((rline, [f"        {nb} = OpFMul %float {rid} {mv}"]))
+                replace_all_uses(mod, rid, nb, rline)
+            rep["bleed_sites"] += 1
         rep["c1_sites"] += 1
     return consts, edits, rep
 
@@ -1064,7 +1266,7 @@ def process(path, outdir, tier, knobs, hunt_classes, do_rt=True,
         rep['params'] = {k: knobs[k] for k in
                          ('rho_f', 'rho_r', 'n_f', 'm_f', 'n_r', 'm_r',
                           'n_s', 'spec_gain', 'alpha_max', 'alpha_scale',
-                          'eye_alpha_max', 'dcouple', 'micro_k')}
+                          'eye_alpha_max', 'dcouple', 'micro_k', 'bleed_k')}
     else:
         die(f"unknown tier {tier}")
 

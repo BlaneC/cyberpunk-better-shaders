@@ -119,6 +119,11 @@ for reach. In order of look-payoff:
    radiometry.
 4. Whenever convenient: E8 sun size (live, no launch) · E11 probe legend
    decode (offline, `44` §2.9).
+5. **The look plan is `51`** (2026-08-30 night): A6 spectral kernel (`52`)
+   and A7 terminator bleed (`53`) are **built, validated, parked, registered
+   in `init.lua` — never on screen**. Next look session: `kernel=spectral`
+   vs `detail`, then `gi-50-bleed` vs `gi-50` (`53` §8; `make install`
+   first). D3 / A8 / M1 and the ear-glow route resume from `51` §4–§7.
    **E9 SER frame-time: closed by the user 2026-08-30** (*"noticeably faster
    by feel… that's enough"*). **The probe-gi launch (19:36) is the first to
    actually serve a SER splice** — `ser=class:in-skin` (the hints ride the

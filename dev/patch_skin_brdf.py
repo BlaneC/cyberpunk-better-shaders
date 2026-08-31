@@ -104,6 +104,9 @@ KNOBS = {
                            # diffuse *= (1-s(1-NoL)^5)(1-s(1-NoV)^5)
     "micro_k": 0.0,        # albedo-driven micro-shadowing (43 M5):
                            # diffuse *= sat(1 - (1-NoL)^2 k (1-lum(albedo)))
+    "bleed_k": 0.0,        # terminator colour bleed (43 A7, handoff/53):
+                           # per-channel multiply on the diffuse fan-out,
+                           # m_R/m_B from the spectral dmfp ratios
     # GI-resolver dual-lobe variants: wider lobes (many indirect samples make
     # a tight lobe read as noise), TRT-weighted (the coloured glint shows in
     # bounce light). m_dual_gi defaults to m_dual (shared on/off).
@@ -116,7 +119,8 @@ VANILLA = dict(KNOBS, tint=(1.0, 1.0, 1.0), rho_f=1.0, rho_r=1.0,
                s_h=1.0, a_min=0.0, k_sheen=0.0, w_wrap=0.0, m_aniso=0.0,
                trt_r=1.0, trt_g=1.0, trt_b=1.0,
                n_s=0.5, spec_gain=1.0, alpha_max=1.0,
-               alpha_scale=1.0, eye_alpha_max=1.0, dcouple=0.0, micro_k=0.0)
+               alpha_scale=1.0, eye_alpha_max=1.0, dcouple=0.0, micro_k=0.0,
+               bleed_k=0.0)
 
 # gbuffer material class for hair -- NOT yet identified; see HAIR_HANDOFF.md
 # section 1 for the discovery procedure. Skin is 1.
