@@ -1,8 +1,73 @@
-# CallistoSSS — current state (2026-08-30 night, after the gi-50 A/B)
+# CallistoSSS — current state (2026-08-31, after the four-launch gate night)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
 *working* — only an on-screen A/B is.
+
+**Newest first (2026-08-30 23:57 → 2026-08-31 01:46, five launches):**
+
+- **Ear glow: nose + coverage WIN (v4), sliver leaks RETURN + "lightbulb"
+  transfer look; two tracks proposed — `60`→`69`.** `earglow-hi`
+  (user-run, 01:46, serve + settings verified): glow under clothing, at the
+  hair seam, in eye corners, on lit skin, on occluded ears. Three
+  structural defects — the thickness ray is material-blind, local
+  thickness ≠ sun-path transmission, and the backlit gate opens in
+  shading-normal crevices on lit faces. NOT the polarity bug (verified in
+  the deployed binary) and NOT `39`'s two defects — both stayed dead. The
+  mechanism half is a win: an injected trace at a NEW site with overridden
+  operands executes and round-trips CHS hit distance, closing `56`'s
+  scope limit for this family. Routes priced in `60` §5; the (b) read is
+  DONE — (b)-as-specified is dead (`61`: the reference CHS carries no
+  identity; the instance-writing CHS is live-PT's). V2 = (a)+(b‴) (`62`)
+  **LAUNCHED 08:01 and it mostly WINS (`63`)** — user: *"AGONIZINGLY
+  CLOSE… OTHERWISE IT LOOKS PERFECT"*; five artifact classes down to
+  three, all pixel↔primary boundary leaks (hair strands, collar top edge,
+  fringe-over-forehead — `63` §1 has the unifying mechanism). V3 LAUNCHED
+  08:43/08:47/08:53 (`64` built it, `65` scores it): **leaks DEAD** (strands,
+  collar — consistency gate, attribution forced), but the gate **eats the
+  feature** — glow survives only at the concave ear crease; helix rim, ear
+  top, nose all gated off. k-invariance (user's own hi run) proves gated-
+  not-dim. Two suspects, inseparable this launch: flat ε=5mm vs grazing
+  footprint (kills rims structurally, `65` §1 math), and albedo 0.10 vs
+  tattoo/texture (`64` §5's own envelope; S3's ear is tattooed). NEXT =
+  attribution probe LAUNCHED 09:29 and it ANSWERED (`67`): the ear kill
+  is cons AND albedo jointly (yellow, B=0.0); the cons compare fails
+  FLAT-ON at ~2 m (night red) ⇒ distance-scaled bias ~3–5 mm/m, grazing
+  theory demoted; vis + thin-hit physics-correct (magenta cleavage,
+  unpainted thick neck); nose FIRES (sunward nostril blue). v4 BUILT and
+  LAUNCHED 10:52 (`68` build, `69` result): offline bias read found the
+  error is LATERAL registration, removed by projecting onto the view ray —
+  one-sided distance-aware ε, albedo back to 0.25. On screen: nose WINS,
+  ear coverage up, but strand/collar leaks RETURN (registered row — v4 is
+  the first honest leak test) and the look failure changed species:
+  single-tap Beer–Lambert + binary gates pool glow into a "lightbulb
+  behind the ear" (`69` §1). Proposed, NOT yet delegated (`69` §2):
+  Track L = s-band probe (measures leak-vs-truth separation), Track D =
+  diffusion transfer + wrap-envelope A/B ladder. **No blind ε tuning**
+  (`64` §8 row invoked). **Do not tune k.** Selector stays `gi-50-bleed`
+  between looks.
+- **G-U5 PASSES — `56`.** A new static `OpTraceRayKHR` spliced into a raygen
+  **executes** and round-trips a payload written by the pipeline's own CHS.
+  **Traced-thickness ear glow (`51` §7 step 3) is unblocked** — that is now a
+  *build*, not a gate. `GOTCHAS`' flat "a second trace does not execute" is
+  **overturned** (it was one sample in the shadow family with hand-picked SBT
+  indices; H2 dead, H3 was the cause). Two limits: the **miss** leg is not
+  established (rung A dark), and only the **reference raygen** family was
+  tested.
+- **G-U4 opens but is coarse — `57`.** The sub-enum is readable from compute,
+  but **chrome has no subtype ⇒ A8 is DEAD**; **skin does not split ⇒ question
+  (c) answered *no*** and `c1sub` need not launch; hair carries ≥2 subtypes,
+  corroborating `54`. A2/A3 was confounded by the `both` merge — then
+  **answered YES by `probe-sheen` an hour later (next bullet)**.
+- **A2/A3 answers YES — `58`.** The user ran `probe-sheen` alone (00:47,
+  serve audit-verified, settings pinned): white grazing sheen on clothing,
+  vegetation and skin — the pre-registered "rim on everything" row. The
+  specular-site family is alive, `40` §10's doomsday null is dead, and
+  **A3 peach fuzz is now a build** (class-1 gate + `0d` bounds, one
+  variable at the standing base). The ear-glow build landed the same night
+  (`59`) — and **failed on screen an hour later (see the bullet above)**.
+- Doc fixes applied the same night: `55` §5 said `ptreg` **off**, which would
+  have refused the rung (`gi-stale-ptq`) — it is `ptreg` **on** (`56` §6).
 
 **Next model: read `47-PROCESS-TRACE.md` first — it is the whole 2026-08-30
 afternoon in one document (eight launches, what was decided and why, what was
@@ -127,9 +192,14 @@ for reach. In order of look-payoff:
    are look-confirmed rungs. Same night: **G-U3 answered negative** (`54` —
    the R8_UINT is the light-channel mask, U3/B2 retired) and the **G-U5
    sentinel is built, parked, registered and deployed** (`55`; two rungs,
-   interpretation pre-registered). Next: two launches — `probe-both`, then
-   `sentinel` — and the post-launch analysis runbook is **`51` §9** (a
-   clean session starts there). D3 / M1 resume from `51` §4/§6.
+   interpretation pre-registered). ~~Next: two launches — `probe-both`, then
+   `sentinel`~~ **ALL THREE RAN 2026-08-30/31 — see the "newest first" block at
+   the top of this page: `56` (G-U5 passes, traced thickness unblocked) and
+   `57` (G-U4 coarse, A8 dead; sheen answered YES an hour later by
+   user-run `probe-sheen` — `58`).** Order was `sentinel`
+   → `sentinel-b` → `probe-both`; run the CET-selector rungs before the
+   hand-edited one again. The runbook that planned them is **`51` §9**.
+   D3 / M1 resume from `51` §4/§6.
    **E9 SER frame-time: closed by the user 2026-08-30** (*"noticeably faster
    by feel… that's enough"*). **The probe-gi launch (19:36) is the first to
    actually serve a SER splice** — `ser=class:in-skin` (the hints ride the
@@ -144,7 +214,15 @@ state and regime breaks are recorded facts from here on, not inferences.
 
 Hair BRDF (`19`, `27` §8) · Tier-4 backlit transmission (`39`) · `skinray`
 and the numeric sliders (`43`) · the two-ray shadow splice (`26` §7d) ·
-`38`'s "+2 material channel" idea (`44` §2.4: it is the shading normal).
+`38`'s "+2 material channel" idea (`44` §2.4: it is the shading normal) ·
+**A8 thin-film iridescence on chrome (`57` §3.1: chrome has no subtype, so it
+cannot be gated; the ObjectID-hash fallback is noise-per-object per `43`)** ·
+**question (c), per-subtype skin BRDF (`57` §3.2: class 1 does not split)**.
+
+Note the two-ray shadow splice above stays removed, but the *reason* has
+changed: not "a second trace cannot execute" (overturned, `56` §4) but
+`sctrl`'s hand-picked SBT indices (H3). A rebuild would have to clone operands
+by id the way `55` does — and no current feature wants it.
 
 ## Where things are
 

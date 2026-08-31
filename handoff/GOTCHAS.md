@@ -393,13 +393,30 @@ first and confirm it from the launch journal before building anything on it.
 - A reported regression is only attributable if exactly one variable moved
   **and** the launch is fingerprinted. The "PT tier-1 hair regression" was
   neither, and did not exist -- it was the shadow set changing underneath.
-- **A second `OpTraceRayKHR` spliced into a raygen shader does not execute** in
-  this game under vkd3d-proton. The edit disassembles correctly, `spirv-val`
-  passes, the swap is served -- and the result is bit-for-bit vanilla on screen.
-  Proven by `sctrl`, whose second ray was unculled with the same mask, so a
-  working splice *had* to reproduce `full-shadow`. Before building anything on
-  a second trace, prove the trace runs: write a sentinel into the payload from
-  a miss shader and read it back.
+- ~~**A second `OpTraceRayKHR` spliced into a raygen shader does not execute** in
+  this game under vkd3d-proton.~~ **OVERTURNED ON SCREEN 2026-08-31 (`56`).**
+  The original claim rested on **one** sample -- `sctrl` (`26` §7d), in the
+  **shadow** pipeline family, with payload and SBT indices picked by hand. The
+  `55` sentinel engineered that difference out by cloning every operand by id
+  from a trace that demonstrably executes, one instruction later, and in the
+  **reference** raygen family it **executes and round-trips a payload written
+  by the CHS** (`56` §2: paint on geometry, sky clean in the same frame as the
+  identity control). Of `26` §7d's hypotheses: **H2 (driver/vkd3d forbids
+  multiple static sites) is DEAD**; **H3 (wrong SBT indices) is the surviving
+  explanation for `sctrl`**.
+  **Scope -- do not over-generalise this in the other direction either.** Both
+  sentinel rungs put the injected trace in a **raygen**. A second static site in
+  a hit or miss shader is untested, and the shadow family was not retested. The
+  supported claim is: *a second static trace site executes in the reference
+  raygen family when every operand is cloned by id from a live trace.*
+  The original advice still stands and is what produced this correction: before
+  building on a second trace, prove the trace runs with an armed-payload
+  sentinel and an identity-when-dead construction, and **pre-register what each
+  outcome means before looking** (`55` §4).
+  One live sub-finding: rung A (cullMask 0 + a patched `ms_empty_main`
+  handshake) stayed dark, so **payload round-trip via the miss shader at
+  `missIndex 0` is NOT established** -- only via the CHS. Anything needing a
+  miss-*written* term must re-test that leg.
 
 ### A reading can land on the wrong sibling too, not just a patch
 

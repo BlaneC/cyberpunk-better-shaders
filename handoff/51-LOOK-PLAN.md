@@ -8,6 +8,11 @@ The ear-glow (traced transmission) route from the same planning session is
 §7 — it is not in the ranked five but it is the standing answer to the
 user's original itch.
 
+> **2026-08-31: the gate launches are read (`56`/`57`/`58`). Start at §10 —
+> the post-gate board: ear glow is a build now (delegated, doc `59`), `29`
+> Part B is open, A8 is dead, and the sheen gate PASSED — A3 peach fuzz is
+> buildable (`58`). §§1–9 are the pre-gate plan.**
+
 ## 1. Gate map — what shares what, and why
 
 A gate is a one-shot proof of *mechanism* (does a splice at stage X execute;
@@ -76,11 +81,27 @@ Identity at `k=0`. Rung parked so it can A/B **at the standing config**
 3. One launch, eyeball A/B. Raygen serve machinery from `50` (MANIFEST,
    provenance guard, `ab_launch_audit.py`) is the template.
 
-## 5. A8 — thin-film iridescence on chrome (DEFERRED)
+## 5. A8 — thin-film iridescence on chrome (**DEAD — gate failed 2026-08-31**)
 
-1. **Gate: launch the parked subtype probe** (`probe-both`, built in `40`,
-   parked in `skin.set/`) — also answers cloth + ungated sheen (A2/A3) in the
-   same launch. Decode the legend (E11, offline, still open as of `46`).
+> **The gate answered NO (`57` §3.1).** `probe-both` launched; the R-man's
+> chrome cheek plate reads `0.536/0.279/0.186` against his own adjacent skin at
+> `0.500/0.305/0.194` — same hue family, inside albedo noise. User's independent
+> read: *"I dont see normal cyberware get any different colour on bodies."*
+> **Chrome cyberware has no subtype of its own, so step 2's Belcour-Barla route
+> cannot be gated.** The fallback (ObjectID-hashed film thickness) is what `43`
+> already calls noise-per-object. **Recommendation: drop A8, do not build the
+> fallback.** The steps below are kept only as the record of what was gated.
+>
+> Same launch also: skin does **not** split (`57` §3.2), so `c1sub` need not
+> launch; hair carries ≥2 subtypes (`57` §3.3). **A2/A3 sheen is still
+> unanswered** — the `both` merge confounded it (`57` §4).
+
+1. ~~**Gate: launch the parked subtype probe**~~ **DONE 2026-08-31 (`57`).**
+   (`probe-both`, built in `40`, parked in `skin.set/`) — was also meant to
+   answer cloth + ungated sheen (A2/A3) in the same launch; it did **not**,
+   see `57` §4. Decode the legend (E11, offline, still open as of `46`) — and
+   `57` §5 says that needs a **vanilla control at the same camera**, not
+   another probe.
 2. If chrome cyberware has its own subtype: Belcour-Barla airy reflectance,
    ~20 instructions at the Schlick sites (metallic already in a register,
    `22` §1), gated on that subtype. If not: fallback is ObjectID-hashed film
@@ -124,16 +145,19 @@ the saturated red glow IS the spectral falloff, no tint knob needed.
    only honest route. Side-finding: material subtypes gate live GI (hair
    family → bit 512, eye subtype 25 → bit 1024) — partial subtype decode
    before `probe-both` ever launches.
-2. **G-U5, payload sentinel — BUILT AND PARKED 2026-08-30 night (`55`),
-   launch pending.** Two rungs: `sentinel` (A, magenta = full pass) and
-   `sentinel-b` (B, only if A dark; cyan = trace runs, miss mapping
-   failed). Interpretation table pre-registered in `55` §4; identity-when-
-   dead is the negative control. Originally (`29` §B5, unrun for four
-   documents): miss shader writes a constant into the payload, read back
-   after iteration 2, written somewhere visible. Gates traced thickness AND
-   all of `29` Part B. Note `26` §7d: a *second static* `OpTraceRayKHR`
-   validates, serves, does not execute — the sentinel is exactly the
-   experiment that maps what does.
+2. ~~**G-U5, payload sentinel — BUILT AND PARKED, launch pending.**~~
+   **PASSED ON SCREEN 2026-08-30/31 — `56-SENTINEL-RESULT.md`.** Rung A
+   (`sentinel`, cullMask 0 + patched miss handshake) came back **dark**; rung B
+   (`sentinel-b`, all operands verbatim, stock CHS) **paints cyan on geometry
+   with the sky clean in the same frame** — so the injected static trace
+   executes and round-trips a CHS-written payload. Interpretation table was
+   pre-registered in `55` §4 and read before the screen; identity-when-dead was
+   the negative control and the sky is where it fired. **`GOTCHAS`' flat "a
+   second `OpTraceRayKHR` does not execute" is overturned** — it was one sample
+   in the *shadow* family with hand-picked SBT indices; H2 is dead, H3 was the
+   real cause (`56` §4). Two limits carried forward: the **miss** leg is *not*
+   established (A was dark), and only the **reference raygen** family was
+   tested. Gates traced thickness AND all of `29` Part B — both now open.
 3. If it passes: short ray along −L from the skin hit ⇒ measured thickness ⇒
    transmission term in the raygen. Measured thickness kills the
    forehead-scores-like-an-ear defect; non-tile-quantised RT output kills the
@@ -155,6 +179,15 @@ the saturated red glow IS the spectral falloff, no tint knob needed.
   validated, parked is the ceiling for a subagent.
 
 ## 9. Post-launch analysis runbook (written 2026-08-30 night, pre-launch)
+
+> **ALL THREE LAUNCHES ARE DONE (2026-08-30 23:57 → 2026-08-31 00:17).**
+> §9.1 `probe-both` → `57-SUBTYPE-DECODED.md`. §9.2 `sentinel` → dark, then
+> `sentinel-b` → **pass**, both in `56-SENTINEL-RESULT.md`. This section is kept
+> as the pre-registered plan it was; the results supersede its "next" columns.
+> Ordering note for the record: `sentinel` was run **first** and `probe-both`
+> last, the reverse of the numbering here — they share no state, and doing the
+> CET-selector rungs before the hand-edited one avoids the `brdf_params.txt`
+> reset dance. Do it that way again.
 
 State at time of writing: everything below is **deployed and cmp-verified**
 (`make install` backup `20260830-231725`; `init.lua` in the game dir is
@@ -218,3 +251,67 @@ audit before trusting any pixel** — serve first, then look.
 `kernel=spectral` and the bleed family are look-confirmed (user A/B, this
 page item 5). D3 waits on its consumer-naming read (§4). M1 waits on the
 RR-off falsifier (§6). A8 waits on 9.1's legend. U3/B2 are retired (`54`).
+
+## 10. Post-gate board (2026-08-31, after `56`/`57` — what is now possible)
+
+All three gate launches are read. The ranked five now: **A6 + A7
+look-confirmed and standing** — the user runs `skinspec=gi-50-bleed` +
+`kernel=spectral` and that combination is the **standing base config**; every
+A/B below is one variable at that base. **A8 dead** (§5). **D3 unchanged** —
+its gate is offline and still unrun (§4). **M1 unchanged** — still waiting on
+the RR-off falsifier (§6), settings-only, can share any session.
+
+### Unblocked by G-U5 (`56`)
+
+1. **Traced-thickness ear glow (§7 step 3) — now a build, not a gate.**
+   **BUILT 2026-08-31 (`59`): three rungs (k=0.10/0.22/0.45) over
+   `gi-50-bleed`, validated offline, parked, registered, deployed
+   (cmp-verified 01:41). LAUNCHED 01:46 — look FAILS, three structural
+   defects, mechanism confirmed; `60` has the verdict and routes.** The
+   constraints below were the brief, carried from `56`:
+   - **CHS path only.** The miss leg is unproven (rung A dark). Thickness
+     comes back via the armed-word handshake (`55`): word still armed after
+     the trace = no hit inside tmax ⇒ transmission 0, identity. Nothing may
+     depend on a miss shader writing anything.
+   - **Build it in the reference family** — the only family the gate proves,
+     and the right site anyway: skin hits live in its path loop. First build
+     task is confirming L (or −L) is in scope at the skin hit; `50` §3's
+     lesson is that assumed inputs die on contact with the disassembly.
+   - Class-1 gate is sufficient AND complete — skin does not split
+     (`57` §3.2), so there is no per-subtype refinement to chase.
+   - ld = 3.67/1.37/0.68 mm (same Jensen set as `52`/`53`); the red glow is
+     the spectral falloff, no tint knob.
+   - Templates: `50` §1 serve machinery, `dev/build_gi_bleed.sh`, `55`'s
+     clone-by-id splice. Optional rung, A/B at the standing base. Not
+     working until the screen says so.
+2. **`29` Part B — the skin ray budget.** Item 4 (the sentinel) gated all of
+   it and passed. Buildable in `29`'s own order: skin bounce bump (§B3,
+   tiny, honest caveat: wrong lever for "vague faces"), skin sample loop
+   (§B4, the real lever, largest patcher change since AgX; photo-mode
+   feature per §B7). §B6 shadow rays stay deferred — the shadow family was
+   NOT retested (`56` §4) and it is where `sctrl` died. `29` items 1–2
+   (CharacterLightBlockers look, RayNumber / AdaptiveSampling re-test) never
+   needed the gate, cost minutes, and are still unrun.
+
+### A3 peach fuzz — was the one gated item; gate PASSED hours later
+
+- **A3 gate PASSED 2026-08-31 00:47 (`58`).** The user ran `probe-sheen`
+  alone (serve audit-verified, settings pinned): white grazing sheen on
+  clothing, vegetation and skin — `40` §10's "rim on everything" row,
+  expected for an ungated probe and the pass. A2 cloth is alive, the
+  doomsday null is dead. A3 is now a **build**: class-1-gated Charlie
+  lobe, `0d`-bounded, one look A/B at the standing base. `58` §3 carries
+  the one-variable caveats (that frame's face is vanilla+sheen, not
+  base+sheen). Raygen-side sheen stays a non-route: no NoV in scope at
+  the gi-50 sites (`50` §3).
+
+### Suggested next session (per §8: diagnostics share, look A/Bs are one variable)
+
+1. ~~Offline, no launch: build the ear-glow rung.~~ **DONE (`59`).**
+2. ~~Launch: ear-glow A/B at the standing base~~ **DONE 01:46 — FAILED on
+   look (`60`); route decision is the user's, (b)'s offline CHS read first
+   if any.**
+3. ~~Launch, same session: `probe-sheen`~~ **DONE — user-run 2026-08-31
+   00:47, PASSED (`58`); the A3 build replaces it on this list.**
+4. Free rider whenever convenient: the RR-off look (M1 falsifier,
+   settings-only) — confirm `DLSS_D: false` in the snapshot BEFORE shooting.

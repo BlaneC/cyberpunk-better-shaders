@@ -8,12 +8,24 @@ cloth-sheen probe (idea A2), as two swap sets from one build script.*
 
 ## 0. Verdict first
 
-**Built, offline-verified, and never seen.** Five swap rungs exist, all 386
+> **`probe-both` LAUNCHED 2026-08-31 — the result is `57-SUBTYPE-DECODED.md`.**
+> The §0 falsifier does **not** fire: the frame paints in several hues, so the
+> sub-enum is readable from compute and `& 31` survives. **G-U4 opens, but the
+> field is too coarse to build on**: chrome has no own subtype (A8 dies), skin
+> does not split (question (c) answered *no*, so `c1sub` need not launch), and
+> hair carries at least two subtypes. **A2/A3 sheen is still unanswered — the
+> `both` merge confounded it** (`57` §4); `probe-sheen` remains the clean read.
+> `sub`, `cls` and `c1sub` have still never been on screen alone.
+>
+> **Update 2026-08-31 00:47: `probe-sheen` ran alone (user launch, serve
+> audit-verified, settings pinned) — the sheen RENDERS: white grazing rim on
+> cloth, vegetation, skin. A2/A3 answered YES; `58` is the result doc.**
+
+~~**Built, offline-verified, and never seen.**~~ Five swap rungs exist, all 386
 patched modules assemble and validate at their own target env, and the paint
 chain and the sheen chain have both been re-read out of the emitted SPIR-V and
-re-evaluated numerically against their closed forms. **Nothing here has been on
-screen.** A swap HIT is not execution; the probe is unproven until a screenshot
-says otherwise.
+re-evaluated numerically against their closed forms. A swap HIT is not
+execution; each rung is unproven until a screenshot says otherwise.
 
 | claim | confidence |
 |---|---|

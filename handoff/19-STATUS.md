@@ -256,3 +256,29 @@ And a third, from the colour bug:
    unrun across three documents.
 9. **Glass Phase 0 / 0.5** (`20` §5b, §6) — one patch, one launch, one
    screenshot; worth doing only after (4).
+
+---
+
+## 2026-08-31 update — three launches, three gates answered
+
+Full records: `56-SENTINEL-RESULT.md`, `57-SUBTYPE-DECODED.md`. One-liners:
+
+- **G-U5 PASSES (`56`).** A new static `OpTraceRayKHR` in a raygen **executes**
+  and round-trips a CHS-written payload — rung A dark, rung B paints, sky clean
+  as the identity control. **Traced-thickness ear glow is unblocked** and is now
+  a build, not a gate.
+- **`GOTCHAS`' "a second trace does not execute" is OVERTURNED** (`56` §4). It
+  was one sample in the shadow family with hand-picked SBT indices: H2 dead,
+  H3 the survivor. Limits: the **miss** leg is unproven and only the
+  **reference raygen** family was tested.
+- **G-U4 opens but is coarse (`57`).** The sub-enum is readable from compute;
+  it does not usefully subdivide character materials.
+- **A8 thin-film iridescence is DEAD** (`57` §3.1) — chrome has no subtype.
+- **Question (c) answered *no*** (`57` §3.2) — class-1 skin does not split; the
+  `c1sub` launch is saved.
+- **Hair carries ≥2 subtypes** (`57` §3.3), corroborating `54` from a second
+  instrument.
+- **A2/A3 sheen is STILL unanswered** (`57` §4) — the `probe-both` merge
+  confounded it. `probe-sheen` is parked and is the clean read.
+- Doc fix: `55` §5's `ptreg=off` would have refused the rung; it is `ptreg=on`
+  (`56` §6).

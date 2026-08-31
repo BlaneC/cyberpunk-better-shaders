@@ -1,9 +1,16 @@
 # 55 — G-U5 payload sentinel: built, parked, and the outcome table
 
 Written 2026-08-30 night (delegated build; plan `51` §7 step 2, spec `29`
-§B5). **Built, validated offline, parked as `skin.set/sentinel` and
-`skin.set/sentinel-b`. NEVER on screen. Nothing here is *working* until a
-launch says so — the launch is the main session's job.**
+§B5). ~~**Built, validated offline, parked as `skin.set/sentinel` and
+`skin.set/sentinel-b`. NEVER on screen.**~~
+
+> **LAUNCHED 2026-08-30/31 — the result is `56-SENTINEL-RESULT.md`.**
+> **Rung A dark, rung B paints: the injected static trace EXECUTES and
+> round-trips a CHS-written payload. G-U5 PASSES.** The §4 table below was
+> pre-registered and is what it was read against; two things in this document
+> are now corrected — §5 step 1's `ptreg` (see the box there, and `56` §6) and
+> the last row of §7's confidence table. Read `56` before acting on anything
+> here.
 
 ## 0. The question, precisely
 
@@ -128,9 +135,19 @@ measurable frame-time dip on B and ignore it, it is a probe.
 
 1. Settings before launch: PT on, `skinspec=sentinel`, `ser=class`,
    `shadowset=full-shadow`, standing PT switches (`ptbounce/ptrefl/ptmsggx`
-   on, `ptclamp` on, `ptreg` off), RR state pinned and verified in the
+   on, `ptclamp` on, **`ptreg` ON**), RR state pinned and verified in the
    collect snapshot. Same contract as `gi-50` — sync refuses otherwise
    (`gi-needs-ser` / `gi-shadowset` / stale-sha paths).
+
+   > **CORRECTION 2026-08-31 (`56` §6).** This step originally said "`ptreg`
+   > off" and that would have **wasted the launch**: sync refuses the rung and
+   > `skinspec` reads `off:gi-stale-ptq`. `ptreg` contributes the `r` to the
+   > ptq combo letters (`sync_settings.sh:217`); these rungs carry
+   > `ptq_sha=55ed4e5c6884ab71`, which is the **`rcbm`** base, i.e. `ptreg`
+   > **on**. With it off the combo is `cbm`, sha `3f8facb8314ede95`, and
+   > `gi_refuse` fires. The error was confusing `ptreg`'s **look** verdict
+   > (dead, `46` §18) with its **combo letter**, which is load-bearing for
+   > every raygen-bearing rung. Both launches ran `ptreg=on` and were accepted.
 2. `./dev/ab_launch_audit.py` after: expect HITs for 12 rgs_reference + 4
    rgs_restirgi + **10 ms_empty_main** (rung A), 0 rejects, manifest echo
    `sentinel …`.
@@ -158,4 +175,4 @@ reads the MANIFEST fields, which carry gi-50's values verbatim).
 | the splices carry exactly the designed instructions | **high** — re-read from the emitted binaries by script and by hand |
 | the rungs are behaviour-identical to gi-50 if the injected trace is dead | **high** — armed-word + guarded-select construction; not yet proven on screen |
 | the ms files will be served by the layer | **high** — `<hash>.<entry>.spv` is the layer's own keying; sync copies `*.spv`; not yet observed in a journal |
-| the injected trace executes | **unknown — the launch decides. That is the point.** |
+| the injected trace executes | ~~unknown — the launch decides~~ **CONFIRMED on screen 2026-08-31 in the reference raygen family, via rung B (`56` §2). Rung A dark, so the *miss* leg is NOT confirmed (`56` §3).** |
