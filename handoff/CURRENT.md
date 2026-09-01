@@ -1,4 +1,4 @@
-# CallistoSSS — current state (2026-08-31, after the four-launch gate night)
+# CallistoSSS — current state (2026-09-01, after the six-agent offline session)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
@@ -9,6 +9,200 @@ this project keeps relearning: *built*, *loaded* and *swapped* are not
 launch, the 15:57 half-oil + bounce-bleed rebuild, the 18:00 skin-spp build,
 the 20:57 terminator-band build and its 21:04 / 22:00 / 22:28 launches; then
 the 2026-08-31 late read-only pass that falsified `43` M1, zero launches):**
+
+**2026-09-01 six-agent offline session — zero launches, nothing new on screen.
+Six parallel builds/censuses, docs `82`-`87`; every claim below is offline-verified
+only. Read the doc before serving anything.**
+
+- **STANDING SELECTION: `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all`.** The
+  all-lights cavity cone is the live rung as of 2026-09-01. It carries the
+  OLD gate (`90` §1: the sample counter in 5 of 12 permutations), which is a
+  known defect kept deliberately for now because it is what was judged good on
+  screen. `-cone2allgf` is the same rung with the gate fixed and is parked,
+  unshot; `-cone2allgf` vs `-cone2all` is the one-variable A/B that retires it.
+  ⚠ Area lights at `k_local = 0.85` were previously called WAY too dim (`88`
+  §5c) — that verdict was reached on the same coin-flip gate and has not been
+  re-read since.
+
+- **`90` — THE CAVITY GATE WAS A COIN FLIP. Fixed, and rebuilt on the PLAIN
+  base after `-b3` was reverted.** Shoot `-cone2gf`, `-cone2allgf`,
+  `-cone2all35gf`. **The gate A/B is free:** `88`'s parked `-cone2all` IS the
+  old-gate build, so `-cone2allgf` vs `-cone2all` is one variable. The four
+  `-b3-*` cone rungs stay parked but are not the ladder.
+- **`90` detail — the defect.**
+  4 rungs built, verified, parked, zero launches. `88`'s cone gated on
+  `<counter> == 0` using `find_bounce_counter`, which returns the SAMPLE
+  counter — but only in **5 of 12** permutations (correct in the other 7). In
+  those 5, with `RayNumber = 1`, the cavity darkening ran at **every bounce**
+  instead of the primary hit, decided at random per launch. That explains
+  cavity readings that would not reproduce, and is the leading suspect for
+  `88` §5c's area-light over-darkening. Fixed by finding the path loop
+  structurally (3 fp phis seeded to 1.0 = the RGB throughput). The verifier
+  was vacuous on this axis and now catches exactly those 5 in the old rung.
+  Rungs: `-b3-cone2` (the ask), `-b3-cone2all`, `-b3-cone2allsg` (**control
+  only, do not ship**), `-b3-cone2all35`. **`79`'s ear glow has the same bug
+  and was not rebuilt.** `88`'s nine old cone rungs are superseded — do not
+  A/B against them.
+
+- **THE `bounce == 0` GATE IS ACTUALLY `sample == 0` (`89` §2).** Found while
+  answering "could this be a bounce override?" (it could not — nothing in the
+  stack touches a loop bound). `rgs_reference_main` has **two** nested counted
+  loops that both contain the sun NEE: an outer **sample** loop (`cbv[188].y`)
+  and an inner **path** loop (`cbv[188].z`, identified by its 3 fp phis seeded
+  to 1.0 — the RGB throughput; the 4 baked permutations fold that bound to 2,
+  `BounceNumber`'s default). `find_bounce_counter` picks the outermost, i.e.
+  the sample counter — so **`88`'s cavity gate and `79`'s ear glow run at every
+  bounce**, not just the primary hit. Live candidate cause of `88` §5c's
+  area-light over-darkening, and testable in the CET panel with no rebuild
+  (both terms should weaken as `RayNumber` rises). Not fixed yet.
+- **`89` BOUNCE FLOOR — SHOT TWICE, REVERTED. `-b3` reads as SUPER NOISY.**
+  First look was a clear win (and the CET CVar route produced no visible change
+  at all, which confirmed the 8/12 census on screen). Second look: three
+  bounces at **1 spp** is visibly noisier, and that swamps the indirect light
+  it buys. `89` §5 said extra bounces are "not a noise fix"; the doc now owns
+  that this was insufficient — an extra bounce is an extra stochastic path
+  segment, so it is a noise SOURCE, not merely noise-neutral. Live selection is
+  back to `gi-50b-bleed-oil-sheen-deep-clothhi`. Rungs stay parked: `89` §5b
+  records the one configuration where the floor would pay — **raised
+  `RayNumber` or reference accumulation on, photo mode, pinned camera**, where
+  the variance is paid for separately. Do not re-test at 1 spp.
+- **`89` build detail — 3 rungs built, verified, PARKED.**
+  `bound' = UMax(bound, N)` in 12/12 reference permutations; a floor, never a
+  cap. The census settles `pt_engine.lua`'s open question: **`BounceNumber`'s
+  wire is live** into 8 of 12 (try the panel first — it is free), but the other
+  4 baked the bound and the dispatched permutation changes per launch, so the
+  CVar alone is a coin flip per run. `-b2` is the control and must look
+  identical to `-clothhi`. Pin the CVar at its default for the A/B, and pick a
+  frame with visible indirect bounce light.
+
+- **`85`'S 09:16 CAPTURE WAS VOID, AND `88` REPLACES THE TERM.** The
+  `-cavityhi` "full occlusion" screenshot was rendered by
+  `40c6faab52a13874`, one of the two reference permutations `85` shipped
+  **byte-verbatim** — that capture contains no cavity code and is the base
+  image. Proven from `callisto_swap.jsonl` (per-run `overlay_manifest` +
+  `trace_rays`) and by `cmp` against the parked base. The `-cavity` 6 mm run
+  logged **no** reference dispatch at all. What the launches DID measure:
+  the lip seam darkened **−6/−7 of 255** at both tmax rungs against a ±2
+  noise floor, so `85` F1 is answered — crease geometry is real and the ray
+  finds it — but the philtrum and under-jaw did **not** move at 15 mm, so the
+  limit is the occluded FRACTION, never k. All four captures are confounded
+  by `SunAngularSize` 0.25→0.53 at 09:00:58. The eyelid streak measures
+  RGB(252,244,234) — a specular lobe on a convexity, not occlusion, and no
+  tmax or k touches it. **`88` is built, verified and PARKED**: four rungs
+  `-cone{1,2,4,4w}` on `-clothhi`, **12/12 coverage** (the anchor moves to
+  the bindless material fetch `table[reg[1]+5] >> 5`, which all twelve carry
+  and which `dev/cfg_dom.py` proves already dominates the splice), a
+  cosine-weighted tap cone tilted toward the horizon, a distance ramp, and
+  tmin 0.5→0.1 mm. k=0 rebuild byte-identical 12/12; verifier non-vacuous on
+  all five axes. **`make install` has NOT run and will carry `84`'s and
+  `82`'s undeployed changes with it.** Read `88` §0 before serving anything.
+  **Standing rule (`88` §1, corrected in §2b): before any reference-PT
+  look-verdict, grep the run's `trace_rays` for `rgs_reference_main` — a
+  logged trace naming an UNPATCHED module voids the capture; a MISSING line
+  proves nothing.** The 10:3x `-cone2`/`-cone4` runs logged no reference
+  dispatch and still differ from `-cone1` by mean |Δ| 7 of 255; `log_open`
+  fires per Vulkan process and most records carry zero `trace_rays` at all.
+  **`88` A/B IS DONE (§2c).** Four rungs shot on the pinned S1 frame:
+  `-cone1` (= tap 0 = `L` = `85`'s term with `88`'s tmin+ramp) → `-cone2`
+  moves the face by mean |Δ| **7.05**; `-cone2`→`-cone4`→`-cone4w` move it by
+  2.69 / 1.89. **The horizon tap is the whole effect; the lateral taps and the
+  wider angle are near-noise.** `-cone4w` is the user's stated preference —
+  specifically the crease under the nose — but that crease measures identical
+  across cone2/cone4/cone4w (contrast 94.04 / 94.23 / 93.97 against cone1's
+  100.43), so it is the horizon tap's, not `-cone4w`'s. **`-cone2w` (2 taps,
+  θ=25°) and `-cone2all` were built and parked 2026-09-01** — `-cone2all` is
+  `-cone2` with the SCOPE axis moved (`88` §5b): the same cone additionally
+  spliced at the **2 of 3 local-light NEE sites** that shade through a
+  visibility scalar, 6 flags-16 traces/module against `-cone2`'s 2. The third
+  local site drives a branch into a light-type switch rather than scaling
+  anything and is NOT patched, so this is "all lights that shade by a
+  visibility scalar", not provably all lights. **One of the two IS INSIDE THE
+  LIGHT LOOP, so its ray count scales with the visible light count** — A/B it
+  against `-cone2` in an INTERIOR or under neon, not in daylight, and time it,
+  because the reference PT accumulates and a screenshot cannot show cost. **`-cone2all` IS SHOT AND THE VERDICT IS SPLIT** (`88` §5c):
+  concentrated sources win — faces read better on the street and in rooms with
+  few light sources, and there is a lot of that in this game — but **area
+  lights go WAY too dim**. Diagnosed as a SOLID-ANGLE error, not a bug: the
+  cone measures a ~12° slice around one direction and then bills `k` of the
+  WHOLE light term. The sun subtends 0.53° so the cone covers it; an area light
+  subtends tens of degrees. It compounds with §2c's grazing concentration,
+  because room lights hit a face from many more grazing directions than the sun
+  does. NOT an origin bug — all three NEE traces share the identical origin
+  triple, so `prehit` is right at the local sites too. **Built in response:
+  `--k-local`, and rungs `-cone2all{20,35,50}` (k_local 0.20/0.35/0.50) that
+  move the local strength ALONE — the sun stays at 0.85, so the sun verdict is
+  not re-opened.** Rejected on consult: a cosA rolloff (kills the effect
+  exactly where it earns its keep) and an energy-redistributing
+  `(1−k·occ)/(1−k·occ_bar)` (contrast enhancement, not occlusion; pushes
+  unoccluded skin above the engine's lit level, stacks across lights,
+  scene-dependent constant). The correct fix is to scale `k` by the source's
+  ANGULAR SIZE, blended so contact keeps full strength —
+  `k·mix(sa_ratio, 1, saturate(1−t/2mm))` — but that needs a radius out of a
+  64-byte light struct whose only floats are at offsets 0/16/32; misreading it
+  gives per-light-type flicker. **The ladder is a MECHANISM TEST, not tuning:
+  shoot a frame holding BOTH a concentrated source and an area light. If some
+  k_local serves both, the diagnosis is proven and the angular-size form is
+  justified. If none does, the SHAPE is wrong rather than the scale and that
+  form becomes mandatory.**
+  `-cone2w` to break the confound: `-cone4w`
+  differs from `-cone2` in the laterals AND the angle at once. Shoot
+  `-cone2w` / `-cone2` / `-cone4w` back-to-back in one session (`88` §8 step
+  5) and one of the two cheap rungs ships. **Noise floor: shadowed skin
+  (`L<55`) cannot execute the splice, so mean |Δ| there is the floor — it ran
+  1.2–1.4 on the 10:3x set, against face-wide 1.89 for cone4→cone4w.** Shadowed skin does not
+  move (lit-gate holds empirically); darkening falls monotonically from
+  −10.5 % at the shadow boundary to −1.1 % in the open, so the term is a
+  **terminator softener / contact shadow selective by grazing angle**, not by
+  concavity. The eyelid/lip speculars are still untouched (§3).
+- **BUILT, PARKED, AWAITING A/B:** `84` env chroma bleed (`-envbleed`/`-envbleedhi`
+  on `-clothhi`; luma-held widening at the 4 restirgi diffuse finals; q=0
+  byte-identical 93/93) · `86` glass absorption (`refract=eta15-absorb{,hi,p}`;
+  soda-lime hue, miss bit-exact; control is `eta15`, NOT `off`; CET selector
+  does not list the new levels) · `85` cavity contact shadow (`-cavity{,d,hi}`;
+  **repo-only, not parked** — `./dev/build_cavity.sh --install` then
+  `make install`; photo-mode reach; F1 no-op falsifier is THE experiment).
+  All three carry full verification tables; standing verifiers re-run green.
+- **SETTINGS-ONLY LEVERS, UNRUN:** `82` denoiser panel (seeded
+  `detail_engine.txt`, `make install` serves it; RR must be OFF or the panel
+  is bypassed) · `83` sun size (`RayTracing/SunAngularSize` — Ultra Plus wrote
+  0.225-0.35, so the sun has been 1.5-2.4x too small in every outdoor shot to
+  date; `vanilla[]` snapshot is poisoned at 0.25, do not use "restore
+  defaults" as the control).
+- **ON SCREEN, KEPT (2026-09-01 09:20, `83` §9-§10): the sun is now 0.53.**
+  Ultra Plus is patched to write it — `Variables.lua`'s `sunAngularSizes`
+  flattened across all 24 hours, `modes.ini:284` (`[PT21]`, the live mode)
+  0.25 -> 0.53; both backed up as `*.bak_callisto_20260901-090058`, stock curve
+  kept in a comment. Served, looked at, **user verdict "0.53 looks better"** vs
+  the old 0.225-0.35 curve. *Uncontrolled* — settings not stated in advance,
+  scene/hour unrecorded, so it stands as a LOOK result like A6/A7 and **no
+  radiometric claim rides on it**. It is still the first evidence the CVar
+  reaches the PT image at all, which points against `83` §7's doubt.
+  **Every outdoor shot from here on is under a 1.5-2.4x wider sun than every
+  shot in `46`/`72`/`74`/`78` — those are NOT valid controls for each other.**
+  Two corrections came with it: the cron writes **per in-game hour**, not every
+  60 s, so the PT-panel takeover was never required to hold a value (it IS
+  required to make the panel's own slider do anything, and it drags 14 other PT
+  CVars with it — `83` §4.1, §5a3); and the `pt_engine.lua:136` path reorder is
+  **unnecessary, do not apply it** — DIFF/REFL provably return nil on all 10
+  registers (`83` §10.4).
+- **UNITS STILL UNPROVEN (`83` §10.3):** a 2.0 run was attempted and is
+  **INVALID** — set, then the save was reloaded, so 2.0 was never on screen
+  (`83` §10.1; the §9 patch may itself have eaten it). "0.53 is physically
+  correct" therefore still rests on `83` §2's 90%-confidence circumstantial
+  units reading. The `0.25 -> 2.0` photo-mode sweep on a **long cast shadow**,
+  with readback *after* each shot, remains one launch and settles both the
+  units and §7's does-it-reach-PT question.
+- **DEAD, CLOSED:** `87` tinted translucent shadows — the shadow chain is
+  scalar end-to-end (payload one float 13/13, AHS collapses alpha to a
+  boolean, evaluators read `.x`); `29` §B6's SIGMA-translucency claim is
+  withdrawn. Per-material coloured transmission is unreachable in this
+  pipeline (`86` proved the refraction side has no material fetch either).
+- **CONFLICT TO RESOLVE BEFORE ANY LAUNCH:** `UserSettings.json` read
+  `DLSS_D: true` at 01:42 and `false` at 02:31 — it is moving. Grep the
+  Proton-prefix copy (the `~/.wine` one is stale) immediately before every
+  A/B; the standing look was judged with RR OFF.
+- `init.lua` gained 5 selector rows (84's two, 85's three); `Makefile` gained
+  the `82` seed step. None of it is installed — `make install` has NOT run.
 
 - **CLOTH SHEEN (A2): ON SCREEN, KEPT — `-clothhi` (k=1.0) is the user's
   new default selection (2026-09-01, `81` §10).** User ran both rungs over
@@ -381,7 +575,7 @@ resumes the work with zero prior context.
 | **Skin-only sample count** (`29` B4) — class-1 pixels get `max(RayNumber,4)` spp in the reference raygens, non-skin bit-identical. `-spp4d` = the engine's own live sample loop retargeted (6 runtime-bound raygens, low risk); `-spp4` = plus the 4 constant-folded ones rewired (record-store residual risk — d-vs-full is the attribution A/B). Photo-mode priced (~+60–90% PT in close-ups). **Both served on screen 18:07/18:10 with no verdict; both sit on the pre-`78` base, which is now two rungs stale** (`CALLISTO_SPP_BASE=gi-50b-bleed-oil-sheen-deep ./dev/build_skin_spp.sh --install` is the one command to rebase them on the standing rung) | `skinspec=gi-50b-bleed-oil-sheen-spp4d` / `…-spp4` | `77` |
 | Peach fuzz, 58-era **multiplicative** form — measures 1.00–1.05× on the face; superseded, kept only for reproducibility | `skinspec=gi-50-bleed-sheen` | `58`, `72` §1 |
 | SSS kernel presets `balanced` / `callisto` / `vanilla` (tooling check) | `kernel=` | `44`, `33` §1 |
-| Sun angular size / visibility / scattering (live CVars) | PT panel | `44`, `43` M3 |
+| Sun visibility / scattering (live CVars) — **size is DONE and on screen at 0.53** (`83` §10.2), the other two never tested | PT panel, or Ultra Plus | `44`, `43` M3, `83` §9 §10 |
 | SER restoration — now selectable from CET, and no longer un-patches ptq | `ser=class…` | `41`, `44` §2.1 |
 | Path regularization (`ptreg`) | on in the user's file | `24` |
 | Engine CVar panels (hair 40, skin 17, PT 15, detail 22) | live | `16`, `27`, `32`, `33` §3 |
@@ -471,7 +665,9 @@ for reach. In order of look-payoff:
    stock radii and the direct `SpecularPrepassBlurRadius` (20) is M1's own
    mechanism on a live slider, no launch; (b) the DLSS preset test at item 4,
    which `79` §7 promotes above everything else on this queue.
-4. Whenever convenient: E8 sun size (live, no launch) · E11 probe legend
+4. Whenever convenient: E8 sun size — **look-settled at 0.53 and served by
+   default (`83` §10.2); all that is left is the `0.25 -> 2.0` units falsifier,
+   which one earlier attempt fumbled (`83` §10.1, §10.3)** · E11 probe legend
    decode (offline, `44` §2.9).
 5. **The look plan is `51`** (2026-08-30 night): A6 spectral kernel (`52`)
    and A7 terminator bleed (`53`) — **user A/B'd both by eye the same night

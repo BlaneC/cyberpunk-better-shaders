@@ -1,0 +1,217 @@
+# CallistoSSS -- detail_engine.txt -- SEED for the engine DETAIL / denoiser panel.
+#
+# WHY THIS FILE EXISTS.  detail_engine.lua writes this file itself, from
+# M.save(), the first time anybody touches one of its widgets.  Nothing in the
+# repo, in `make install` or in release/install.sh has ever shipped it -- and
+# the same is true of hair_engine.txt / pt_engine.txt / skin_engine.txt, which
+# exist in the live install only because those three panels HAVE been used.
+# This one has not, so load() returned early on a missing file every launch,
+# `enabled` stayed false, and all 22 knobs sat at whatever the engine had.
+# That is the whole of handoff/79 section 7's "the panel has never been turned
+# on".  Seeding the file with `enabled=1` is the entire fix.
+#
+# ---------------------------------------------------------------------------
+# HOW THE PARSER WORKS -- read this before editing, it has three footguns.
+#   detail_engine.lua:247   line:match("^([^=]+)=(.+)$")
+#
+#   1. NO LEADING WHITESPACE.  The key is everything before the first `=`,
+#      whitespace included, so "  RB_D_SpecPrepass=10" has the key
+#      "  RB_D_SpecPrepass", which matches nothing and is SILENTLY IGNORED.
+#      Uncomment by deleting the "# ", not by replacing it with spaces.
+#   2. NO TRAILING COMMENTS.  The value is everything after the first `=`, so
+#      "RB_D_SpecPrepass=10  # sharper" gives tonumber(nil) and the knob goes
+#      DEAD (float knobs), or falls back to the lua default (int knobs), or
+#      reads false (bool knobs).  Comments go on their own line. Always.
+#   3. THIS FILE IS REWRITTEN, COMMENTS AND ALL.  Every widget callback calls
+#      M.save(), which truncates and rewrites the file as bare key=value.  The
+#      first slider you move in CET deletes everything you are reading.  The
+#      repo copy is the documentation; the live copy is state.
+#
+# ---------------------------------------------------------------------------
+# WHY EVERY KNOB LINE BELOW IS COMMENTED OUT, AND WHY THAT IS THE POINT.
+#
+# detail_engine.lua:293-296 seeds every knob from the value the ENGINE
+# reported at session start (`vanilla`), and load() only overrides the keys
+# this file actually names.  So:
+#
+#   * a COMMENTED knob  -> the slider shows the live engine value, and the
+#                          2 s re-assert writes that same value back: an exact
+#                          no-op.  Truth, measured at runtime.
+#   * an UNCOMMENTED knob -> this file FORCES its number into the engine.
+#
+# The stock numbers below are `dflt` from detail_engine.lua's DEFS table.
+# Nobody has ever read the running game's actual values back -- handoff/79
+# section 7's "live value" column IS this same DEFS table, not a live read.
+# Uncommenting a line whose "stock" is a guess is exactly GOTCHAS' "One knob,
+# two defaults, in two files that never see each other": the UI would read
+# stock while the engine had been moved off it.
+#
+# So the honest order is: enable the panel, click "Dump denoiser CVars to
+# console" (it prints the resolved path AND the live vanilla value for all 22),
+# check those against the stock numbers here, and only then start uncommenting.
+#
+# ---------------------------------------------------------------------------
+# THE ONE THAT MATTERS FIRST: RB_D_SpecPrepass.
+#
+# ReBLUR/Direct SpecularPrepassBlurRadius, stock 20.  detail_engine.lua:94 --
+# "an unconditional spatial average applied to the radiance before any
+# edge-aware filtering gets a say."  It is handoff/79's M1 mechanism (the
+# denoiser filtering at a radius set for vanilla roughness while the mod has
+# tightened the lobe) sitting on a runtime slider, at zero build cost and zero
+# launch cost.  It is a SPECULAR prepass, so it is the face-highlight knob.
+#
+#   20 (stock) -> 10 -> 5 -> 0.  Move ONLY this one first.
+#
+# The one-click ceiling is the "Sharpest possible (diagnostic)" button
+# (detail_engine.lua:208, M.sharpAsPossible): it zeroes DenoisingRadius,
+# RB_D_DiffusePrepass and RB_D_SpecPrepass together, plus the atrous/stability
+# knobs.  Press it FIRST to find out whether the denoiser is what softens
+# faces at all -- yes/no in one click -- then "Restore engine defaults" and
+# walk back down from the ceiling one slider at a time.  It is a diagnostic,
+# not a look: expect noise and shimmer, worst on faces in motion.
+#
+# ---------------------------------------------------------------------------
+# THE CAVEAT THAT DECIDES WHETHER ANY OF THIS DOES ANYTHING (lua header, :21).
+# In RT Overdrive the game normally denoises with DLSS Ray Reconstruction,
+# which REPLACES NRD wholesale.  With RR ON every NRD/ReBLUR/ReLAX knob here
+# is bypassed -- not broken, bypassed.  The tested baseline is DLSS_D:false
+# (Ray Reconstruction OFF), verified live in handoff/79 section 1, which is
+# also the config every approved look was judged under.  Keep it off.
+# ===========================================================================
+
+# Master switch.  1 = the panel takes over and re-asserts its values every 2 s.
+# This is the line that was missing.  With every knob below commented out,
+# turning it on changes NOTHING on screen -- it only makes the sliders live.
+enabled=1
+
+# --- which denoiser is even running ----------------------------------------
+# EnableNRD -- RayTracing/EnableNRD -- bool, stock ON (1).
+# Off means no NRD at all. Not an experiment knob; a kill switch.
+# EnableNRD=1
+#
+# ReblurDirect -- RayTracing/UseReblurForDirectRadiance -- bool, stock ON (1).
+# ON = ReBLUR handles direct radiance (the RB_D_* knobs are the live ones).
+# OFF = ReLAX handles it instead (the RX_D_* knobs become the live ones).
+# This is a whole-denoiser swap, not a slider. One launch, on its own.
+# ReblurDirect=1
+#
+# ReblurIndirect -- RayTracing/UseReblurForIndirectRadiance -- bool, stock ON.
+# Same swap for bounce light. Bounce is where "smoothed over" was reported.
+# ReblurIndirect=1
+
+# --- the master radius ------------------------------------------------------
+# DenoisingRadius -- Editor/Denoising/NRD -- float, stock 30.0, range 0..60.
+# LOWER = sharper. The global scale on NRD's spatial filtering.
+# Second knob to try, after RB_D_SpecPrepass: 30 -> 20 -> 10.
+# DenoisingRadius=30.0000
+#
+# MaxAccum -- MaxAccumulatedFrameNum -- int, stock 31, range 1..63.
+# Temporal history length. LOWER = more responsive, noisier, less ghosting on
+# a moving face; HIGHER = more stable, more smear. Not a detail knob per se --
+# change it only if lowering the radii introduced ghosting rather than noise.
+# MaxAccum=31
+
+# --- ReBLUR: the pre-blur that runs BEFORE accumulation ---------------------
+# These are the "stop smearing my face" knobs: an unconditional spatial
+# average, applied before any edge-aware filter gets a vote.
+#
+# RB_D_SpecPrepass -- ReBLUR/Direct SpecularPrepassBlurRadius -- float,
+#   stock 20.0, range 0..60. LOWER = sharper.  *** MOVE THIS ONE FIRST ***
+#   Ladder: 20 -> 10 -> 5 -> 0. Watch a lit cheek/nose highlight, not the
+#   whole face. Stop where the highlight sharpens without the specular
+#   starting to crawl frame-to-frame.
+# RB_D_SpecPrepass=20.0000
+#
+# RB_D_DiffusePrepass -- ReBLUR/Direct DiffusePrepassBlurRadius -- float,
+#   stock 30.0, range 0..60. LOWER = sharper. The diffuse half of the same
+#   prepass; this is the one that costs noise fastest on skin. 30 -> 15 -> 0,
+#   but only AFTER the specular ladder has been walked on its own.
+# RB_D_DiffusePrepass=30.0000
+#
+# RB_I_DiffusePrepass -- ReBLUR/Indirect DiffusePrepassBlurRadius -- float,
+#   stock 30.0, range 0..60. Bounce light's prepass. This is the candidate for
+#   "the bounce lighting adds so much, but it's very smoothed over" -- though
+#   SHARC_SceneScale below is the harder ceiling on that.
+# RB_I_DiffusePrepass=30.0000
+#
+# RB_D_Stabilization -- ReBLUR/Direct StabilizationStrength -- float,
+#   stock 1.0, range 0..1. LOWER = more detail, more shimmer. 1.0 -> 0.5.
+#   Whatever you gain here you pay for in motion. Judge it while moving.
+# RB_D_Stabilization=1.0000
+#
+# RB_D_HistoryFix -- ReBLUR/Direct HistoryFixStrength -- float, stock 0.5,
+#   range 0..1. Blurs freshly-disoccluded pixels while history rebuilds.
+#   LOWER = sharper at disocclusion edges, noisier there. 0.5 -> 0.25.
+# RB_D_HistoryFix=0.5000
+#
+# RB_I_HistoryFix -- ReBLUR/Indirect HistoryFixStrength -- float, stock 0.5.
+# RB_I_HistoryFix=0.5000
+#
+# RB_D_LobeAngle -- ReBLUR/Direct LobeAngleFraction -- float, stock 0.15,
+#   range 0..1. Normal tolerance: how far the filter may reach across a
+#   curving surface. LOWER = tighter, keeps curvature detail, noisier.
+#   0.15 -> 0.08. This is the knob that is literally roughness-guided, so it
+#   is the closest thing in the panel to handoff/79's M1 premise. Only after
+#   the prepass ladder.
+# RB_D_LobeAngle=0.1500
+
+# --- ReLAX: the a-trous edge-stopping filter --------------------------------
+# INERT unless ReblurDirect / ReblurIndirect above are turned OFF.
+#
+# RX_D_Atrous -- ReLAX/Direct/Common AtrousIterationNum -- int, stock 5,
+#   range 1..8. Each iteration roughly DOUBLES the reach, so 5 -> 4 is a
+#   halving, not a 20% trim. One step at a time.
+# RX_D_Atrous=5
+#
+# RX_I_Atrous -- ReLAX/Indirect/Common AtrousIterationNum -- int, stock 5.
+# RX_I_Atrous=5
+#
+# RX_D_PhiLum -- ReLAX/Direct/Diffuse PhiLuminance -- float, stock 2.0,
+#   range 0..8. Luminance edge-stopping. LOWER = keeps contrast (the filter
+#   refuses to cross smaller luminance steps). 2.0 -> 1.0 -> 0.5.
+# RX_D_PhiLum=2.0000
+#
+# RX_I_PhiLum -- ReLAX/Indirect/Diffuse PhiLuminance -- float, stock 2.0.
+# RX_I_PhiLum=2.0000
+#
+# RX_D_Prepass -- ReLAX/Direct/Diffuse PrepassBlurRadius -- float, stock 30.0,
+#   range 0..60. ReLAX's equivalent of RB_D_DiffusePrepass.
+# RX_D_Prepass=30.0000
+#
+# RX_I_Prepass -- ReLAX/Indirect/Diffuse PrepassBlurRadius -- float, stock 30.
+# RX_I_Prepass=30.0000
+
+# --- SHARC: the spatial hash the bounce light is READ from ------------------
+# Indirect radiance is cached in world-space hash cells, so the cell size is a
+# HARD ceiling on bounce-light detail -- no number of rays raises it. If the
+# complaint is specifically "the bounce lighting is smoothed over", this pair
+# is the cause and the two prepass radii are not.
+# Both cost performance and memory, unlike everything above. Move one at a
+# time and watch the frame time, not just the picture.
+#
+# SHARC_Downscale -- Editor/SHARC DownscaleFactor -- int, stock 4, range 1..16.
+#   LOWER = finer bounce detail. 4 -> 3 -> 2. Do not jump to 1.
+# SHARC_Downscale=4
+#
+# SHARC_SceneScale -- Editor/SHARC SceneScale -- float, stock 50.0,
+#   range 1..200. Cell size. LOWER = finer. 50 -> 35 -> 25.
+# SHARC_SceneScale=50.0000
+
+# --- the cosmetic last resort -----------------------------------------------
+# Sharpening does NOT restore detail the denoiser removed. It raises local
+# contrast on whatever survived, smooth patches' edges included; on skin it
+# reads as crunch before it reads as pores. Fix the blur first.
+#
+# NOTE, and this one is live right now: UserSettings.json has
+# DLSS_NewSharpness = 0.3 against a 0.0 default (handoff/79 section 4), which
+# is applied on the DLSS Super Resolution path every recent screenshot was
+# shot on. That is a separate slider from this one, in the GAME's own settings
+# file, and handoff/79 names it as a likelier cause of "RR looks blurrier"
+# than anything in this panel. Do not stack two sharpeners by accident.
+#
+# DLSS_OverrideSharpness -- DLSS/OverrideSharpness -- bool, stock OFF (0).
+#   Must be ON for DLSS_Sharpness to do anything.
+# DLSS_OverrideSharpness=0
+#
+# DLSS_Sharpness -- DLSS/Sharpness -- float, stock 0.0, range 0..1.
+# DLSS_Sharpness=0.0000

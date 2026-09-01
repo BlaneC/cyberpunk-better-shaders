@@ -147,7 +147,7 @@ local SKIN_LEVELS = {
     -- which BEAT it ("deepest band is actually the best skin shader right now
     -- over lumn"). -deep is the standing rung; -lumn is the half-step back if
     -- -deep ever reads too deep (see 78 sec 5.1, 5.2).
-    { id = "gi-50b-bleed-oil-sheen-deep", label = "GI-50b, bleed LUMA-NEUTRAL + c1 grazing lift off (DEEPEST BAND)  <-- STANDING (78, best on screen)" },
+    { id = "gi-50b-bleed-oil-sheen-deep", label = "GI-50b, bleed LUMA-NEUTRAL + c1 grazing lift off (DEEPEST BAND) -- 78 kept, now the base of the chain" },
     { id = "gi-50b-bleed-oil-sheen-lumn", label = "  ^ half-step: bleed luma-neutral only, c1 lift kept (78, kept then superseded)" },
     -- 81: A2, the CLOTH sheen. An added Charlie x Neubelt lobe at the same
     -- 457 GGX sites the peach fuzz rides, gated on ROUGH DIELECTRICS that are
@@ -161,7 +161,103 @@ local SKIN_LEVELS = {
     -- asked for: f_d *= 1 - k*E1*wr at all 173 Burley sites.
     -- ONE VARIABLE vs -deep (the standing rung): the compute half only.
     { id = "gi-50b-bleed-oil-sheen-deep-cloth",   label = "  + CLOTH SHEEN k=0.5 (rough dielectrics; 11-13% of local diffuse at grazing)  <-- 81's candidate" },
-    { id = "gi-50b-bleed-oil-sheen-deep-clothhi", label = "  + CLOTH SHEEN k=1.0 (double; 23-25% at grazing) -- the louder half of the A/B" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi", label = "  + CLOTH SHEEN k=1.0 (double; 23-25% at grazing) -- 81 kept; the base every rung below is built on" },
+    -- 84: the ENV CHROMA bleed. Walls, floors and props pick up the CHROMA
+    -- of the light bouncing onto them (Night City neon) while each pixel's
+    -- Rec.709 luminance is held EXACTLY -- zero energy drift by construction,
+    -- the 78 safety rail. Spliced at the FINAL radiance write of the four
+    -- ReSTIR-GI diffuse raygens, which is the only per-channel point PAST the
+    -- radiance multiply: the 74 bleed sites are albedo-side (albedo/pi*NoL),
+    -- so widening chroma there would widen the ALBEDO's chroma and leave a
+    -- grey wall under red neon grey. Gate: class != 1 (skin already has its
+    -- own tuned bleed -- no double-apply) and class != 4 (hair); gate-false
+    -- takes the module's original id, bit-exact. Metals and glass need no
+    -- gate: diffuse GI is albedo*(1-metal) ~ 0 and the operator maps 0 -> 0.
+    -- ONE VARIABLE vs -clothhi (the standing rung): 4 of 16 raygens differ;
+    -- all 77 compute + 12 reference modules are byte-identical.
+    -- CONFOUND, pre-registered (84 sec 6): a coloured ALBEDO is widened too,
+    -- so a red couch under white light also saturates. If the read is "every
+    -- surface got more colourful" rather than "the neon reaches the walls",
+    -- that is this term, not the bounce.
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-envbleed",   label = "  + ENV CHROMA q=0.35 (luma-held neon bleed on non-skin diffuse)  <-- 84's candidate" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-envbleedhi", label = "  + ENV CHROMA q=0.70 (double; the louder half of the A/B)" },
+    -- 85: the CAVITY contact shadow. At every lit class-1 skin hit in the
+    -- REFERENCE (photo-mode) path tracer, ONE extra short ray is traced from
+    -- the un-biased surface point along the module's OWN sun-disc NEE
+    -- direction: CullBackFacing (16), the engine's own sun occluder mask 39,
+    -- tmin 0.5mm, tmax 6 or 15mm. A hit scales the DIRECT sun term by (1-k),
+    -- so lips, eyelid creases, nostrils and under-jaw stop leaking sunlight.
+    -- Applied analytically AT the shading site, so it never enters a
+    -- denoiser and cannot be blurred out. Spliced INSIDE the engine's own
+    -- sun-visibility branch, so it can only darken a pixel the engine
+    -- already called LIT -- no double-shadowing by construction; gate false
+    -- -> mask 0 -> guaranteed miss -> factor exactly 1.0 -> bit-identical.
+    -- ONE VARIABLE vs -clothhi (the standing rung): 10 of 12 reference
+    -- raygens differ; all 77 compute + 4 ReSTIR-GI modules are byte-identical.
+    -- REACH: reference/photo-mode PT ONLY -- narrower than the compute half.
+    -- FALSIFIER, pre-registered (85 sec 6, F1): if lip/eyelid creases are
+    -- normal-map relief carrying no BVH geometry the term is a NO-OP there.
+    -- Read the MODELLED overhangs (nose-over-lip, jaw, ear) before calling it
+    -- dead. tmax is the design axis; k moves only after tmax is settled.
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cavity",   label = "  + CAVITY SHADOW 6mm k=0.85 (contact: lip seam, eyelid crease, nostril rim)  <-- 85's candidate" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cavityd",  label = "  + CAVITY SHADOW 15mm k=0.85 (deeper: under-nose, nostril interior, under-jaw)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cavityhi", label = "  + CAVITY SHADOW 6mm k=1.00 (full occlusion; the strength axis)" },
+    -- handoff/88. 85's three rungs above reach only 10 of the 12 reference
+    -- permutations; the 2026-09-01 09:16 launch dispatched one of the two it
+    -- misses, so that capture held no cavity code at all. These four reach
+    -- 12/12 and replace the binary hit with a cosine-weighted cone + a
+    -- distance ramp. Ladder order: cone1 -> cone2 -> {cone2w | cone4} -> cone4w,
+    -- one variable per step. cone2all is cone2 with the SCOPE axis moved:
+    -- the same cone, additionally at the 2 local-light NEE sites. Its A/B
+    -- partner is cone2, never cone1. cone2all at k_local=0.85 made area
+    -- lights way too dim, so cone2all{20,35,50} move k_local ALONE -- the
+    -- sun stays at 0.85 in every one of them.
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone1",  label = "  + CONE v2 1 tap  6mm k=0.85 (88's floor: 12/12 coverage + ramp, no cone)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2",  label = "  + CONE v2 2 taps 6mm k=0.85 th=12 (+ the HORIZON tap -- the cheap rung)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2w", label = "  + CONE v2 2 taps 6mm k=0.85 th=25 (horizon tap WIDE -- isolates the angle)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all", label = "  + CONE v2 2 taps 6mm k=0.85 th=12 ALL LIGHTS (sun + point/spot/area)  <-- STANDING (88, live selection)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all20", label = "  + CONE v2 ALL LIGHTS k_local=0.20 (sun stays 0.85)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all35", label = "  + CONE v2 ALL LIGHTS k_local=0.35 (sun stays 0.85)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all50", label = "  + CONE v2 ALL LIGHTS k_local=0.50 (sun stays 0.85)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone4",  label = "  + CONE v2 4 taps 6mm k=0.85 th=12 (+ two lateral taps)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone4w", label = "  + CONE v2 4 taps 6mm k=0.85 th=25 (the cone-angle axis)" },
+    -- handoff/89. Bounce-loop FLOOR: the path loop's exit test becomes
+    -- bounce+1 < UMax(bound, N). UMax, so BounceNumber/BounceNumberScreenshot
+    -- set ABOVE N still win -- this raises a floor, it never caps. 8 of the 12
+    -- reference permutations read that CVar (cbv[188].z, confirming 29 B3);
+    -- the other 4 baked the bound to 2 and no CVar can reach them, so the CVar
+    -- alone gives a bounce depth that is a coin flip per launch.
+    -- -b2 is the CONTROL: it re-states the shipped default and must look
+    -- identical to -clothhi. If it does not, the loop identification is wrong.
+    -- Costs rays: the body is a whole path segment, so -b3 is roughly +50%
+    -- path work. Adds indirect DEPTH, not samples -- it is not a noise fix.
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-b2", label = "  + BOUNCE FLOOR 2 (89's control: the shipped default, restated)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-b3", label = "  + BOUNCE FLOOR 3 (one more path segment; ~+50% PT cost)  <-- 89's candidate" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-b4", label = "  + BOUNCE FLOOR 4 (the depth axis; photo mode)" },
+    -- handoff/90. The 88 cavity cone rebuilt ON THE -b3 BASE, so cone and
+    -- bounce floor are finally in one rung -- plus 89 sec 2's GATE FIX: the
+    -- `== 0` conjunct now tests the PATH loop's counter. Pre-89 it tested
+    -- whatever find_bounce_counter returned, which was the SAMPLE counter in
+    -- 5 of the 12 permutations (right in the other 7), so the cavity term ran
+    -- at EVERY bounce in 5 and only at the primary hit in 7 -- decided at
+    -- random per launch. -b3-cone2allsg keeps the OLD gate on purpose: it is
+    -- the control, and -b3-cone2all vs -b3-cone2allsg is the only pair that
+    -- measures the fix. Do not ship -sg.
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-b3-cone2",      label = "  + b3 + CAVITY CONE 2 taps sun-only (gate FIXED)  <-- 90's candidate" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-b3-cone2all",   label = "  + b3 + CAVITY CONE ALL LIGHTS k_local=0.85 (gate FIXED)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-b3-cone2allsg", label = "  + b3 + CAVITY ALL LIGHTS, OLD sample gate -- A/B CONTROL ONLY" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-b3-cone2all35", label = "  + b3 + CAVITY ALL LIGHTS k_local=0.35 (sun stays 0.85)" },
+    -- handoff/90, second base. -b3 was SHOT AND REVERTED (89 sec 0: three
+    -- bounces at 1 spp reads as SUPER NOISY -- an extra bounce is an extra
+    -- stochastic path segment, so it ADDS variance). The gate fix is
+    -- orthogonal to that and still wanted, so these are the SAME cone with
+    -- the fixed gate on the PLAIN standing rung, no bounce floor.
+    -- THE GATE A/B IS FREE: 88's -cone2 / -cone2all above are the old-gate
+    -- builds of these exact rungs, so -cone2allgf vs -cone2all is one
+    -- variable -- the gate -- with both halves already parked.
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2gf",      label = "  + CAVITY CONE 2 taps sun-only, GATE FIXED  <-- 90's candidate" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2allgf",   label = "  + CAVITY CONE ALL LIGHTS k_local=0.85, GATE FIXED" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all35gf", label = "  + CAVITY ALL LIGHTS k_local=0.35, GATE FIXED (sun stays 0.85)" },
     -- 77: skin-only sample count (29 B4, unblocked by the 56 sentinel).
     -- Class-1 pixels path-trace max(RayNumber,4) spp; everything else keeps
     -- the engine count (non-skin is bit-identical to the base rung).

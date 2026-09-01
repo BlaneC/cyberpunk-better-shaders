@@ -14,6 +14,7 @@ LUA      := init.lua hair_engine.lua skin_engine.lua pt_engine.lua detail_engine
 GAME_DIR    ?= /mnt/f4333173-dd02-4314-9fd0-2ce547a9ba73/SteamLibrary/steamapps/common/Cyberpunk 2077
 INSTALL_DIR ?= $(HOME)/.local/lib/callisto
 KERNELS     := $(wildcard dev/kernels/kernel.*.bin)
+CET_LIVE     = $(GAME_DIR)/bin/x64/plugins/cyber_engine_tweaks/mods/CallistoSSS
 
 .PHONY: layer release check install
 layer: libVkLayer_callisto_spvswap.so
@@ -32,12 +33,29 @@ release: check
 # sync_settings.sh evicts the pipeline caches itself on the next launch if
 # the payload changed. Before 44 nothing deployed the sources and the game
 # ran a sync_settings.sh two commits stale.
+#
+# detail_engine.txt is SEEDED, NOT SHIPPED, and it is deliberately kept out of
+# release/game/ so the `cp -a` above can never reach it (82). The four engine
+# panels each write their own <name>_engine.txt from M.save(), so those files
+# are player state in exactly the same sense brdf_params.txt is -- clobbering
+# one on every deploy would throw away tuning mid-session. hair/pt/skin got
+# theirs the first time someone touched a widget; the detail panel had never
+# been opened, so its file never existed, so load() bailed on a missing file
+# every launch and `enabled` stayed false with all 22 denoiser knobs at engine
+# stock (79 section 7). Copy-if-absent gives it a first birth and then never
+# touches it again. Delete the live file to re-seed from the repo copy.
 install: release layer
 	@test -f "$(GAME_DIR)/bin/x64/Cyberpunk2077.exe" || { echo "GAME_DIR='$(GAME_DIR)' is not a Cyberpunk install"; exit 1; }
 	@stamp=$$(date +%Y%m%d-%H%M%S); b="$(GAME_DIR)/.callisto_backup/$$stamp"; mkdir -p "$$b"; \
 	cp -a "$(GAME_DIR)/bin/x64/plugins/cyber_engine_tweaks/mods/CallistoSSS" "$$b/cet" 2>/dev/null || true; \
 	cp -a "$(GAME_DIR)/red4ext/plugins/CallistoSSS" "$$b/red4ext" 2>/dev/null || true; \
 	cp -a release/game/. "$(GAME_DIR)/"; \
+	if [ -e "$(CET_LIVE)/detail_engine.txt" ]; then \
+		echo "detail_engine.txt: already present, left alone (player state)"; \
+	else \
+		cp -f detail_engine.txt "$(CET_LIVE)/detail_engine.txt" && \
+		echo "detail_engine.txt: SEEDED -- denoiser panel is now enabled (82)"; \
+	fi; \
 	mkdir -p "$(INSTALL_DIR)"; cp -f libVkLayer_callisto_spvswap.so "$(INSTALL_DIR)/"; \
 	echo "installed -> $(GAME_DIR) (backup: $$b); layer -> $(INSTALL_DIR)"
 
