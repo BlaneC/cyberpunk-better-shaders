@@ -277,6 +277,17 @@ entry in this table, not a completed one. Item 7 is closed negative. Items
 1, 2, 4, 5, 6, 8 are untouched, and **item 4 (the payload sentinel) is now
 the gate on the only honest way back to item 3** as well as on all of Part B.
 
+**Update 2026-08-31:** item 4 PASSED (`56`). Item 6 is **BUILT, parked,
+unlaunched** (`77`) — and §B4's premise was half wrong in a good way: the
+degenerate skeleton is the *constant-folded remnant* of an engine sample
+loop that is **still alive in the 8 runtime-bound permutations**, bounded by
+`cbv[188].y` (`RayNumber`) with per-sample 1/N MIS weights in the body. So
+6 of the 10 paintable modules needed only a per-pixel rewrite of every
+`cbv[188].y` read; the §B4 phi surgery was performed on the baked 4 alone.
+Item 5 (the bounce bump) remains unbuilt — `77` did not touch bounce depth.
+Items 1, 2, 8 still stand as written; item 2 gained relevance (`77` §1: the
+shader half of `RayNumber` is provably live in the dynamic permutations).
+
 ## Corrections and additions to earlier documents
 
 - **`27` §2's skin CVar table is incomplete**: `CharacterSubsurfaceStochastic`

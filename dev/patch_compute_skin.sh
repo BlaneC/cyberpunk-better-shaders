@@ -113,6 +113,18 @@ LEVELS=(
     # ~60% of the magnitude (2.5x -> 1.55x at authored 0.60). Numbers from
     # dev/fuzz_model.py.
     "real-gloss-bleed-oilh:real-gloss-bleed-oil:n_s=0.55,spec_gain=1.0,alpha_max=0.2025,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064,bleed_k=1.0"
+    # 78: the terminator band is LIFTED by the mod's own stack, and the bleed
+    # is the larger half of it. m_G=1 makes the 53 triple a net energy add of
+    # +10.4% luma on skin chroma at the band floor -- on a falloff normalised
+    # at the lit cheek, the stack sits +6% above vanilla exactly where the
+    # shadow should be deep. `bleedn` holds the pixel's own Rec.709 luminance
+    # through the triple (ratios, hence hue and saturation, bit-identical to
+    # the 53 look); `-deep` additionally pulls c1's GRAZING-LIGHT lobe to
+    # identity (rho_f 1.35 -> 1.0), which is the other half of the lift: at
+    # NoV=0.7 that lobe alone lifts the band ~13% over the lit cheek. Two
+    # rungs, one variable each, off the shipping oilh compute half.
+    "real-gloss-bleedn-oilh:real-gloss-bleed-oilh:n_s=0.55,spec_gain=1.0,alpha_max=0.2025,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064,bleed_k=1.0,bleed_norm=1.0"
+    "real-gloss-bleedn-oilh-deep:real-gloss-bleedn-oilh:n_s=0.55,spec_gain=1.0,alpha_max=0.2025,alpha_scale=0.7,dcouple=1.0,micro_k=1.0,eye_alpha_max=0.0064,bleed_k=1.0,bleed_norm=1.0,rho_f=1.0"
 )
 
 TIER=skin; EXTRA=(); SETS=0; SKINSPEC=0; ONLY=()
@@ -247,7 +259,8 @@ build_into() {
 import glob, json, os, sys
 dest = sys.argv[1]
 tot = dict(mods=0, c1=0, chans=0, alphas=0, lifted=0, dcouple=0, micro=0,
-           micro_skipped=0, bleed=0, bleed_skipped=0, bleed_dup=0)
+           micro_skipped=0, bleed=0, bleed_skipped=0, bleed_dup=0,
+           bleed_norm=0)
 bad = []
 micro_short = []
 for f in sorted(glob.glob(os.path.join(dest, '.skin.*.json'))):
@@ -271,6 +284,7 @@ for f in sorted(glob.glob(os.path.join(dest, '.skin.*.json'))):
     tot['bleed'] += di.get('bleed_sites', 0)
     tot['bleed_skipped'] += len(di.get('bleed_skipped', []))
     tot['bleed_dup'] += len(di.get('bleed_dup', []))
+    tot['bleed_norm'] += di.get('bleed_norm_sites', 0)
     if 'OpPhi' in d.get('class_gate', {}).get('def', ''):
         tot['lifted'] += 1
     n = (len(di.get('skipped_dom', [])) + len(sp.get('skipped_dom', []))
@@ -298,6 +312,14 @@ if tot['bleed'] or tot['bleed_skipped'] or tot['bleed_dup']:
     # says zero; if it ever fires, read handoff/53 before trusting the rung.
     print('  bleed: %d sites, %d skipped (no channel triple), %d dup-guarded'
           % (tot['bleed'], tot['bleed_skipped'], tot['bleed_dup']))
+if tot['bleed_norm']:
+    # 78: a site that took the bleed but not the luminance hold would keep
+    # the energy add on part of the face while the byte count still moved.
+    print('  bleed luminance hold: %d of %d bled sites (G spliced too)'
+          % (tot['bleed_norm'], tot['bleed']))
+    if tot['bleed_norm'] != tot['bleed']:
+        bad.append(('bleed_norm', '%d of %d bled sites hold luminance'
+                    % (tot['bleed_norm'], tot['bleed'])))
 if bad:
     sys.stderr.write('  SITES SKIPPED -- the class gate does not reach the shading:\n')
     for m, why in bad[:10]:

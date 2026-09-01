@@ -6,8 +6,74 @@ this project keeps relearning: *built*, *loaded* and *swapped* are not
 
 **Newest first (2026-08-30 23:57 → 2026-08-31 01:46, five launches; then the
 2026-08-31 14:17 oil+fuzz build, its first look, the 14:57 rebuild, its
-launch, and the 15:57 half-oil + bounce-bleed rebuild):**
+launch, the 15:57 half-oil + bounce-bleed rebuild, the 18:00 skin-spp build,
+the 20:57 terminator-band build and its 21:04 / 22:00 launches):**
 
+- **The mod itself was holding the terminator band UP, and the bleed was the
+  larger half. `-lumn` is ON SCREEN, KEPT, and is now the live selection
+  (`78`).** Launched 21:04 and 22:00; both verified serving
+  `gi-50b-bleed-oil-sheen-lumn` (`skin_sha=a3139d629e26d902`, `req == want`,
+  `last_failed=0`). User verdict: *"Looks 10x better. Using the lumn version
+  now as the default."* Honest caveat kept in `78` §5.0: the launch before it
+  was `-spp4`, so the back-to-back pair moved two variables; the one-variable
+  twin `gi-50b-bleed-oil-sheen` was on screen three hours earlier (17:17 /
+  17:20). `-deep` remains **built, parked, unlaunched**.
+  The user's read — *"the increased rays is the wrong lever for more
+  contrasted shadows on the face"*, then *"make the bleed luminance-neutral;
+  m_R = 1 + 0.336·w adds energy at the terminator"* — is correct and larger
+  than it looks. Measured (`dev/band_model.py`, falloff normalised at the lit
+  cheek so vanilla ≡ 1.000): the stack holds the band floor at **1.247 on
+  directly-lit skin** and 1.153 on bounce-lit, of which the bleed's `m_G = 1`
+  energy add is **+10.4% on skin chroma** and c1's grazing-light lobe
+  (`rho_f`) is the rest. **`…-lumn`** scales the whole triple by the pixel's
+  OWN Rec.709 luma ratio — R:G:B, hence hue and saturation, bit-for-bit the
+  approved look; only the scale moves — taking the direct floor to 1.130 and
+  the bounce floor to 1.044 (0.14 stops back on each). **`…-deep`** also pulls
+  `rho_f` to identity in both halves: direct 0.988, bounce 0.889 (0.34/0.38
+  stops back) — that one INVERTS the lift rather than cancelling it, and it
+  dims bounce-lit skin ~2% overall via the SP flat factor (1.078 → 1.056), the
+  single pre-registered confound. A grey renormalisation was rejected with a
+  number: it leaves 40% of the lift because skin is chromatic. Verification:
+  both patcher edits **byte-inert** against every parked base (0/77 compute,
+  0/16 raygens); a new `dev/verify_bleed_norm.py` re-parses the SHIPPED bytes,
+  proves the channel wiring and **executes** the emitted hold at 18 000 points
+  per rung — closed form matched, luminance held < 3e-6, gate-false exact
+  identity; 150/150 bled sites carry the hold or the build fails;
+  `verify_gi_ladder` ALL PASS on both new bases; `gi_refuse` provenance
+  identical to the standing candidate. The A/B ran (`gi-50b-bleed-oil-sheen` vs
+  `…-lumn`) and `-lumn` won. **Still open: `-deep`**, on a hard sun terminator
+  — the direct path carries the larger lift (`78` §5.1). Approximation written out loud:
+  the hold's basis is the albedo triple, so a strongly tinted light leaves a
+  bounded ±3–4% residual (`78` §4 has the table and the route to exactness).
+
+- **Skin-only sample count (`29` B4, the post-sentinel "real lever"): BUILT
+  + PARKED + DEPLOYED 18:00; both rungs SERVED ON SCREEN 18:07 / 18:10 with
+  NO VERDICT GIVEN, and the live selection has since moved off them (`77`).**
+  (Launch log: `-spp4d` `skin_sha=9186954230375089`, `-spp4`
+  `c564a287c016d49f`. Served is not judged — the d-vs-full artifact
+  attribution below is still unrun.) Class-1 pixels path-trace
+  `max(RayNumber,4)` spp in the reference raygens; everything else is
+  bit-identical to the base. The build discovered what `29` §B4 did not
+  know: **the engine's own sample loop is ALIVE in the 6 runtime-bound
+  permutations** — header phis carry RNG/accumulators/counter, the latch
+  bound is `cbv[188].y` (RayNumber), and every per-sample MIS weight
+  divides by a fresh read of it — so there the whole feature is "rewrite
+  every RayNumber read to `OpSelect(isSkin, max(N,4), N)`" (6 sites per
+  module) and RNG threading + normalization come from the engine. Only the
+  4 baked permutations (`29` §B3's literal-bound list) got the real §B4
+  surgery: old merge → continue block (existing branches become legal
+  continues), 3 half accumulators + counter + remixed seed, conditional
+  back-edge, average at the new merge. Two rungs, one variable:
+  `skinspec=gi-50b-bleed-oil-sheen-spp4d` (dynamic 6 only, low risk) and
+  `…-spp4` (all 10 — carries the baked tier's residual risk: 14 in-loop
+  record stores inside the RNG taint cone now run N× with last-write-wins;
+  the d-vs-full A/B exists to convict exactly that). All spirv-val clean,
+  emitted-code re-read clean, provenance verified against the live install
+  (sync accepts both). **Photo-mode priced: ~+60–90% PT cost in face
+  close-ups (`29` §B7). Denoiser ceiling caveat stands — expect cleaner
+  shadow gradients on faces, not a step change.** A/B runbook + settings
+  contract + pre-registered outcomes: `77` §6. Shoot a face with a hard
+  shadow gradient; a flat-lit face is a wasted launch.
 - **Glass refraction Phase 0.5 (D3, `20` §5b / `51` §4): BUILT, DEPLOYED
   17:15, LAUNCHED, USER VERDICT KEEP — "looks incredible" (`76`).** The transparent-reflection raygen's mirror
   direction repointed to Snell's law (no TIR branch needed, η<1), origin
@@ -212,6 +278,7 @@ resumes the work with zero prior context.
 | SSS diffusion kernel, `detail` preset (engine radius; shipped one was 10×) | `kernel=detail` (selector since 44) | `33` §1 |
 | Skin BRDF tier-1 `c1` in the compute resolvers — **confirmed on screen, but on directly-lit skin only** (`46` §14: +1.8% above ~106 lum, nothing below; `46` §12/L2: the class gate passes, but the painted modules write the direct-light term only). Bounce-lit skin reached separately by `gi-50` below — `42` **closes**. | `skin` | `02`, `03`, `46` §12, §14 |
 | **`skinspec=gi-50`** — real-gloss + class-gated `c1` on the ReSTIR-GI diffuse raygens. **Standing rung, decided on screen 2026-08-30 night** (`50` §6): user prefers it over `R2-real-gloss` (*"more complexity in the shading of the face"*); S3 corroborates (+1.2..1.8% face lum vs three matched controls, achromatic, structured toward the bounce-lit lower face). Needs `ser=class` (in-skin) + `shadowset=full-shadow`; sync refuses otherwise. | `skinspec=gi-50` | `50` |
+| **`skinspec=gi-50b-bleed-oil-sheen-lumn`** — the standing candidate with the terminator bleed scaled to hold each pixel's own Rec.709 luminance (hue/saturation bit-identical; only the energy add goes), in the compute half AND the bounce half. **On screen 2026-08-31 21:04 / 22:00, kept**: *"Looks 10x better. Using the lumn version now as the default."* Takes 0.14 stops of band lift back on each path. Needs `ser=class…` (in-skin) + `shadowset=full-shadow`. Shipped default stays `off`; this is the user's live selection. | `skinspec=gi-50b-bleed-oil-sheen-lumn` | `78` |
 | Hair shadow-leak fix, direct shadow rays only | `shadowcull` / `full-shadow` | `26` §7 |
 | PT: bounce cull mask 1→255, reflection mask, firefly clamp | `ptbounce`, `ptrefl`, `ptclamp` | `26` §4 |
 | MS-GGX rough-metal energy compensation | `ptmsggx` | `28` |
@@ -225,6 +292,8 @@ resumes the work with zero prior context.
 | Oily/wet skin gloss ladder (roughness *ceiling*, flattens variation) | `skinspec=subtle…extreme` | `33` §2 |
 | Peach fuzz (added Charlie×Neubelt lobe, class-1 gated, **Schlick ramp cancelled**, now at **half strength**) and the **half** oil layer, as a one-variable ladder off the standing `gi-50-bleed`. The 73-era full-strength candidate won its A/B modulo "half the oil / too hazy in dim light" and is parked as `-hot` | `skinspec=gi-50-bleed-oil` / `-sheen2` / `-oil-sheen` (+ `…-hot` = 73 levels, `…-wide` = the 72-era rim) | `72`, `73`, `74` |
 | **Terminator bleed on BOUNCE light** — the `53` closed form at the ReSTIR-GI ST pair's own tail NoL, so the rosy terminator cue survives indoors where bounce dominates. `gi-50b` = bounce bleed alone (attribution); `gi-50b-bleed-oil-sheen` = **the indoor-depth candidate**, 2 raygen files from `gi-50-bleed-oil-sheen` | `skinspec=gi-50b` / `gi-50b-bleed-oil-sheen` | `74` |
+| **Terminator band depth, the deep rung** (`78`) — `-lumn` (now confirmed, table above) plus c1's grazing-light lobe `rho_f` pulled to identity in both halves. Takes 0.34 / 0.38 stops back, i.e. it INVERTS the lift rather than cancelling it, and dims bounce-lit skin ~2% overall via the SP flat factor — the one pre-registered confound. Half-step exists (`--rho-f`) if it reads as too much | `skinspec=gi-50b-bleed-oil-sheen-deep` | `78` §5.1 |
+| **Skin-only sample count** (`29` B4) — class-1 pixels get `max(RayNumber,4)` spp in the reference raygens, non-skin bit-identical. `-spp4d` = the engine's own live sample loop retargeted (6 runtime-bound raygens, low risk); `-spp4` = plus the 4 constant-folded ones rewired (record-store residual risk — d-vs-full is the attribution A/B). Photo-mode priced (~+60–90% PT in close-ups). **Both served on screen 18:07/18:10 with no verdict; not built on the `-lumn` base yet** (`CALLISTO_SPP_BASE=…-lumn ./dev/build_skin_spp.sh --install` is the one command) | `skinspec=gi-50b-bleed-oil-sheen-spp4d` / `…-spp4` | `77` |
 | Peach fuzz, 58-era **multiplicative** form — measures 1.00–1.05× on the face; superseded, kept only for reproducibility | `skinspec=gi-50-bleed-sheen` | `58`, `72` §1 |
 | SSS kernel presets `balanced` / `callisto` / `vanilla` (tooling check) | `kernel=` | `44`, `33` §1 |
 | Sun angular size / visibility / scattering (live CVars) | PT panel | `44`, `43` M3 |

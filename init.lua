@@ -131,8 +131,33 @@ local SKIN_LEVELS = {
     -- bleed ON BOUNCE LIGHT (the ReSTIR-GI diffuse ST pair's own NoL) --
     -- indoors, where bounce dominates, the rosy terminator cue no longer
     -- washes out. One variable (2 raygen files) vs the matching gi-50 rung.
-    { id = "gi-50b-bleed-oil-sheen", label = "GI-50b: candidate + bleed on BOUNCE light  <-- indoor depth" },
+    { id = "gi-50b-bleed-oil-sheen", label = "GI-50b: bounce bleed, band NOT held (74's candidate, superseded by -lumn)" },
     { id = "gi-50b",                 label = "GI-50b alone (bounce bleed, no oil/fuzz) -- attribution" },
+    -- 78: the terminator BAND, deeper. The mod's own stack lifts the shadow
+    -- falloff ~6% above vanilla where the band reads (normalised at the lit
+    -- cheek), and the bleed is the larger half of that: m_G = 1 makes the 53
+    -- triple a net energy add. -lumn holds the pixel's Rec.709 luminance
+    -- through the triple in BOTH halves -- hue and saturation bit-for-bit
+    -- the look above, the energy add gone. -deep additionally pulls c1's
+    -- grazing-LIGHT lobe to identity (rho_f 1.35 -> 1.0 direct, 1.175 -> 1.0
+    -- bounce), which is the other half; it also drops the SP pair's flat
+    -- E[c1] 1.078 -> 1.056, so bounce-lit skin dims ~2% overall (the one
+    -- confound, pre-registered in 78 sec 5). -lumn was launched 2026-08-31
+    -- 21:04 + 22:00 and KEPT ("looks 10x better") -- it is the standing rung;
+    -- -deep is still unlaunched.
+    { id = "gi-50b-bleed-oil-sheen-lumn", label = "GI-50b candidate, bleed LUMA-NEUTRAL  <-- STANDING (78, kept on screen)" },
+    { id = "gi-50b-bleed-oil-sheen-deep", label = "  ^ + c1 grazing lift off (deepest band)" },
+    -- 77: skin-only sample count (29 B4, unblocked by the 56 sentinel).
+    -- Class-1 pixels path-trace max(RayNumber,4) spp; everything else keeps
+    -- the engine count (non-skin is bit-identical to the base rung).
+    -- PHOTO-MODE PRICED: ~+60-90% PT cost in face close-ups (29 B7).
+    -- -spp4d retargets only the engine's own live sample loop (6 runtime-
+    -- bound raygens, low risk); -spp4 also rewires the 4 constant-folded
+    -- ones (77 sec 4 carries their record-store residual risk). If -spp4
+    -- shows skin-only artifacts that -spp4d lacks, the baked tier is the
+    -- culprit -- that attribution is the reason both rungs exist.
+    { id = "gi-50b-bleed-oil-sheen-spp4d", label = "GI-50b candidate + SKIN 4spp (engine-loop half, low risk)" },
+    { id = "gi-50b-bleed-oil-sheen-spp4",  label = "GI-50b candidate + SKIN 4spp (all 10 raygens)  <-- 77's candidate" },
     -- the 73-era full-strength candidate, parked for the halving A/B
     { id = "gi-50-bleed-oil-sheen-hot",  label = "  ^ 73-era FULL oil + full fuzz (too hot indoors)" },
     -- the 72-era wide builds, parked for the A/B that decides the rim (73 §6)

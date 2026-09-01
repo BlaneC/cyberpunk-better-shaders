@@ -63,7 +63,19 @@ LUM = ('0_212599993', '0_715200007', '0_0722000003')
 # the flat cosine-weighted expectation E[m_R] = 1.007 / E[m_B] = 0.998 is an
 # order of magnitude below the S3 measurement floor -- emitting it would be
 # a variable that cannot be seen.
+# 78: --bleed-norm holds the triple's Rec.709 luminance. m_G = 1 makes the 53
+# triple a net energy ADD -- dY/Y = (0.2126*0.336 - 0.0722*0.101)k*w, +6.4% on
+# grey and +10.4% on a rosy skin colour at the band floor -- landing on the
+# terminator the shadow is meant to darken. The hold scales the WHOLE triple
+# by s = Y/(Y + beta*w*k*(0.2126*0.336*C_R - 0.0722*0.101*C_B)), Y taken on
+# the site's own channel-proven triple, so R:G:B (hue, saturation) is
+# bit-for-bit the 53 look and only the scale moves. As in the compute half,
+# the basis is the triple AT THE SPLICE -- the reservoir's radiance multiplies
+# downstream and is per-channel, so a strongly tinted bounce leaves a bounded
+# residual (see handoff/78 s2). --rho-f overrides c1's grazing-LIGHT lobe
+# amplitude: it is the other half of the band lift, and 1.0 removes it.
 BLEED_R, BLEED_B, BLEED_BAND = 0.336, 0.101, 0.35
+LUM_W = (0.2126, 0.7152, 0.0722)
 
 
 def rhos(strength):
@@ -74,9 +86,11 @@ def c1_l(x, rf, rr):
     return (1.0 + (rf - 1.0) * (1.0 - x) ** EXPO) * (1.0 + (rr - 1.0) * x ** EXPO)
 
 
-def cbar(strength, n=4096):
+def cbar(strength, n=4096, rho_f=None):
     """E[c1_l] over the cosine-weighted hemisphere: integral 2x*c1_l(x) dx."""
     rf, rr = rhos(strength)
+    if rho_f is not None:
+        rf = rho_f
     return sum(2.0 * ((i + 0.5) / n) * c1_l((i + 0.5) / n, rf, rr)
                for i in range(n)) / n
 
@@ -258,8 +272,11 @@ def st_triple_channels(mod, triple):
 
 
 # ------------------------------------------------------------- ST builder
-def build_st(mod, cfg, writes, strength, bleed=0.0):
+def build_st(mod, cfg, writes, strength, bleed=0.0, bleed_norm=0.0,
+             rho_f=None):
     rf, rr = rhos(strength)
+    if rho_f is not None:
+        rf = rho_f
     glsl = mod.glsl
     if glsl is None:
         for ln in mod.lines:
@@ -321,7 +338,7 @@ def build_st(mod, cfg, writes, strength, bleed=0.0):
         f"        {c1} = OpFMul %float {cf} {cr}",
         f"        {g} = OpSelect %float {g0} {c1} {one}",
     ]
-    gr = gb = None
+    gr = gb = gg = None
     if bleed > 0.0:
         # w = sat(1 - NoL/0.35)^2 off the SAME NoL the c1 factor consumes --
         # the band and the factor cannot disagree. Gated on the same class
@@ -339,9 +356,44 @@ def build_st(mod, cfg, writes, strength, bleed=0.0):
             f"        {wb} = OpFMul %float {w} {kb}",
             f"        {mr} = OpFAdd %float {one} {wr}",
             f"        {mb} = OpFSub %float {one} {wb}",
+        ]
+        if bleed_norm > 0.0:
+            # Y and the luminance delta on the site's own channel-identified
+            # triple; the c1 factor and the tail's shared cosine/pi are
+            # common to all three and cancel out of the ratio. The
+            # denominator is bounded below by (1 - 0.101*k*beta)*Y for any
+            # non-negative colour, so the NMax only ever covers Y == 0.
+            byc = {c: r for r, c in chans.items()}
+            lw = [C(x) for x in LUM_W]
+            aR = C(bleed_norm * bleed * LUM_W[0] * BLEED_R)
+            aB = C(bleed_norm * bleed * LUM_W[2] * BLEED_B)
+            n1, n2, n3, na, ny = (I() for _ in range(5))
+            d1, d2, d3, d4, dn, den, sc = (I() for _ in range(7))
+            mr1, mb1 = I(), I()
+            ins += [
+                f"        {n1} = OpFMul %float {byc[0]} {lw[0]}",
+                f"        {n2} = OpFMul %float {byc[1]} {lw[1]}",
+                f"        {n3} = OpFMul %float {byc[2]} {lw[2]}",
+                f"        {na} = OpFAdd %float {n1} {n2}",
+                f"        {ny} = OpFAdd %float {na} {n3}",
+                f"        {d1} = OpFMul %float {byc[0]} {aR}",
+                f"        {d2} = OpFMul %float {byc[2]} {aB}",
+                f"        {d3} = OpFSub %float {d1} {d2}",
+                f"        {d4} = OpFMul %float {d3} {w}",
+                f"        {dn} = OpFAdd %float {ny} {d4}",
+                f"        {den} = OpExtInst %float {glsl} NMax {dn} {eps}",
+                f"        {sc} = OpFDiv %float {ny} {den}",
+                f"        {mr1} = OpFMul %float {mr} {sc}",
+                f"        {mb1} = OpFMul %float {mb} {sc}",
+            ]
+            mr, mb, ms = mr1, mb1, sc
+            gg = I()
+        ins += [
             f"        {gr} = OpSelect %float {g0} {mr} {one}",
             f"        {gb} = OpSelect %float {g0} {mb} {one}",
         ]
+        if gg is not None:
+            ins.append(f"        {gg} = OpSelect %float {g0} {ms} {one}")
     done = []
     for r, _ in triple:
         n = I()
@@ -353,17 +405,23 @@ def build_st(mod, cfg, writes, strength, bleed=0.0):
         elif ch == 2:
             fin = I()
             ins.append(f"        {fin} = OpFMul %float {n} {gb}")
+        elif ch == 1 and gg is not None:
+            # G is spliced ONLY under the luminance hold; without it m_G is
+            # exactly 1 and this multiply would be dead weight.
+            fin = I()
+            ins.append(f"        {fin} = OpFMul %float {n} {gg}")
         uses = replace_all_uses(mod, r, fin, at)
         done.append({"id": r, "chan": ch, "uses_rewritten": uses})
     edits.append((at, ins))
     return consts, edits, {
         "mode": "st-lit-arm", "strength": strength, "rho_f": rf, "rho_r": rr,
-        "bleed_k": bleed, "nol": nol, "site_line": at + 1, "class_how": how,
+        "bleed_k": bleed, "bleed_norm": bleed_norm, "nol": nol,
+        "site_line": at + 1, "class_how": how,
         "gate_on": ok[0], "spliced": done}
 
 
 # ---------------------------------------------------------------- driver
-def process(path, outdir, strength, bleed=0.0):
+def process(path, outdir, strength, bleed=0.0, bleed_norm=0.0, rho_f=None):
     target_env = detect_target_env(path) or 'spv1.3'
     mod, problems = load_lenient(path)
     if not mod.ident:
@@ -378,9 +436,11 @@ def process(path, outdir, strength, bleed=0.0):
 
     if h in ST:
         consts, edits, rep['gi_c1'] = build_st(mod, cfg, writes, strength,
-                                               bleed=bleed)
+                                               bleed=bleed,
+                                               bleed_norm=bleed_norm,
+                                               rho_f=rho_f)
     elif h in SP:
-        flat = cbar(strength)
+        flat = cbar(strength, rho_f=rho_f)
         saved = PSP.GI_TINTS['gi-diffuse']
         PSP.GI_TINTS['gi-diffuse'] = (flat, flat, flat)
         try:
@@ -406,6 +466,14 @@ def main():
     ap.add_argument('--bleed', type=float, default=0.0,
                     help='terminator bleed on the ST pair (bleed_k; 0 = off, '
                          'byte-identical to a pre-74 build)')
+    ap.add_argument('--bleed-norm', type=float, default=0.0,
+                    help='hold the bleed triple\'s Rec.709 luminance (0 = the '
+                         '53 form, byte-identical to a pre-78 build; 1 = the '
+                         'full hold). Needs --bleed > 0.')
+    ap.add_argument('--rho-f', type=float, default=None,
+                    help="override c1's grazing-LIGHT lobe amplitude (default: "
+                         "1 + 0.35*strength). 1.0 removes the lobe, which is "
+                         "the other half of the terminator-band lift.")
     ap.add_argument('--out', required=True)
     ap.add_argument('files', nargs='+')
     a = ap.parse_args()
@@ -413,15 +481,23 @@ def main():
         die(f"--strength {a.strength} outside (0,1]")
     if not (0.0 <= a.bleed <= 3.0):
         die(f"--bleed {a.bleed} outside [0,3]")
+    if not (0.0 <= a.bleed_norm <= 1.0):
+        die(f"--bleed-norm {a.bleed_norm} outside [0,1]")
+    if a.bleed_norm > 0.0 and a.bleed <= 0.0:
+        die("--bleed-norm needs --bleed > 0: there is no triple to hold")
+    if a.rho_f is not None and not (1.0 <= a.rho_f <= 2.0):
+        die(f"--rho-f {a.rho_f} outside [1,2]")
     for p in a.files:
-        r = process(p, a.out, a.strength, bleed=a.bleed)
+        r = process(p, a.out, a.strength, bleed=a.bleed,
+                    bleed_norm=a.bleed_norm, rho_f=a.rho_f)
         gc = r['gi_c1']
         print("%s  %s  %s%s" % (r['ident'], gc['mode'],
               "site@%d" % gc['site_line'] if 'site_line' in gc
               else "painted=%d flat=%.4f" % (len(gc['painted']),
                                              gc['flat_factor']),
-              "  bleed_k=%.2f chans=%s" % (gc['bleed_k'],
-                  [x['chan'] for x in gc['spliced']])
+              "  bleed_k=%.2f norm=%.2f chans=%s"
+              % (gc['bleed_k'], gc.get('bleed_norm', 0.0),
+                 [x['chan'] for x in gc['spliced']])
               if gc.get('bleed_k') else ""))
 
 

@@ -453,8 +453,10 @@ def _albedo_channel_root(mod, trip_id):
 
 
 def find_bleed_targets(mod, cfg, site):
-    """{channel: (result_id, def_line)} for a c1 site's three per-channel
-    fan-out FMuls, channel-identified by the albedo extract component.
+    """{channel: (result_id, def_line, colour_id)} for a c1 site's three
+    per-channel fan-out FMuls, channel-identified by the albedo extract
+    component. colour_id is the channel's diffuse colour (the consumer is
+    colour_id * the site's shared scalar) -- 78's luminance hold needs it.
 
     Same walk as find_diffuse_colour (scalar -> up to 3 single-consumer hops
     -> 3 FMul consumers -> the diffuse-colour triple), but it additionally
@@ -502,9 +504,16 @@ def find_bleed_targets(mod, cfg, site):
             if sorted(ix for _, ix in chans) != [0, 1, 2]:
                 return None
             out = {}
-            for (rid, _), (_, ix) in zip(cons, chans):
+            for (rid, _), (_, ix), cid in zip(cons, chans, trip):
                 rline, _ = mod.find_def(rid)
-                out[ix] = (rid, rline)
+                # cid is this channel's DIFFUSE COLOUR (the fan-out consumer
+                # is cid * the shared scalar). 78 needs it: the luminance
+                # ratio the bleed must hold is the same whether it is taken
+                # on the colour or on colour*scalar -- the scalar is common
+                # to all three channels and cancels -- and only the colour
+                # triple is PROVEN to dominate the site line (the check
+                # three lines up), which is where the factors are emitted.
+                out[ix] = (rid, rline, cid)
             return out
     return None
 
@@ -579,6 +588,28 @@ def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
         bB = C(bleed_k * 0.101)
         rep["bleed_sites"] = 0
         rep["bleed_skipped"], rep["bleed_dup"] = [], []
+        # 78: hold the triple's Rec.709 luminance. m_G = 1 leaves the 53
+        # triple a net ENERGY ADD -- dY/Y = (0.2126*0.336 - 0.0722*0.101)k*w
+        # = +6.4% k*w on grey and +10.4% on a rosy skin colour, landing
+        # exactly on the terminator band the shadow is supposed to darken.
+        # The fix scales the WHOLE triple by the pixel's own luma ratio
+        #     s = Y / (Y + beta*w*k*(0.2126*0.336*C_R - 0.0722*0.101*C_B))
+        # with Y = Rec.709(C) taken on the site's own channel-identified
+        # diffuse colour. Ratios R:G:B are untouched, so hue and saturation
+        # are bit-for-bit the 53 look; only the scale moves. NOT a grey
+        # renormalisation (dividing by the multiplier's own luma): skin is
+        # chromatic, and that form would leave ~40% of the lift behind.
+        # The denominator cannot vanish for a positive colour -- the add is
+        # bounded by 0.101*k*Y in magnitude, so den >= (1-0.101k)Y -- and the
+        # NMax guard covers the one remaining case, Y == 0 exactly (a black
+        # albedo, whose diffuse term is zero anyway).
+        bleed_norm = knobs.get("bleed_norm", 0.0)
+        if bleed_norm > 0.0:
+            nwr, nwg, nwb = C(0.2126), C(0.7152), C(0.0722)
+            naR = C(bleed_norm * 0.2126 * 0.336 * bleed_k)
+            naB = C(bleed_norm * 0.0722 * 0.101 * bleed_k)
+            rep["bleed_norm"] = bleed_norm
+            rep["bleed_norm_sites"] = 0
     for s in sites:
         if not cfg.dominates_line(dom_id, s['line']):
             rep["skipped_dom"].append(s['line'] + 1)
@@ -677,7 +708,7 @@ def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
             tgt = bleed.get(s['line'])
             if tgt is None:
                 rep["bleed_skipped"].append(s['line'] + 1)
-            elif tgt[0][0] in bleed_claimed or tgt[2][0] in bleed_claimed:
+            elif any(t[0] in bleed_claimed for t in tgt.values()):
                 # Two sites walking to the same fan-out FMul would mean two
                 # replace_all_uses on one id -- the second is a silent no-op
                 # (31 s4.1). Census says this never happens on the shipped
@@ -685,7 +716,7 @@ def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
                 # never HALF-bled.
                 rep["bleed_dup"].append(s['line'] + 1)
             else:
-                bleed_claimed.update((tgt[0][0], tgt[2][0]))
+                bleed_claimed.update(t[0] for t in tgt.values())
                 bq, bs0, bsat, bw, btR, btB, bmR0, bmB0 = [I() for _ in range(8)]
                 ins += [
                     f"        {bq} = OpFMul %float {s['nol']} {invb}",
@@ -697,27 +728,61 @@ def build_skin_c1(mod, cfg, dom_id, skin_gate, knobs):
                     f"        {bmR0} = OpFAdd %float {one} {btR}",
                     f"        {bmB0} = OpFSub %float {one} {btB}",
                 ]
+                bmG0 = None
+                if bleed_norm > 0.0:
+                    Cr, Cg, Cb = (tgt[0][2], tgt[1][2], tgt[2][2])
+                    nr, ng, nb, nla, nlum = [I() for _ in range(5)]
+                    ndr, ndb, nd0, nd1, nden0, nden, nsc = [I() for _ in range(7)]
+                    nR1, nB1 = I(), I()
+                    ins += [
+                        f"        {nr} = OpFMul %float {Cr} {nwr}",
+                        f"        {ng} = OpFMul %float {Cg} {nwg}",
+                        f"        {nb} = OpFMul %float {Cb} {nwb}",
+                        f"        {nla} = OpFAdd %float {nr} {ng}",
+                        f"        {nlum} = OpFAdd %float {nla} {nb}",
+                        f"        {ndr} = OpFMul %float {Cr} {naR}",
+                        f"        {ndb} = OpFMul %float {Cb} {naB}",
+                        f"        {nd0} = OpFSub %float {ndr} {ndb}",
+                        f"        {nd1} = OpFMul %float {nd0} {bw}",
+                        f"        {nden0} = OpFAdd %float {nlum} {nd1}",
+                        f"        {nden} = OpExtInst %float {gl} NMax {nden0} {eps}",
+                        f"        {nsc} = OpFDiv %float {nlum} {nden}",
+                        f"        {nR1} = OpFMul %float {bmR0} {nsc}",
+                        f"        {nB1} = OpFMul %float {bmB0} {nsc}",
+                    ]
+                    bmR0, bmB0, bmG0 = nR1, nB1, nsc
+                    rep["bleed_norm_sites"] += 1
                 if skin_gate is not None:
                     bmR, bmB = I(), I()
                     ins += [
                         f"        {bmR} = OpSelect %float {skin_gate} {bmR0} {one}",
                         f"        {bmB} = OpSelect %float {skin_gate} {bmB0} {one}",
                     ]
+                    if bmG0 is not None:
+                        bmG = I()
+                        ins.append(
+                            f"        {bmG} = OpSelect %float {skin_gate} {bmG0} {one}")
+                        bmG0 = bmG
                 else:
                     bmR, bmB = bmR0, bmB0
-                bleed_ids = (tgt, bmR, bmB)
+                bleed_ids = (tgt, bmR, bmB, bmG0)
         ins.append(f"        {out} = OpFMul %float {s['scalar']} {fac}")
         replace_all_uses(mod, s['scalar'], out, s['line'])
         edits.append((s['line'], ins))
         if bleed_ids:
-            tgt, bmR, bmB = bleed_ids
-            # The two multiplies land at the CONSUMER defs (per-channel), not
+            tgt, bmR, bmB, bmG = bleed_ids
+            # The multiplies land at the CONSUMER defs (per-channel), not
             # at the site: each rewrites one per-site-unique fan-out id, so
             # the one-replace-per-id rule holds by construction. The m ids
             # are defined in the site's own block, which dominates every
             # consumer (SSA: the scalar's def already dominates them).
-            for ix, mv in ((0, bmR), (2, bmB)):
-                rid, rline = tgt[ix]
+            # G is spliced ONLY under the 78 luminance hold -- without it
+            # m_G is exactly 1 and the multiply would be dead weight.
+            chan_mul = ((0, bmR), (2, bmB))
+            if bmG is not None:
+                chan_mul = ((0, bmR), (1, bmG), (2, bmB))
+            for ix, mv in chan_mul:
+                rid, rline, _ = tgt[ix]
                 nb = I()
                 edits.append((rline, [f"        {nb} = OpFMul %float {rid} {mv}"]))
                 replace_all_uses(mod, rid, nb, rline)
@@ -1266,7 +1331,8 @@ def process(path, outdir, tier, knobs, hunt_classes, do_rt=True,
         rep['params'] = {k: knobs[k] for k in
                          ('rho_f', 'rho_r', 'n_f', 'm_f', 'n_r', 'm_r',
                           'n_s', 'spec_gain', 'alpha_max', 'alpha_scale',
-                          'eye_alpha_max', 'dcouple', 'micro_k', 'bleed_k')}
+                          'eye_alpha_max', 'dcouple', 'micro_k', 'bleed_k',
+                          'bleed_norm')}
     else:
         die(f"unknown tier {tier}")
 
