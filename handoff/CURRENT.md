@@ -10,9 +10,42 @@ launch, the 15:57 half-oil + bounce-bleed rebuild, the 18:00 skin-spp build,
 the 20:57 terminator-band build and its 21:04 / 22:00 / 22:28 launches; then
 the 2026-08-31 late read-only pass that falsified `43` M1, zero launches):**
 
-**2026-09-01 six-agent offline session — zero launches, nothing new on screen.
-Six parallel builds/censuses, docs `82`-`87`; every claim below is offline-verified
+**2026-09-01 six-agent offline session — docs `82`-`87`, zero launches, offline-verified
 only. Read the doc before serving anything.**
+
+**2026-09-01 later, `91` — ONE LAUNCH AND ONE KEEP: `refract=fres` is on screen
+and is the standing glass look. `76`'s Phase 0.5 refraction is retired as
+falsified.** This is the only thing from 2026-09-01 that is on screen; every
+other doc from that day is still offline-only.
+
+- **`91` — GLASS: `refract=fres` IS ON SCREEN AND KEPT. The `76` refraction is
+  retired.** USER VERDICT 2026-09-01: *"the fres is much better. Looks awesome.
+  Thats the new defact look."* Installed to `refract.set/` at 15:21, selected in
+  `brdf_params.txt`, sha `cb868ff35daff75b`.
+  **What it replaced, and why.** A user screenshot (13:39, from the 13:10:37
+  `refract=eta15` launch) showed a doubled Judy; the ghost measured **dx ≈ +270
+  px on an 810 px frame** and was **non-rigid**, i.e. a bend. Three defects: a
+  flat 4 mm car window's two interfaces **cancel** (residual 1.3 mm at 45°,
+  invisible) while `76`'s single-interface model deviates **16.9°**;
+  `patch_refract.py` rewrote all 19 uses of the mirror direction *including the
+  env cubemap*, so **the reflection was deleted at every angle**, with no
+  Fresnel anywhere in it; and the bent copy landed over an untouched raster
+  see-through — the "warp or ghost" question `76` §0 left for a screenshot.
+  **It ghosts.** The bent look `76` liked and that ghost are the same pixels.
+  **What `fres` is:** the vanilla mirror weighted by exact dielectric F(θ)
+  (.040 head-on → .613 at 85°) — on a flat pane the raster see-through already
+  IS the correct transmitted image, so the whole physically-real
+  angle-dependent effect is the reflection ramping to a mirror.
+  **Still open, and cheap:** neither diagnostic was shot, so `20` open item 1
+  (does the consumer add or replace?) **stays open** — `fres-null` is installed
+  and costs one launch. The F² double-apply question (`fres-flat`) is
+  unresolved but now unlikely, since a downstream Fresnel would have made the
+  reflections near-invisible and they came back. **`86`'s absorption is dead as
+  built** — its `d` is the refracted segment length, which no longer exists.
+  **The CET selector still lists only `off/eta15/eta20` and now misreports the
+  live look**; trust `status.txt` `want_refract`. Shipped default is still
+  `refract=off`. `make install` deliberately NOT run — only `refract.set/`
+  was written, so 82/84/90's undeployed CET changes stayed out of the launch.
 
 - **STANDING SELECTION: `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all`.** The
   all-lights cavity cone is the live rung as of 2026-09-01. It carries the
