@@ -736,6 +736,197 @@ def build_sheen(mod, cfg, knobs):
     return consts, edits, rep
 
 
+# ------------------------------------------------- cloth sheen (handoff/80)
+# The A2 rung. Everything below is READ-ONLY detection plus one emitter; it
+# runs inside build_peach so the two lobes share one splice per site and one
+# replace_all_uses (the 08-DUAL-LOBE rule).
+#
+# The gate, and why it is what it is. `22` §5 hoped for a cloth class; `80`
+# §2 shows there is no cloth-exclusive gate readable offline -- the class
+# byte's 3-bit field names {0,1,3,4,5} and nothing on screen has ever named
+# which one clothing is, and the 5-bit sub-enum's only compute consumers are
+# LIGHT-CHANNEL flags ({12,13,14,15,21,30,31} -> 512, {25} -> 1024), not
+# material identities. So this ships the honest gate instead of a guessed
+# one: every ROUGH DIELECTRIC that is not skin and not hair.
+#
+#   not skin   class != 1   -- skin has its own fuzz lobe (A3); double-dipping
+#                             it would be a second achromatic add on the one
+#                             surface the project has already tuned.
+#   not hair   class != 4   -- hair's BRDF was removed (39) and a sheen on a
+#                             strand is the anisotropic term that 22 §4b says
+#                             cannot be built here.
+#   dielectric max3(F0) < f0max -- F0 = lerp(0.04, albedo, metallic) is at the
+#                             site (find_f0_triples). Metals sit at their
+#                             albedo (>= 0.2 for every real conductor); a
+#                             dielectric sits at 0.04. This is the metallic
+#                             test, read off the value the site itself uses.
+#   rough      wr = sat((alpha - a0)/(a1 - a0)) -- a RAMP, not a cut, on the
+#                             site's own alpha. Glass, clearcoat and polished
+#                             plastic get zero; leather 0.3; fabric and
+#                             concrete 1.0.
+#
+# What that gate does NOT do, said out loud: it does not separate cloth from
+# concrete, plaster, wood or dirt. Those get the lobe too, bounded, as a
+# grazing retroreflection they physically have and single-scatter GGX does
+# not model. dev/cloth_model.py prints the amount.
+F0_LERP_C = '%float_0_0399999991'
+F0_LERP_NC = '%float_n0_0399999991'
+BURLEY_C = '%float_0_107508637'
+INV_PI_C = '%float_0_318309873'
+ZERO_TOKS = ('%float_0', '%float_n0')
+
+
+def find_f0_triples(mod):
+    """Every F0 = lerp(0.04, albedo, metallic) triple, as (line, (r,g,b)).
+
+    The idiom, verbatim from the shipping evaluators (03dc7a51:526-534):
+
+        %330 = OpFAdd  albedo_r  -0.04
+        %334 = OpFMul  %330      metallic
+        %337 = OpFAdd  %334      +0.04        <- F0_r
+
+    three consecutive channels sharing ONE metallic id. The two 0.04
+    constants of opposite sign are what make the shape unambiguous -- no
+    other term in these modules pairs them.
+
+    A triple is returned at the line of its LAST channel, because that is the
+    first line at which all three ids exist.
+    """
+    per = {}
+    for i, ln in enumerate(mod.lines):
+        m = re.match(r'\s*(%\d+) = OpFAdd %float (%\d+) '
+                     + re.escape(F0_LERP_C) + r'\s*$', ln)
+        if not m:
+            continue
+        f0, y = m.groups()
+        mm = re.match(r'OpFMul %float (%\d+) (%\d+)\s*$', _def(mod, y) or '')
+        if not mm:
+            continue
+        for z, mt in (mm.groups(), mm.groups()[::-1]):
+            ma = re.match(r'OpFAdd %float (%\d+) ' + re.escape(F0_LERP_NC)
+                          + r'\s*$', _def(mod, z) or '')
+            if ma:
+                per[i] = (f0, mt)
+                break
+    out, i = [], 0
+    keys = sorted(per)
+    while i < len(keys):
+        a = keys[i]
+        if (a + 1 in per and a + 2 in per
+                and per[a][1] == per[a + 1][1] == per[a + 2][1]):
+            out.append((a + 2, (per[a][0], per[a + 1][0], per[a + 2][0])))
+            i += 3
+            while i < len(keys) and keys[i] <= a + 2:
+                i += 1
+            continue
+        i += 1
+    return out
+
+
+def lift_f0_phis(mod, trips):
+    """F0 triples reached through guarded OpPhis, added to `trips`.
+
+    The 52765-line GI evaluator computes its F0 once inside a guarded block
+    and every later site reads it through a phi at the merge (`%4146 = OpPhi
+    %float_0 ... %4053 ...`) -- so the raw triple does NOT dominate 61 of the
+    457 sites while the phi does. Same fixpoint walk find_gi_class uses for
+    the raygen class: a phi joins the set when EVERY operand is already in it
+    or is a literal zero. Zero is not a metal (F0 = 0 fails no dielectric
+    test), so widening through it cannot let a metal in.
+
+    With this, 457 of 457 sites carry a dominating F0 triple. Without it,
+    376.
+    """
+    sets = [set(), set(), set()]
+    for _, t in trips:
+        for c in range(3):
+            sets[c].add(t[c])
+    phis = {}
+    for i, ln in enumerate(mod.lines):
+        m = re.match(r'\s*(%\d+) = OpPhi %float (.*)$', ln)
+        if m:
+            ops = [o for o in m.group(2).split() if o.startswith('%')][::2]
+            phis[m.group(1)] = (i, ops)
+    added = {c: {} for c in range(3)}
+    changed = True
+    while changed:
+        changed = False
+        for pid, (i, ops) in phis.items():
+            for c in range(3):
+                if pid in sets[c] or not ops:
+                    continue
+                if all(o in sets[c] or o in ZERO_TOKS for o in ops):
+                    sets[c].add(pid)
+                    added[c][i] = pid
+                    changed = True
+    out = list(trips)
+    for i, pid in added[0].items():
+        if (i + 1) in added[1] and (i + 2) in added[2]:
+            out.append((i + 2, (pid, added[1][i + 1], added[2][i + 2])))
+    return out
+
+
+def find_diffuse_scalars(mod):
+    """The Burley diffuse scalar f_d at every diffuse site, + its roughness.
+
+        %692 = OpFMul rough 0.107508637
+        %694 = OpFSub 0.318309873 %692        <- (1/pi - rough*k), unique
+        %696 = OpFMul %694 FD(NoL)
+        %697 = OpFMul %696 FD(NoV)            <- f_d
+
+    Each hop must have exactly ONE FMul consumer, so a shape that fans out is
+    skipped rather than guessed at. Census over the shipped 77: 173 sites,
+    which is exactly the c1 count patch_compute_skin reports -- the same
+    diffuse sites, found by a different anchor.
+
+    Returned at f_d's own line; the caller damps it there, UPSTREAM of the
+    class-1 c1 factor the parent rung already multiplied onto it (that
+    factor's replace_all_uses has already run in the parent's bytes, so this
+    is the second and last rewrite of the value, not a competing one).
+    """
+    out = []
+    for i, ln in enumerate(mod.lines):
+        m = re.match(r'\s*(%\d+) = OpFSub %float ' + re.escape(INV_PI_C)
+                     + r' (%\d+)\s*$', ln)
+        if not m:
+            continue
+        pre, y = m.groups()
+        mm = re.match(r'OpFMul %float (%\S+) (%\S+)\s*$', _def(mod, y) or '')
+        if not mm or BURLEY_C not in mm.groups():
+            continue
+        rough = [o for o in mm.groups() if o != BURLEY_C][0]
+        cur, line = pre, i
+        ok = True
+        for _ in range(2):
+            cons = [j for j in uses_of(mod, cur)
+                    if re.match(r'\s*%\d+ = OpFMul %float ', mod.lines[j])]
+            if len(cons) != 1:
+                ok = False
+                break
+            line = cons[0]
+            cur = re.match(r'\s*(%\d+)', mod.lines[line]).group(1)
+        if ok:
+            out.append(dict(fd=cur, line=line, rough=rough))
+    return out
+
+
+def _emit_ramp(mod, gl, ins, alpha, k):
+    """wr = sat((alpha - a0) * inv_span) -- the roughness ramp, in ALPHA.
+
+    alpha is the site's own value, i.e. authored_roughness^2 on any pixel
+    this gate lets through: the only thing that reshapes alpha in these
+    modules is the class-1 skin cap, and class 1 is gated out.
+    """
+    I = mod.new_id
+    t, u, wr = I(), I(), I()
+    ins += [
+        f"        {t} = OpFSub %float {alpha} {k['ra0']}",
+        f"        {u} = OpFMul %float {t} {k['rspan']}",
+        f"        {wr} = OpExtInst %float {gl} NClamp {u} {k['zero']} {k['one']}",
+    ]
+    return wr
+
+
 def build_peach(mod, cfg, knobs, mode='add'):
     """Class-1-gated peach fuzz (A3) -- a real sheen LOBE on skin.
 
@@ -841,14 +1032,61 @@ def build_peach(mod, cfg, knobs, mode='add'):
     if ud:
         consts.append(ud)
     skin_gate = mod.new_id()
-    edits.append((ins_line, pre_ins +
-                  [f"        {skin_gate} = OpIEqual %bool {shift} {u1}"]))
+    gate_ins = [f"        {skin_gate} = OpIEqual %bool {shift} {u1}"]
+
+    # ---- the cloth lobe (A2, handoff/80). k_cloth = 0 emits NOTHING, so a
+    # rung built without it is byte-identical to the parent peach rung -- the
+    # inertness proof the build re-checks with cmp.
+    kcl = float(knobs.get('k_cloth', 0.0))
+    cloth_on = mode == 'add' and kcl > 0.0
+    KC = ncl = None
+    if cloth_on:
+        acl = float(knobs['a_cloth'])
+        a0 = float(knobs['cloth_a0'])
+        a1 = float(knobs['cloth_a1'])
+        if not a1 > a0:
+            die(f"cloth_a1 ({a1}) must exceed cloth_a0 ({a0})")
+        cbeta = float(knobs.get('cloth_defres', 1.0))
+        if not 0.0 <= cbeta <= 1.0:
+            die(f"cloth_defres must be in [0, 1], got {cbeta}")
+        KC = dict(K)
+        KC.update(cap=C(float(knobs['cloth_max'])),
+                  inv2a=C(1.0 / (2.0 * acl)),
+                  pre=C((2.0 + 1.0 / acl) / (2.0 * math.pi)),
+                  ra0=C(a0), rspan=C(1.0 / (a1 - a0)), zero=zero)
+        kcl_id = C(kcl)
+        f0max_id = C(float(knobs['cloth_f0max']))
+        cbeta_id = C(cbeta) if cbeta not in (0.0, 1.0) else None
+        u4, u4d = mod.uconst(4)
+        if u4d:
+            consts.append(u4d)
+        hair_gate, not_skin, not_hair, ns_nh = (mod.new_id() for _ in range(4))
+        gate_ins += [
+            f"        {hair_gate} = OpIEqual %bool {shift} {u4}",
+            f"        {not_skin} = OpLogicalNot %bool {skin_gate}",
+            f"        {not_hair} = OpLogicalNot %bool {hair_gate}",
+            f"        {ns_nh} = OpLogicalAnd %bool {not_skin} {not_hair}",
+        ]
+        # Read-only detection, ALL of it before the first replace_all_uses
+        # below (GOTCHAS 12): every walk here follows definitions backwards.
+        f0cands = lift_f0_phis(mod, find_f0_triples(mod))
+        fdsites = find_diffuse_scalars(mod)
+        # the damp constant: k * E1_hat * cloth_damp, one number, no LUT.
+        # dev/cloth_model.py computes E1_hat and prints the per-view spread
+        # this constant collapses (handoff/80 §3).
+        damp_k = kcl * float(knobs['cloth_E']) * float(knobs.get('cloth_damp', 1.0))
+        damp_id = C(damp_k) if damp_k > 0.0 else None
+    edits.append((ins_line, pre_ins + gate_ins))
 
     sites = P.find_ggx_sites(mod)
     rep = {"ggx_sites": len(sites), "peach_sites": 0, "mode": mode,
            "defres": beta if beta_on else 0.0, "defres_sites": 0,
            "folded": 0, "folded_min": 0, "clamped": 0,
-           "skipped_shape": [], "skipped_dom": [], "skipped_dup": []}
+           "k_cloth": kcl if cloth_on else 0.0, "cloth_sites": 0,
+           "cloth_damp_k": damp_k if cloth_on else 0.0,
+           "cloth_damp_sites": 0, "cloth_fd_sites": len(fdsites) if cloth_on else 0,
+           "skipped_shape": [], "skipped_dom": [], "skipped_dup": [],
+           "skipped_cloth": [], "skipped_damp": []}
     seen = set()
     for s in sites:
         f = find_sheen_inputs(mod, s)
@@ -906,12 +1144,87 @@ def build_peach(mod, cfg, knobs, mode='add'):
                 f"        {g} = OpSelect %float {skin_gate} {ex} {zero}",
                 f"        {m} = OpFAdd %float {f['spec']} {g}",
             ]
+            if cloth_on:
+                # F0 triple dominating THIS splice, else the site declines --
+                # a metal cannot be excluded without one, and an ungated
+                # metal would take the lobe through F ~ albedo (a ~25x
+                # amplification of a term that is not Fresnel's business).
+                f0 = None
+                for _, t in f0cands:
+                    if all(cfg.dominates_line(x, line) for x in t):
+                        f0 = t
+                if f0 is None or not cfg.dominates_line(s['alpha'], line):
+                    rep["skipped_cloth"].append(line + 1)
+                else:
+                    lc = _emit_fuzz_lobe(mod, gl, ins, f['noh'], c0, c1, KC)
+                    wc = _emit_defres(mod, gl, ins, f['noh'], c0, c1, KC,
+                                      zero, cbeta_id) if cbeta > 0.0 else None
+                    wr = _emit_ramp(mod, gl, ins, s['alpha'], KC)
+                    mx1, mx2, diel, gate = I(), I(), I(), I()
+                    ins += [
+                        f"        {mx1} = OpExtInst %float {gl} NMax {f0[0]} {f0[1]}",
+                        f"        {mx2} = OpExtInst %float {gl} NMax {mx1} {f0[2]}",
+                        f"        {diel} = OpFOrdLessThan %bool {mx2} {f0max_id}",
+                        f"        {gate} = OpLogicalAnd %bool {ns_nh} {diel}",
+                    ]
+                    cur = I()
+                    ins.append(f"        {cur} = OpFMul %float {lc} {kcl_id}")
+                    if wc is not None:
+                        nx = I()
+                        ins.append(f"        {nx} = OpFMul %float {cur} {wc}")
+                        cur = nx
+                    for mul in (wr, fold):
+                        nx = I()
+                        ins.append(f"        {nx} = OpFMul %float {cur} {mul}")
+                        cur = nx
+                    gsel, m2 = I(), I()
+                    ins += [
+                        f"        {gsel} = OpSelect %float {gate} {cur} {zero}",
+                        f"        {m2} = OpFAdd %float {m} {gsel}",
+                    ]
+                    m = m2
+                    rep["cloth_sites"] += 1
         replace_all_uses(mod, f['spec'], m, line)
         edits.append((line, ins))
         rep["peach_sites"] += 1
     if rep["peach_sites"] == 0:
         die(f"{mod.name}: no GGX site could take the peach fuzz "
             f"({len(sites)} sites, all declined)")
+
+    # ---- the diffuse damp (23 §4's ship requirement) -----------------------
+    #   f_d *= 1 - select(notskin && nothair, k*E1*wr, 0)
+    # No dielectric test here on purpose: a metal's diffuse COLOUR is
+    # albedo*(1-metallic) = 0, so damping a metal's f_d scales zero and the
+    # two extra instructions of an F0 read would buy nothing.
+    if cloth_on and damp_id is not None:
+        dseen = set()
+        for d in fdsites:
+            # two Burley chains converging on ONE scalar would make the second
+            # replace_all_uses a silent no-op while still counting as coverage
+            # (the 08-DUAL-LOBE lesson). Census says zero; assert it anyway.
+            if d['fd'] in dseen:
+                rep["skipped_damp"].append(d['line'] + 1)
+                continue
+            dseen.add(d['fd'])
+            if not (cfg.dominates_line(d['rough'], d['line'])
+                    and cfg.dominates_line(dom_id, d['line'])):
+                rep["skipped_damp"].append(d['line'] + 1)
+                continue
+            I = mod.new_id
+            ins = []
+            al = I()
+            ins.append(f"        {al} = OpFMul %float {d['rough']} {d['rough']}")
+            wr = _emit_ramp(mod, gl, ins, al, KC)
+            amt, sel, fac, nfd = I(), I(), I(), I()
+            ins += [
+                f"        {amt} = OpFMul %float {wr} {damp_id}",
+                f"        {sel} = OpSelect %float {ns_nh} {amt} {zero}",
+                f"        {fac} = OpFSub %float {KC['one']} {sel}",
+                f"        {nfd} = OpFMul %float {d['fd']} {fac}",
+            ]
+            replace_all_uses(mod, d['fd'], nfd, d['line'])
+            edits.append((d['line'], ins))
+            rep["cloth_damp_sites"] += 1
     return consts, edits, rep
 
 
@@ -1321,7 +1634,25 @@ KNOBS = dict(k_sheen=8.0, a_sheen=0.35, sheen_max=25.0,
              # defres in [0,1] cancels that share of the module's own Schlick
              # ramp on the ADDED lobe (0 = the wide 72-era rung, 1 = targeted:
              # the front-lit band unchanged, the backlit rim cut 2.5x).
-             k_peach=1.0, a_peach=0.35, peach_max=0.5, defres=1.0)
+             k_peach=1.0, a_peach=0.35, peach_max=0.5, defres=1.0,
+             # cloth (A2, handoff/80): k_cloth = 0 is byte-inert -- nothing
+             # is emitted at all, so a rung built without it cmp-matches its
+             # parent. k_cloth 0.5 puts the lobe at 11-13% of the local
+             # diffuse at a grazing view and 0.2% head-on; 1.0 doubles it.
+             # a_cloth is the Charlie roughness (tighter than the skin fuzz's
+             # 0.35: fabric's grazing bloom is narrower than a face's).
+             # cloth_a0/a1 are the ROUGHNESS RAMP in alpha (= authored
+             # roughness squared): 0.10 -> 0.30 is authored 0.32 -> 0.55, so
+             # glass and clearcoat get zero and fabric/concrete get all of it.
+             # cloth_f0max is the dielectric test on max3(F0); every metal
+             # sits at its albedo, >= 0.2. cloth_E is E1_hat from
+             # dev/cloth_model.py -- the cosine-weighted directional albedo
+             # of the capped, ramped, Schlick-cancelled lobe at k=1, which is
+             # what the diffuse damp removes. cloth_damp = 0 turns the damp
+             # off without touching the lobe.
+             k_cloth=0.0, a_cloth=0.25, cloth_max=0.5, cloth_defres=1.0,
+             cloth_a0=0.10, cloth_a1=0.30, cloth_f0max=0.09,
+             cloth_E=0.0072, cloth_damp=1.0)
 TIERS = ('sub', 'c1sub', 'cls', 'sheen', 'both', 'gi', 'peach')
 
 

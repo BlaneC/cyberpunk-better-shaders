@@ -8,15 +8,16 @@ largest patcher change since AgX", gated on the G-U5 sentinel — which
 discovery that reshaped the plan, the honest risk ledger, and the A/B
 runbook. **It is not working until an A/B says so.**
 
-**Update, 2026-08-31 22:00.** Both rungs *were* served on screen the same
+**Update, 2026-08-31 22:28.** Both rungs *were* served on screen the same
 evening — `-spp4d` at 18:07 (`skin_sha=9186954230375089`) and `-spp4` at 18:10
 (`c564a287c016d49f`), per `~/callisto_launches.log` — but **no verdict was
 given on either**, and the session's attention moved to the terminator band
-(`78`), whose `-lumn` rung is now the live selection. Served is not judged:
+(`78`), which then took two rungs — `-lumn`, then **`-deep`, now the live
+selection and the best skin rung there is** (`78` §5.1). Served is not judged:
 §6's runbook, and in particular the d-vs-full artifact attribution, is still
-unrun. The spp rungs are also built on the *pre-`78`* base, so re-running them
-against the new default means one rebuild:
-`CALLISTO_SPP_BASE=gi-50b-bleed-oil-sheen-lumn ./dev/build_skin_spp.sh --install`.
+unrun. The spp rungs are also built on the *pre-`78`* base, now two rungs
+stale, so re-running them against the standing rung means one rebuild:
+`CALLISTO_SPP_BASE=gi-50b-bleed-oil-sheen-deep ./dev/build_skin_spp.sh --install`.
 
 Select with `skinspec=gi-50b-bleed-oil-sheen-spp4d` or `…-spp4` (CET page or
 `brdf_params.txt`). Default untouched; the standing rung stays what it was.

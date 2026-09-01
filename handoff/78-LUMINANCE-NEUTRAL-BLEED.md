@@ -1,5 +1,10 @@
 # 78 — The terminator band, deeper: the bleed holds luminance
 
+> **OUTCOME (2026-08-31 22:28): the DEEPEST rung won.**
+> `gi-50b-bleed-oil-sheen-deep` beat `-lumn` on screen and is the standing
+> skin rung and the live selection. Verdict, verbatim: *"Deepest band is
+> actually the best skin shader right now over lumn."* Evidence in §5.1.
+
 Written 2026-08-31 evening, on the user's read that **the extra rays are the
 wrong lever for face-shadow contrast** (`77`'s spp rungs raise sample count,
 not contrast) and their diagnosis of the right one:
@@ -13,17 +18,29 @@ The diagnosis is correct, and it is bigger than it looks: on directly-lit skin
 the stack holds the terminator band **+24.7% above vanilla**, and the bleed is
 about half of that. Built, verified offline, parked and deployed 20:57.
 
-**ON SCREEN, AND KEPT.** Launched 21:04 and again 22:00 the same evening, both
-serving `gi-50b-bleed-oil-sheen-lumn` (launch log + `status.txt`, §5). User
-verdict, verbatim: *"Looks 10x better. Using the lumn version now as the
-default."* `-lumn` is the live selection as of 22:00 and this doc treats it as
-the standing rung. **`-deep` is still unlaunched** — §5 step 2 stands.
+**BOTH RUNGS WENT ON SCREEN, AND THE DEEPER ONE WON.** `-lumn` launched 21:04
+and 22:00 — *"Looks 10x better. Using the lumn version now as the default."*
+Then `-deep` launched 22:28 the same evening and beat it:
+
+> *"Deepest band is actually the best skin shader right now over lumn."*
+
+**`gi-50b-bleed-oil-sheen-deep` is the standing rung and the live selection**
+(`brdf_params.txt`; `status.txt` `req == want`; layer `last_failed=0` — §5.1).
+`-lumn` is superseded, and survives as the documented half-step back.
+
+That result confirms §1's model in the direction it predicted *and* past the
+point it predicted. The hold alone (`-lumn`, band floor 1.247 → 1.130) was
+enough to earn "10x better"; taking the rest — c1's grazing-light lobe — is
+what the user actually wanted, and it lands at **0.988 direct / 0.889 bounce**,
+i.e. at or *below* vanilla band depth. The pre-registered failure for this rung
+was *"reads flat/dead → `rho_f` was doing look-work, keep `-lumn` and stop"*.
+It did not fire.
 
 ## 0. Verdict
 
 | question | answer |
 |---|---|
-| did it work on screen? | **Yes — kept, and adopted as the standing selection.** Two launches (21:04, 22:00), both verified serving `…-lumn` unrefused, `last_failed=0`. User: *"Looks 10x better."* The one-variable twin `gi-50b-bleed-oil-sheen` was on screen 17:17/17:20 the same day; the read is cross-launch, not a same-session flip (§5). |
+| did it work on screen? | **Yes — and the deeper rung won.** `-lumn` kept at 21:04/22:00 (*"Looks 10x better"*), then **`-deep` beat it at 22:28** (*"Deepest band is actually the best skin shader right now over lumn"*) and is the live selection. All three launches verified serving the requested rung unrefused, `last_failed=0` (§5.0, §5.1). |
 | does the bleed add energy at the terminator? | **Yes, and it is the single largest term doing so.** `m_G = 1` leaves the `53` triple a net Rec.709 add of **+6.4%·k·w on grey, +10.4% on a rosy skin colour** — peaking exactly at the band floor. |
 | how much is the band lifted, all told? | normalised at the lit cheek (so vanilla ≡ 1.000): **direct path 1.247 at the floor, 1.155 where the band reads** (NoL≈0.1, NoV 0.7); **bounce path 1.153 / 1.062**. `./dev/band_model.py` prints every cell. |
 | what does the hold remove? | direct **1.247 → 1.130**, bounce **1.153 → 1.044**. Hue and saturation are *bit-for-bit* the look the user already approved — the R:G:B ratios are untouched, only the scale moves. |
@@ -197,6 +214,9 @@ From `~/callisto_launches.log` (what sync served) and the CET `status.txt`
 | 18:10 | `…-spp4` | `c564a287c016d49f` | `77`'s full rung, **served on screen, no verdict given** |
 | **21:04** | **`…-lumn`** | `a3139d629e26d902` | this build's first look; `ser=class:in-skin` |
 | **22:00** | **`…-lumn`** | `a3139d629e26d902` | same skin payload, `ser=class+hit:in-skin` |
+| 22:07 | `…-lumn` | `a3139d629e26d902` | same rung again after the commit; `payload=063f302e61d99dc8` |
+| 22:26 | `…-lumn` | `a3139d629e26d902` | same rung, `cache=kept` |
+| **22:28** | **`…-deep`** | `f8f2890ebcd48252` | **the depth rung — §5.1, and it wins** |
 
 Verified for the 22:00 launch (`status.txt`): `want_skinspec_req` ==
 `want_skinspec` == `gi-50b-bleed-oil-sheen-lumn` (**requested rung served, not
@@ -235,7 +255,62 @@ one selector change with no rebuild.
 `CALLISTO_SPP_BASE=gi-50b-bleed-oil-sheen-lumn ./dev/build_skin_spp.sh --install`
 — and that build has still NOT been run.
 
-### 5.1 What is still open
+### 5.1 The depth rung on screen — `-deep` wins
+
+**Launched 2026-08-31 22:28:54.** From `~/callisto_launches.log`:
+
+    skinspec=gi-50b-bleed-oil-sheen-deep  skin_sha=f8f2890ebcd48252
+    shadowset=full-shadow  sc_sha=57ef80ee1f72f54a  ptq=rcbm
+    ser=class:in-skin  ptrefl=on  refract=eta15  tier=on
+    cache=cleared  payload=ff2f4a92c9d52487
+
+`status.txt` for that sync: `want_skinspec_req` == `want_skinspec` ==
+`gi-50b-bleed-oil-sheen-deep` — **the requested rung was served, not refused**
+(the `ser=class` + `full-shadow` precondition the GI rungs carry was met).
+The layer's own `last_run.json`, written 22:29, reports `layer=loaded`,
+`overlays=[skin, shadowcull, ptq, ptrefl]`, hits **resolve 77 / shadow 10 /
+raygen 15 / refl 3 / gi 4, failed 0** — the same hit profile as both `-lumn`
+launches, so the identical set of modules carried the deeper payload.
+
+Settings in force, stated as the house rule requires (`brdf_params.txt` as it
+stands now, unchanged since the launch):
+
+    tier=on  kernel=spectral  skin=on  shadowcull=on  shadowset=full-shadow
+    skinspec=gi-50b-bleed-oil-sheen-deep   ser=class   ptreg=on
+    ptclamp=on ptbounce=on ptmsggx=on ptrefl=on   refract=eta15
+
+Game-side settings were **not re-stated before this launch** and are assumed
+unchanged from `74`/`76` (PT on, PT-in-photo-mode on, RR off, DLSS Balanced,
+RayTracedLighting Psycho, 2560×1440). That is an assumption, not a record —
+the house rule wants them pinned *before* the launch, and this one was judged
+before the rule was applied.
+
+**Verdict:** *"Deepest band is actually the best skin shader right now over
+lumn."* `-deep` is kept and is the live selection.
+
+**What this A/B proves — and it is the cleanest one in the whole band
+sequence.** The launch immediately before it (22:26) served `-lumn`, and the
+two differ in exactly three logged fields: `skinspec`/`skin_sha`, `ser`
+(`class+hit` → `class`), and `cache` (`kept` → `cleared`). Neither of the
+latter two can move a pixel: `41` establishes that
+`OpReorderThreadWithHintNV` is a *hint* — "it cannot change a pixel" — and
+clearing the shader cache changes compile time, not output. **So the only
+look-affecting variable across a back-to-back pair was the skin payload.**
+That is strictly better evidence than `-lumn`'s own win, which crossed `-spp4`
+and therefore moved two things (§5.0). It also matches the 21:04 `-lumn`
+launch field-for-field, `ser` included.
+
+**What it does not prove.** It is a verdict, not a measurement — no capture
+pair was taken, so no `ab_compare` numbers back it, and the camera was not
+pinned across the two launches (a back-to-back pair is not a pixel-matched
+one). And the single pre-registered confound was **neither confirmed nor
+ruled out**: `-deep` dims bounce-lit skin ~2% overall via the SP flat factor
+(1.078 → 1.056), which is uniform rather than band-shaped. The scene was not
+recorded, so it is not even known whether a bounce-dominated interior was in
+shot. If a dim interior later reads flat, that factor — not the band — is the
+first suspect, and the half-step in §5.2 item 3 is the lever.
+
+### 5.2 What is still open
 
 1. ~~**The band pair.** `gi-50b-bleed-oil-sheen` → `-lumn`.~~ **DONE, 21:04 /
    22:00 — kept.** The pre-registered success condition (rosy edge keeps its
@@ -243,17 +318,24 @@ one selector change with no rebuild.
    scored cell by cell; the user's read was a whole-image one. No hue change
    was reported, which is the pre-registered failure that would have meant
    the wrong thing was on screen.
-2. **The depth rung.** `-deep`, same camera. Pre-registered: the direct band
-   goes to vanilla shape (0.988) and the bounce band 11% below it, and
-   bounce-lit skin dims ~2% overall (the SP flat factor drops 1.078 → 1.056 —
-   the one confound, and it is uniform, not band-shaped).
-3. **If `-deep` is too much**, the half-step is two commands, both
+2. ~~**The depth rung.** `-deep`, same camera.~~ **DONE, 22:28 — kept, and it
+   beat `-lumn` (§5.1).** The pre-registered prediction (direct band to vanilla
+   shape 0.988, bounce band 11% below it) is what the user read as *"the best
+   skin shader right now"*. Still unscored: the ~2% uniform dim on bounce-lit
+   skin — see §5.1's last paragraph, and item 3 is its lever.
+3. **If `-deep` ever reads as too much** — most likely in a bounce-dominated
+   interior, where the SP flat factor bites and the §5.1 launch gives no
+   evidence either way (the scene was not recorded) — the half-step is
+   two commands, both
    rebuilding `gi-50bnd` and its compute half in place:
    `./dev/build_gi_rung.sh --flat-front --rho-f 1.09 --install` and
    `./dev/patch_compute_skin.sh --only real-gloss-bleedn-oilh-deep --set rho_f=1.17`,
    then re-assemble with `build_gi_bleed_sheen.sh`. Do NOT compensate by
    raising `k`.
-4. **If neither reads as "more contrasted"**, the remaining levers, in order
+4. ~~**If neither reads as "more contrasted"**~~ — moot for the sun
+   terminator: both rungs read as more contrasted and the deeper one won. Kept
+   as the route for any *other* scene that still reads flat; the remaining
+   levers, in order
    of size: the **SSS kernel** (a blur that transports light across the
    terminator — `kernel=` is live, no build), the **additive fuzz** (up to 79%
    of local diffuse at grazing view, `33`/`74`), and the **GI fill** itself.
@@ -264,8 +346,12 @@ Pre-registered failures:
   of §4, not more β.
 - Skin reads **greyer** in the band → that would be the *hold* over-scaling a
   chromatic pixel; §4's table bounds it at 3%, so suspect the fuzz first.
-- `-deep` reads flat/dead → `rho_f` is a real retroreflection term and it was
-  doing look-work; keep `-lumn` and stop.
+- ~~`-deep` reads flat/dead → `rho_f` is a real retroreflection term and it was
+  doing look-work; keep `-lumn` and stop.~~ **Did not fire.** `rho_f` at
+  identity read as better, not deader, so the grazing-light lobe was *costing*
+  look-work at the terminator rather than adding it. Note this remains untested
+  on a bounce-dominated interior, where `rho_f`'s share is larger (1.175 vs
+  1.35) but the SP flat factor also bites.
 
 ## 6. Files
 
@@ -278,10 +364,14 @@ Pre-registered failures:
 | `dev/build_gi_rung.sh` | `--luma-neutral` → `gi-50bn`, `--flat-front [--rho-f V]` → `gi-50bnd`; per-rung one-variable base (50b vs 50, 50bn vs 50b, 50bnd vs 50bn, the last expecting 4 raygens) |
 | `dev/verify_bleed_norm.py` | **new** — re-parses a built rung and executes the emitted hold; the `53` §4 discipline as a runnable check |
 | `dev/band_model.py` | **new** — every number in §1 and §4 |
-| `init.lua` (+ release copy, deployed) | the two selector entries; `-lumn` relabelled STANDING after the 22:00 verdict |
+| `init.lua` (+ release copy, deployed) | the two selector entries; STANDING moved to `-deep` after the 22:28 verdict, `-lumn` relabelled as the half-step |
 | `skin.set/` | `real-gloss-bleedn-oilh`, `-deep`, `gi-50bn`, `gi-50bnd`, `gi-50b-bleed-oil-sheen-lumn`, `gi-50b-bleed-oil-sheen-deep` |
 
-Committed and pushed at the user's request after the 22:00 verdict. The
-*shipped* default is unchanged and stays `skinspec=off` (`sync_settings.sh`) —
-"default" here means the user's live `brdf_params.txt` selection plus the
-selector label, per the project's default-off rule.
+Committed and pushed at the user's request after the 22:00 verdict. **The
+22:28 `-deep` result (§5.1) and the selector relabel landed after that commit
+and are uncommitted.** No rebuild was needed for it — `-deep` was already
+built, parked and deployed at 20:57; only the selection moved.
+
+The *shipped* default is unchanged and stays `skinspec=off`
+(`sync_settings.sh`) — "default" here means the user's live `brdf_params.txt`
+selection plus the selector label, per the project's default-off rule.

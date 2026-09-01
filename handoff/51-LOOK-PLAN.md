@@ -109,7 +109,17 @@ Identity at `k=0`. Rung parked so it can A/B **at the standing config**
    it, gated `metallic>0.9`.
 3. One launch, eyeball A/B.
 
-## 6. M1 — the denoiser sees vanilla roughness (DEFERRED)
+## 6. M1 — the denoiser sees vanilla roughness (FALSIFIED 2026-08-31, `79`)
+
+> **Dead. Do not run the falsifier below — it does not test the claim.** It
+> swaps RR for NRD, and both read G-buffer roughness, so either outcome is
+> consistent with M1 being false. The discriminating differential already ran
+> with RR **on** (`46` §11.3, E2a→E2b: top-3% highlight +3.23%, flat face,
+> flat controls) and the roughness edit plainly survives RR. Also: every look
+> approved 2026-08-31 was judged with `DLSS_D: false` — RR was not in the
+> pipeline at all. Routes (a) and (b) below are both blocked; `79` §6. The
+> live version of this mechanism is the ReBLUR specular prepass radius in
+> `detail_engine.lua`, never once enabled — `79` §7.
 
 Every roughness edit lives in the resolve; RR/NRD reads roughness from the
 G-buffer and smears the tight highlight `real-gloss` makes. `43` §3 rates
@@ -313,5 +323,6 @@ the RR-off falsifier (§6), settings-only, can share any session.
    if any.**
 3. ~~Launch, same session: `probe-sheen`~~ **DONE — user-run 2026-08-31
    00:47, PASSED (`58`); the A3 build replaces it on this list.**
-4. Free rider whenever convenient: the RR-off look (M1 falsifier,
-   settings-only) — confirm `DLSS_D: false` in the snapshot BEFORE shooting.
+4. ~~Free rider whenever convenient: the RR-off look (M1 falsifier,
+   settings-only) — confirm `DLSS_D: false` in the snapshot BEFORE shooting.~~
+   **DEAD (`79`).** RR has been off since; the falsifier never discriminated.

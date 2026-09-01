@@ -99,12 +99,24 @@ authors thought so too, which is why the `…Screenshot` variants exist.
 
 **The denoiser is the ceiling, and samples do not move it** (`29` §B7). PT
 runs at 1280×720 internally (`15` §1), is reconstructed to 1440p, and
-NRD/DLSS-RR then applies a spatial filter with **no material awareness**.
-Extra samples on skin enter the same history and get the same radius. If faces
-read as *soft*, the lever is the denoiser or the internal resolution and
-neither is in this project's reach; if they read as *grainy*, this helps.
-Worth being precise about which one the complaint actually is — the answer
-changes what to build next.
+NRD/DLSS-RR then applies a spatial filter. Extra samples on skin enter the
+same history and get a radius set by the *G-buffer* material, not by how many
+samples were spent. If faces read as *soft*, the lever is the denoiser or the
+internal resolution; if they read as *grainy*, this helps. Worth being precise
+about which one the complaint actually is — the answer changes what to build
+next.
+
+> **CORRECTED 2026-08-31 (`79` §5).** This paragraph said the filter has **no
+> material awareness** and that "neither is in this project's reach". Both
+> were wrong. NRD takes packed normal+roughness as a **required** input
+> (`IN_NORMAL_ROUGHNESS`) and its specular radius scales with roughness —
+> which is why `detail_engine.lua` can expose `LobeAngleFraction` at all. And
+> the denoiser **is** in reach: `33` built the 22-knob panel over
+> `Editor/Denoising/{NRD,ReBLUR,ReLAX}`, and those knobs are live whenever RR
+> is off, which is the standing config. The surviving half of the claim is the
+> one that matters: *samples* do not move the radius, so `29` §B7's ceiling
+> still stands. `43` §3 M1 states the premise correctly; see `79` for why M1
+> is nonetheless not the reason anything reads soft.
 
 ## 4. The per-material selector: what it takes, and the step that gates it
 

@@ -85,6 +85,24 @@ suggests DLSS 5 RR is in use; if so the entire 22-CVar NRD panel is bypassed
 
 ### M1 — The denoiser sees vanilla roughness *(probably the most important item)*
 
+> **FALSIFIED 2026-08-31 — see `79`. Do not re-queue.** Three corrections to
+> what follows. **(1) The falsifier below does not test the claim:** "RR off,
+> NRD on" swaps one roughness-guided denoiser for another (NRD's
+> `IN_NORMAL_ROUGHNESS` is a required input), so a sharpening under it is
+> consistent with M1 being false. The discriminating test is differential —
+> the same roughness edit, measured with and without the denoiser — not one
+> setting toggle. **(2) That test already ran with RR ON and M1 lost:** the
+> E2a→E2b differential (`46` §11.3) moves the top-3% highlight **+3.23%** on a
+> flat face with flat controls, and the user read `rough-1.3` unprompted as
+> "like a detail filter". A resolve-side roughness edit demonstrably reaches
+> the screen through Ray Reconstruction. **(3) The premise is still right** —
+> the denoiser does filter at vanilla-roughness radius, so it over-blurs a
+> tightened lobe — but that is second-order, and both fix routes are blocked:
+> (a) is moot with RR off (no guide buffer is produced) and (b) needs G-U2,
+> which is unrun (1290 fragment modules dumped, **zero** ever swapped). The
+> live lever for the same mechanism is `detail_engine.lua`'s ReBLUR specular
+> prepass radius, which has never been turned on — `79` §7.
+
 Ray Reconstruction / NRD denoise specular using roughness and material inputs
 taken from the **G-buffer**. Every roughness edit this mod makes — the
 `skinspec` cap, the scoped roughness scale — lives in the *resolve*. The
@@ -145,8 +163,12 @@ before it, and nothing else on the list is this cheap per bit of information.
 
 1. Launch `42` (bounce-lit skin) — on screen.
 2. M2 roughness scale — one rewrite, one launch.
-3. M1 — RR off / NRD on control; then find the roughness guide.
-4. DLSS preset test — Quality/DLAA at the same scene, same save.
+3. ~~M1 — RR off / NRD on control; then find the roughness guide.~~
+   **DEAD (`79`).** Replaced by: enable the `detail_engine` denoiser panel and
+   sweep the ReBLUR specular prepass radius live — same mechanism, no launch.
+4. DLSS preset test — Quality/DLAA at the same scene, same save. **`79` §7
+   promotes this above everything else here**: it is 0d's own "single cheapest
+   face-sharpness lever" and it is still unrun.
 5. `40` sub-enum + sheen probe — one launch.
 6. `41` SER — frame time.
 7. M6 eyes.

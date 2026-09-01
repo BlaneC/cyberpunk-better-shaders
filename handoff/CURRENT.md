@@ -7,17 +7,96 @@ this project keeps relearning: *built*, *loaded* and *swapped* are not
 **Newest first (2026-08-30 23:57 → 2026-08-31 01:46, five launches; then the
 2026-08-31 14:17 oil+fuzz build, its first look, the 14:57 rebuild, its
 launch, the 15:57 half-oil + bounce-bleed rebuild, the 18:00 skin-spp build,
-the 20:57 terminator-band build and its 21:04 / 22:00 launches):**
+the 20:57 terminator-band build and its 21:04 / 22:00 / 22:28 launches; then
+the 2026-08-31 late read-only pass that falsified `43` M1, zero launches):**
 
-- **The mod itself was holding the terminator band UP, and the bleed was the
-  larger half. `-lumn` is ON SCREEN, KEPT, and is now the live selection
-  (`78`).** Launched 21:04 and 22:00; both verified serving
-  `gi-50b-bleed-oil-sheen-lumn` (`skin_sha=a3139d629e26d902`, `req == want`,
-  `last_failed=0`). User verdict: *"Looks 10x better. Using the lumn version
-  now as the default."* Honest caveat kept in `78` §5.0: the launch before it
-  was `-spp4`, so the back-to-back pair moved two variables; the one-variable
-  twin `gi-50b-bleed-oil-sheen` was on screen three hours earlier (17:17 /
-  17:20). `-deep` remains **built, parked, unlaunched**.
+- **CLOTH SHEEN (A2): ON SCREEN, KEPT — `-clothhi` (k=1.0) is the user's
+  new default selection (2026-09-01, `81` §10).** User ran both rungs over
+  repeatable scenes including architecture: *"I SWEAR its better… It just
+  feels better for like every material somehow"*, prefers `-clothhi`. The
+  "every material" read is the pre-registered signature of the proxy gate
+  (rough dielectrics painted, bounded), not evidence of a leak — no wall-glow
+  or chalky-concrete failure reported. Honest caveats: verdict is a
+  look-call — no pinned-frame control, serve not audit-verified
+  (`./dev/ab_launch_audit.py` if it ever matters), settings not re-pinned.
+  Build record follows. A Charlie×Neubelt lobe added at all **457** direct
+  compute BRDF sites on **rough dielectrics**, off the standing
+  `gi-50b-bleed-oil-sheen-deep`, with the Burley diffuse renormalised at
+  **173/173** sites. The cloth *class* is still unreadable offline and `22` was
+  right about that — the census kills it outright: **no shader tests any
+  subtype under class 0**, and the three sub values that are tested
+  (17/21/25) feed **light-channel flags**, not material identities
+  (`05511714f20081b4:1110`). So the gate is a physical proxy, not an identity:
+  `class != 1 && class != 4 && max3(F0) < 0.09`, times a roughness ramp
+  `sat((alpha − 0.10)·5)`. That excludes skin (it already has its own fuzz),
+  hair, every metal, and all glass/clearcoat/polished plastic — and
+  **deliberately still paints concrete, plaster, wood and road**, bounded, as
+  the grazing retroreflection they physically have. **That false positive is
+  the thing the A/B must look at**, so the launch requires a hard non-cloth
+  reference in the same frame (the `58` §5 gap). Bounce sheen is **closed as
+  impossible**: the GI diffuse raygens compute no view vector (`74` §0,
+  `50` §3.1) and a Charlie D needs one — the 16 raygens are byte-identical to
+  `gi-50bnd`. Verification, all on **shipped bytes**: 457/457 + 173/173
+  coverage or the build fails, `spirv-val` clean on 93 modules × 2 rungs,
+  **gate-false is byte-inert** (a `k_cloth=0` rebuild differs from `-deep` in
+  0 of 77 modules), 8696 points machine-checked against a float32-exact closed
+  form per rung, gate-false exact identity, negative control finds 0 sites on
+  `-deep`, and `verify_bleed_norm` + `verify_gi_ladder` still ALL PASS.
+  Calibrated against the *approved* peach fuzz: at k=0.5 the hemisphere is
+  median 0.64% / p90 5.7% of local diffuse vs the shipped fuzz's 0.72% / 4.0%
+  — the same band the user already accepted on a face. **Note the base:** the
+  task named `-lumn`, but `-deep` won at 22:28 (`78` §5.1) and is the live
+  selection, so both rungs sit on `-deep`; only the newest commit *message*
+  still says `-lumn`. `make install` ran (selector rows only, `brdf_params.txt`
+  untouched); nothing has been on screen.
+- **`43` M1 — "the denoiser sees vanilla roughness", rated there as "probably
+  the most important item" — is FALSIFIED. Nothing built, nothing undone
+  (`79`).** The user's read (*"Ray reconstruction definitely makes things
+  blurrier in screenshots"*) is real but is not evidence for M1, on three
+  counts. **(1)** RR was never in the pipeline for any of it: `DLSS_D: false`,
+  verified in `UserSettings.json` at 22:41 against a 22:28 launch, so the oil,
+  the half-fuzz, `-lumn` and the `-deep` band were all judged with RR out.
+  **(2)** The falsifier in `43` §3 / `51` §6 does not discriminate — it swaps
+  RR for NRD and both read G-buffer roughness (`IN_NORMAL_ROUGHNESS` is a
+  required NRD input), so either outcome fits M1 being false. **(3)** The
+  differential that *does* discriminate already ran with RR **on**: E2a→E2b,
+  13:36 / 13:50 on 2026-08-30, both pre-dating any RR toggle attempt — top-3%
+  highlight **+3.23%** on a flat face with flat controls (`46` §11.3, "the
+  only quantitative S1 result standing"), plus the unprompted *"like a detail
+  filter"*. The resolve-side roughness edit reaches the screen through RR;
+  M1 says it cannot. The premise survives (the denoiser does filter at
+  vanilla-roughness radius) but is second-order, and both fixes are blocked:
+  route (a) is moot with RR off, route (b) needs G-U2 — **1290 fragment
+  modules dumped, zero ever swapped** (`dev/census_stage.py`), and it would
+  double-apply against the shipping `alpha_scale=0.7` + `alpha_max=0.2025`.
+  **What to do instead, both cheaper:** (a) the denoiser panel has *never been
+  enabled* — `detail_engine.txt` is absent from the live install, so ReBLUR
+  runs at stock radii and the direct `SpecularPrepassBlurRadius` (20) is
+  literally M1's mechanism on a runtime slider, zero launches
+  (`detail_engine.lua:98`, one-click ceiling at `:208`); (b) the **DLSS preset
+  test**, still unrun, which `43` §2's own 0d calls "the single cheapest
+  face-sharpness lever in the whole document". Also corrected: `32` §3's "no
+  material awareness" claim was wrong. Also recorded: the live install reads
+  **`refract=eta15`**, closing the `76` "which level was on screen" item.
+- **The mod itself was holding the terminator band UP, the bleed was the larger
+  half, and the DEEPEST rung won. `gi-50b-bleed-oil-sheen-deep` is ON SCREEN,
+  KEPT, and is the standing skin rung and the live selection (`78` §5.1).**
+  Both rungs were served: `-lumn` at 21:04 / 22:00 (`skin_sha=a3139d629e26d902`)
+  — *"Looks 10x better. Using the lumn version now as the default."* — then
+  **`-deep` at 22:28** (`skin_sha=f8f2890ebcd48252`, `req == want`, layer
+  `last_failed=0`, same 77/10/15/3/4 hit profile). User verdict: *"Deepest band
+  is actually the best skin shader right now over lumn."* **This is the
+  cleanest band A/B in the sequence**: the launch immediately before it served
+  `-lumn`, and the only other logged differences were `ser` (`class+hit` →
+  `class`) and `cache` — neither of which can move a pixel (`41`: the reorder
+  hint "cannot change a pixel"), so the back-to-back pair moved **one**
+  look-variable. `-lumn`'s own win was the weaker read (the launch before it
+  was `-spp4`, two variables; the one-variable twin was three hours earlier at
+  17:17 / 17:20 — `78` §5.0). Still a verdict, not a measurement: no capture
+  pair, camera not pinned, and the one pre-registered confound — `-deep` dims
+  bounce-lit skin ~2% *uniformly* via the SP flat factor — is untested, and
+  **the scene was not recorded**, so whether a bounce-dominated interior was
+  even in shot is unknown.
   The user's read — *"the increased rays is the wrong lever for more
   contrasted shadows on the face"*, then *"make the bleed luminance-neutral;
   m_R = 1 + 0.336·w adds energy at the terminator"* — is correct and larger
@@ -40,9 +119,12 @@ the 20:57 terminator-band build and its 21:04 / 22:00 launches):**
   per rung — closed form matched, luminance held < 3e-6, gate-false exact
   identity; 150/150 bled sites carry the hold or the build fails;
   `verify_gi_ladder` ALL PASS on both new bases; `gi_refuse` provenance
-  identical to the standing candidate. The A/B ran (`gi-50b-bleed-oil-sheen` vs
-  `…-lumn`) and `-lumn` won. **Still open: `-deep`**, on a hard sun terminator
-  — the direct path carries the larger lift (`78` §5.1). Approximation written out loud:
+  identical to the standing candidate. Both A/Bs ran
+  (`gi-50b-bleed-oil-sheen` → `-lumn` → `-deep`) and each rung beat the one
+  below it. **Now open: `-deep` in a bounce-dominated interior** — the SP flat
+  factor confound lives there, and the half-step back (`--rho-f 1.09` /
+  `1.17`, two commands, `78` §5.2 item 3) is the lever if it reads flat.
+  Approximation written out loud:
   the hold's basis is the albedo triple, so a strongly tinted light leaves a
   bounded ±3–4% residual (`78` §4 has the table and the route to exactness).
 
@@ -262,8 +344,9 @@ the 20:57 terminator-band build and its 21:04 / 22:00 launches):**
 **Next model: read `47-PROCESS-TRACE.md` first — it is the whole 2026-08-30
 afternoon in one document (eight launches, what was decided and why, what was
 withdrawn, and the eight places it is weakest). Then `46` §18 → §17 → §14 →
-§13 → §12 for the evidence behind it. The L-queue is done (L1–L8); only the
-real L4 (RR off, two launches) is unrun.**
+§13 → §12 for the evidence behind it. The L-queue is done (L1–L8); the
+real L4 (RR off, two launches) was never run and is now **retired unrun** —
+`79` shows no surviving decision rides on it.**
 `46` §1–§10 is the older record of six launches, peer-reviewed in §9 and then
 **largely overturned by §11–§18**. Do not believe any figure in §5 or §6.2
 without reading §13 first — they straddle a renderer regime break. §11 is
@@ -278,7 +361,9 @@ resumes the work with zero prior context.
 | SSS diffusion kernel, `detail` preset (engine radius; shipped one was 10×) | `kernel=detail` (selector since 44) | `33` §1 |
 | Skin BRDF tier-1 `c1` in the compute resolvers — **confirmed on screen, but on directly-lit skin only** (`46` §14: +1.8% above ~106 lum, nothing below; `46` §12/L2: the class gate passes, but the painted modules write the direct-light term only). Bounce-lit skin reached separately by `gi-50` below — `42` **closes**. | `skin` | `02`, `03`, `46` §12, §14 |
 | **`skinspec=gi-50`** — real-gloss + class-gated `c1` on the ReSTIR-GI diffuse raygens. **Standing rung, decided on screen 2026-08-30 night** (`50` §6): user prefers it over `R2-real-gloss` (*"more complexity in the shading of the face"*); S3 corroborates (+1.2..1.8% face lum vs three matched controls, achromatic, structured toward the bounce-lit lower face). Needs `ser=class` (in-skin) + `shadowset=full-shadow`; sync refuses otherwise. | `skinspec=gi-50` | `50` |
-| **`skinspec=gi-50b-bleed-oil-sheen-lumn`** — the standing candidate with the terminator bleed scaled to hold each pixel's own Rec.709 luminance (hue/saturation bit-identical; only the energy add goes), in the compute half AND the bounce half. **On screen 2026-08-31 21:04 / 22:00, kept**: *"Looks 10x better. Using the lumn version now as the default."* Takes 0.14 stops of band lift back on each path. Needs `ser=class…` (in-skin) + `shadowset=full-shadow`. Shipped default stays `off`; this is the user's live selection. | `skinspec=gi-50b-bleed-oil-sheen-lumn` | `78` |
+| **`skinspec=gi-50b-bleed-oil-sheen-deep`** — **the best skin rung there is right now** (live selection moved to `-deep-clothhi`, 2026-09-01). `-lumn`'s luma-holding bleed *plus* c1's grazing-light lobe (`rho_f`) pulled to identity, in the compute half AND the bounce half. Takes the terminator band to **0.988 direct / 0.889 bounce** (vanilla ≡ 1.000) — it inverts the mod's own lift rather than merely cancelling it. **On screen 2026-08-31 22:28, kept over `-lumn`**: *"Deepest band is actually the best skin shader right now over lumn."* One look-variable against the launch before it (`78` §5.1). Untested confound: ~2% uniform dim on bounce-lit skin. Needs `ser=class…` (in-skin) + `shadowset=full-shadow`. Shipped default stays `off`. | `skinspec=gi-50b-bleed-oil-sheen-deep` | `78` §5.1 |
+| **`skinspec=gi-50b-bleed-oil-sheen-deep-clothhi`** — cloth sheen (A2) at k=1.0 on the `-deep` stack: Charlie×Neubelt added at all 457 direct compute BRDF sites on rough dielectrics (proxy gate: not skin, not hair, `max3(F0) < 0.09`, roughness ramp), Burley diffuse renormalised 173/173; bounce closed (no view vector in the GI diffuse raygens). **On screen 2026-09-01, KEPT as the user's default**: *"It just feels better for like every material somehow"* — the every-material read is the proxy gate by design. `-cloth` (k=0.5) parked as the quiet half. Look-call: no pinned control, serve not audit-verified. Needs `ser=class…` + `shadowset=full-shadow`. | `skinspec=gi-50b-bleed-oil-sheen-deep-clothhi` | `80`, `81` |
+| **`skinspec=gi-50b-bleed-oil-sheen-lumn`** — the same stack with only the bleed's energy add removed (each pixel's own Rec.709 luminance held; hue/saturation bit-identical), c1's lobe left in. 0.14 stops of band lift back on each path. **On screen 21:04 / 22:00, kept** (*"Looks 10x better"*), then **superseded by `-deep` at 22:28**. Keep it as the half-step back if `-deep` ever reads too deep. | `skinspec=gi-50b-bleed-oil-sheen-lumn` | `78` §5.0 |
 | Hair shadow-leak fix, direct shadow rays only | `shadowcull` / `full-shadow` | `26` §7 |
 | PT: bounce cull mask 1→255, reflection mask, firefly clamp | `ptbounce`, `ptrefl`, `ptclamp` | `26` §4 |
 | MS-GGX rough-metal energy compensation | `ptmsggx` | `28` |
@@ -292,8 +377,8 @@ resumes the work with zero prior context.
 | Oily/wet skin gloss ladder (roughness *ceiling*, flattens variation) | `skinspec=subtle…extreme` | `33` §2 |
 | Peach fuzz (added Charlie×Neubelt lobe, class-1 gated, **Schlick ramp cancelled**, now at **half strength**) and the **half** oil layer, as a one-variable ladder off the standing `gi-50-bleed`. The 73-era full-strength candidate won its A/B modulo "half the oil / too hazy in dim light" and is parked as `-hot` | `skinspec=gi-50-bleed-oil` / `-sheen2` / `-oil-sheen` (+ `…-hot` = 73 levels, `…-wide` = the 72-era rim) | `72`, `73`, `74` |
 | **Terminator bleed on BOUNCE light** — the `53` closed form at the ReSTIR-GI ST pair's own tail NoL, so the rosy terminator cue survives indoors where bounce dominates. `gi-50b` = bounce bleed alone (attribution); `gi-50b-bleed-oil-sheen` = **the indoor-depth candidate**, 2 raygen files from `gi-50-bleed-oil-sheen` | `skinspec=gi-50b` / `gi-50b-bleed-oil-sheen` | `74` |
-| **Terminator band depth, the deep rung** (`78`) — `-lumn` (now confirmed, table above) plus c1's grazing-light lobe `rho_f` pulled to identity in both halves. Takes 0.34 / 0.38 stops back, i.e. it INVERTS the lift rather than cancelling it, and dims bounce-lit skin ~2% overall via the SP flat factor — the one pre-registered confound. Half-step exists (`--rho-f`) if it reads as too much | `skinspec=gi-50b-bleed-oil-sheen-deep` | `78` §5.1 |
-| **Skin-only sample count** (`29` B4) — class-1 pixels get `max(RayNumber,4)` spp in the reference raygens, non-skin bit-identical. `-spp4d` = the engine's own live sample loop retargeted (6 runtime-bound raygens, low risk); `-spp4` = plus the 4 constant-folded ones rewired (record-store residual risk — d-vs-full is the attribution A/B). Photo-mode priced (~+60–90% PT in close-ups). **Both served on screen 18:07/18:10 with no verdict; not built on the `-lumn` base yet** (`CALLISTO_SPP_BASE=…-lumn ./dev/build_skin_spp.sh --install` is the one command) | `skinspec=gi-50b-bleed-oil-sheen-spp4d` / `…-spp4` | `77` |
+| ~~**Terminator band depth, the deep rung**~~ (`78`) — **PROVEN ON SCREEN 22:28, moved to the table above.** What is left of it in this queue is the *interior* case: `-deep` dims bounce-lit skin ~2% uniformly via the SP flat factor (1.078 → 1.056), and it was judged on a sun terminator. Half-step exists (`--rho-f 1.09` / `1.17`) if a dim interior reads flat | `skinspec=gi-50b-bleed-oil-sheen-deep` | `78` §5.2 |
+| **Skin-only sample count** (`29` B4) — class-1 pixels get `max(RayNumber,4)` spp in the reference raygens, non-skin bit-identical. `-spp4d` = the engine's own live sample loop retargeted (6 runtime-bound raygens, low risk); `-spp4` = plus the 4 constant-folded ones rewired (record-store residual risk — d-vs-full is the attribution A/B). Photo-mode priced (~+60–90% PT in close-ups). **Both served on screen 18:07/18:10 with no verdict; both sit on the pre-`78` base, which is now two rungs stale** (`CALLISTO_SPP_BASE=gi-50b-bleed-oil-sheen-deep ./dev/build_skin_spp.sh --install` is the one command to rebase them on the standing rung) | `skinspec=gi-50b-bleed-oil-sheen-spp4d` / `…-spp4` | `77` |
 | Peach fuzz, 58-era **multiplicative** form — measures 1.00–1.05× on the face; superseded, kept only for reproducibility | `skinspec=gi-50-bleed-sheen` | `58`, `72` §1 |
 | SSS kernel presets `balanced` / `callisto` / `vanilla` (tooling check) | `kernel=` | `44`, `33` §1 |
 | Sun angular size / visibility / scattering (live CVars) | PT panel | `44`, `43` M3 |
@@ -373,11 +458,19 @@ for reach. In order of look-payoff:
 2. ~~**One eyeball ladder session**~~ **DONE 2026-08-30 (`49`)** — `real-gloss`
    wins, unanimous, no single-axis fallback needed. Kernel presets still to
    ride along.
-3. **One RR-off look** (old E10 / `43` M1, by eye, at the winning rung):
-   does the roughness axis sharpen with the denoiser out? Confirm
-   `DLSS_D: false` in the `collect.sh` snapshot **before** shooting. The
-   two-launch RR *floor* is dropped — no decision still rides on S1/S3
-   radiometry.
+3. ~~**One RR-off look** (old E10 / `43` M1, by eye, at the winning rung)~~
+   **CLOSED 2026-08-31 — M1 FALSIFIED, nothing to launch (`79`).** The test
+   never discriminated (it swaps RR for NRD; both read G-buffer roughness),
+   and the differential that does discriminate already ran with RR **on**:
+   E2a→E2b moves the top-3% highlight **+3.23%** on a flat face (`46` §11.3),
+   so the resolve-side roughness edit reaches the screen through RR. Also
+   moot in practice: `DLSS_D: false` has been the standing config throughout,
+   so every look approved 2026-08-31 was already judged with RR out.
+   **Replacement, in order:** (a) enable the `detail_engine` denoiser panel —
+   `detail_engine.txt` is absent from the live install, so ReBLUR runs at
+   stock radii and the direct `SpecularPrepassBlurRadius` (20) is M1's own
+   mechanism on a live slider, no launch; (b) the DLSS preset test at item 4,
+   which `79` §7 promotes above everything else on this queue.
 4. Whenever convenient: E8 sun size (live, no launch) · E11 probe legend
    decode (offline, `44` §2.9).
 5. **The look plan is `51`** (2026-08-30 night): A6 spectral kernel (`52`)

@@ -128,9 +128,13 @@ python3 - "$WORK/out" <<'PY' || exit 1
 import glob, json, os, sys
 dest = sys.argv[1]
 tot = dict(mods=0, sites=0, ggx=0, shape=0, dom=0, dup=0,
-           folded=0, folded_min=0, clamped=0, defres_sites=0)
+           folded=0, folded_min=0, clamped=0, defres_sites=0,
+           cloth_sites=0, cloth_damp_sites=0, cloth_fd_sites=0,
+           cloth_skip=0, damp_skip=0)
 betas = set()
 modes = set()
+kcloth = set()
+dampk = set()
 bad = []
 for f in sorted(glob.glob(os.path.join(dest, '.*.json'))):
     try:
@@ -145,9 +149,14 @@ for f in sorted(glob.glob(os.path.join(dest, '.*.json'))):
     tot['shape'] += len(p.get('skipped_shape', []))
     tot['dom'] += len(p.get('skipped_dom', []))
     tot['dup'] += len(p.get('skipped_dup', []))
-    for k in ('folded', 'folded_min', 'clamped', 'defres_sites'):
+    for k in ('folded', 'folded_min', 'clamped', 'defres_sites',
+              'cloth_sites', 'cloth_damp_sites', 'cloth_fd_sites'):
         tot[k] += p.get(k, 0)
+    tot['cloth_skip'] += len(p.get('skipped_cloth', []))
+    tot['damp_skip'] += len(p.get('skipped_damp', []))
     betas.add(p.get('defres', 0.0))
+    kcloth.add(p.get('k_cloth', 0.0))
+    dampk.add(p.get('cloth_damp_k', 0.0))
     if d.get('spirv_val') != 'clean':
         bad.append((d.get('module'), 'spirv-val not clean'))
     if p.get('peach_sites', 0) == 0:
@@ -162,8 +171,33 @@ print('  mode %s: %d sites fold the site\'s own light cosine, %d fold '
 print('  defres %s: the Schlick ramp is cancelled at %d of %d sites'
       % ('/'.join('%.2f' % b for b in sorted(betas)), tot['defres_sites'],
          tot['sites']))
+print('  cloth k=%s: %d of %d sites carry the cloth lobe (%d declined), '
+      'diffuse damp at %d of %d Burley sites (%d declined)'
+      % ('/'.join('%.3f' % k for k in sorted(kcloth)), tot['cloth_sites'],
+         tot['sites'], tot['cloth_skip'], tot['cloth_damp_sites'],
+         tot['cloth_fd_sites'], tot['damp_skip']))
 if len(betas) != 1:
     bad.append(('defres', 'modules disagree on defres: %s' % sorted(betas)))
+if len(kcloth) != 1:
+    bad.append(('cloth', 'modules disagree on k_cloth: %s' % sorted(kcloth)))
+if len(dampk) != 1:
+    bad.append(('cloth', 'modules disagree on the damp constant: %s' % sorted(dampk)))
+if max(kcloth) > 0:
+    # Same rule as defres: a site that took the peach lobe but not the cloth
+    # lobe would leave the gate half-applied and the byte count would not say
+    # so (the 42 rule). Coverage is all-or-nothing, per site AND per diffuse.
+    if tot['cloth_sites'] != tot['sites'] or tot['cloth_skip']:
+        bad.append(('cloth', '%d of %d sites carry the cloth lobe, %d declined'
+                    % (tot['cloth_sites'], tot['sites'], tot['cloth_skip'])))
+    if max(dampk) > 0 and (tot['cloth_damp_sites'] != tot['cloth_fd_sites']
+                           or tot['damp_skip']):
+        bad.append(('cloth', 'diffuse damp at %d of %d Burley sites, %d declined'
+                    % (tot['cloth_damp_sites'], tot['cloth_fd_sites'],
+                       tot['damp_skip'])))
+    if tot['cloth_sites'] != 457 or tot['cloth_damp_sites'] != 173:
+        bad.append(('cloth', 'census says 457 sheen sites / 173 Burley sites; '
+                    'this build has %d / %d'
+                    % (tot['cloth_sites'], tot['cloth_damp_sites'])))
 if max(betas) > 0 and tot['defres_sites'] != tot['sites']:
     # A site that took the lobe but not the weight would keep the 72-era
     # blown rim on part of the face, and the byte count would not say so.

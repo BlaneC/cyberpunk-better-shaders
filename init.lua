@@ -131,7 +131,7 @@ local SKIN_LEVELS = {
     -- bleed ON BOUNCE LIGHT (the ReSTIR-GI diffuse ST pair's own NoL) --
     -- indoors, where bounce dominates, the rosy terminator cue no longer
     -- washes out. One variable (2 raygen files) vs the matching gi-50 rung.
-    { id = "gi-50b-bleed-oil-sheen", label = "GI-50b: bounce bleed, band NOT held (74's candidate, superseded by -lumn)" },
+    { id = "gi-50b-bleed-oil-sheen", label = "GI-50b: bounce bleed, band NOT held (74's candidate, superseded by -deep)" },
     { id = "gi-50b",                 label = "GI-50b alone (bounce bleed, no oil/fuzz) -- attribution" },
     -- 78: the terminator BAND, deeper. The mod's own stack lifts the shadow
     -- falloff ~6% above vanilla where the band reads (normalised at the lit
@@ -142,11 +142,26 @@ local SKIN_LEVELS = {
     -- grazing-LIGHT lobe to identity (rho_f 1.35 -> 1.0 direct, 1.175 -> 1.0
     -- bounce), which is the other half; it also drops the SP pair's flat
     -- E[c1] 1.078 -> 1.056, so bounce-lit skin dims ~2% overall (the one
-    -- confound, pre-registered in 78 sec 5). -lumn was launched 2026-08-31
-    -- 21:04 + 22:00 and KEPT ("looks 10x better") -- it is the standing rung;
-    -- -deep is still unlaunched.
-    { id = "gi-50b-bleed-oil-sheen-lumn", label = "GI-50b candidate, bleed LUMA-NEUTRAL  <-- STANDING (78, kept on screen)" },
-    { id = "gi-50b-bleed-oil-sheen-deep", label = "  ^ + c1 grazing lift off (deepest band)" },
+    -- confound, pre-registered in 78 sec 5). Both went on screen 2026-08-31:
+    -- -lumn at 21:04 + 22:00, KEPT ("looks 10x better"), then -deep at 22:28,
+    -- which BEAT it ("deepest band is actually the best skin shader right now
+    -- over lumn"). -deep is the standing rung; -lumn is the half-step back if
+    -- -deep ever reads too deep (see 78 sec 5.1, 5.2).
+    { id = "gi-50b-bleed-oil-sheen-deep", label = "GI-50b, bleed LUMA-NEUTRAL + c1 grazing lift off (DEEPEST BAND)  <-- STANDING (78, best on screen)" },
+    { id = "gi-50b-bleed-oil-sheen-lumn", label = "  ^ half-step: bleed luma-neutral only, c1 lift kept (78, kept then superseded)" },
+    -- 81: A2, the CLOTH sheen. An added Charlie x Neubelt lobe at the same
+    -- 457 GGX sites the peach fuzz rides, gated on ROUGH DIELECTRICS that are
+    -- neither skin (class 1, which has its own fuzz) nor hair (class 4):
+    -- max3(F0) < 0.09 excludes every metal, and a ramp on the site's own
+    -- alpha (0.10 -> 0.30, i.e. authored roughness 0.32 -> 0.55) excludes
+    -- glass, clearcoat and polished plastic. There is NO cloth-exclusive gate
+    -- in this G-buffer (80 sec 2), so concrete, plaster, wood and dirt get the
+    -- lobe too, bounded -- as the grazing retroreflection they physically
+    -- have and one GGX lobe does not model. Carries the energy damp 23 sec 4
+    -- asked for: f_d *= 1 - k*E1*wr at all 173 Burley sites.
+    -- ONE VARIABLE vs -deep (the standing rung): the compute half only.
+    { id = "gi-50b-bleed-oil-sheen-deep-cloth",   label = "  + CLOTH SHEEN k=0.5 (rough dielectrics; 11-13% of local diffuse at grazing)  <-- 81's candidate" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi", label = "  + CLOTH SHEEN k=1.0 (double; 23-25% at grazing) -- the louder half of the A/B" },
     -- 77: skin-only sample count (29 B4, unblocked by the 56 sentinel).
     -- Class-1 pixels path-trace max(RayNumber,4) spp; everything else keeps
     -- the engine count (non-skin is bit-identical to the base rung).
