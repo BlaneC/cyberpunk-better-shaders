@@ -1,4 +1,4 @@
-# CallistoSSS — current state (2026-09-01 22:05, after the fog keep)
+# CallistoSSS — current state (2026-09-01 22:30, after the hunt-paint read-out)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
@@ -12,6 +12,49 @@ the 2026-08-31 late read-only pass that falsified `43` M1, zero launches):**
 
 **2026-09-01 six-agent offline session — docs `82`-`87`, zero launches, offline-verified
 only. Read the doc before serving anything.**
+
+**2026-09-01 22:30 — `94`'s `hunt-paint` IS SHOT and the car-paint gate is
+REAL: cars read green. One unanticipated false positive — market tarp roofs
+read green too.** USER VERDICT: *"Lots of cars have the green on them and
+we're separating materials way better … The green is also getting picked up by
+some market tarp roofs … Thats probably the worst offender."*
+
+- **Unblocked:** `94` §4.1's clearcoat at site C, gate `m ≥ 0.5 ∧ r < 0.35`,
+  plus the flake glints on the same predicate. `m_min`/`r_max` were guesses
+  the build was told to label as guesses; they are now measured and the
+  measurement agrees. Paint is `class 0, m ≥ 0.50, r ∈ [0.12, 0.30)` — the
+  first row of §12.3's pre-registered table.
+- **The bigger result, which the probe was not built to find:** the buckets
+  separate Night City's materials cleanly and consistently. This is a
+  **material classifier that happens to have a car-paint bucket**, and the
+  other five buckets (chrome, rough metal, smooth dielectric, the semi-metal
+  band) are candidates for their own treatments. Recorded in `94` §14.1, not
+  designed anywhere yet.
+- **The false-positive census is one problem, not a grab-bag.** Window
+  gratings, road-edge light grilles and AC units also read green — and all of
+  them are *painted metal*, so the coat is the correct model for them and the
+  user wants them included (*"I wouldn't mind if they randomly got materialed
+  the same way it might look cool"*). The gate is selecting **smooth metal
+  with a coat on it**, which is exactly what §4.1 set out to find. **Only the
+  tarp is a problem** (*"Overall just the tarp would be a problem"*) — and it
+  is the only non-metal in the set, which is a clue in itself: a woven polymer
+  sheet has no business at `m ≥ 0.5`. Even there, a *coat* on a plastic tarp
+  is arguably correct while *flake glints* on one are unambiguously wrong, so
+  the two halves — already separately gated — should ship on different
+  predicates.
+- **Two bisect rungs built and parked**, one knob each, to find whether the
+  tarp is separable at all: `hunt-paint-r20` (`r_mid` 0.30 → 0.20, "is the
+  tarp rougher?") and `hunt-paint-m70` (`m_hi` 0.50 → 0.70, "is the tarp less
+  metallic?"). One frame each, holding a car and a tarp roof together.
+  Thresholds re-derived from the shipped bytes by the verifier; all three
+  non-vacuity decoys rejected. Selector rows added, `make install` run.
+- **What the read-out did NOT report** (`94` §15, so silence is not mistaken
+  for a pass): skin red / hair yellow (the void condition), the car window
+  teal not green (the "kills the read-out" row), road vs body, chrome cyan,
+  black anywhere, and `hunt-paint-ctl` vs the standing rung — the cheapest and
+  most load-bearing control in the repo, still unshot. No screenshot was
+  archived, so this is an eyeball read-out: enough to unblock §4.1, not enough
+  for those five.
 
 **2026-09-01 22:05 — ON SCREEN AND KEPT. `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog`
 is the standing selection and the user's stated default.** USER VERDICT

@@ -863,3 +863,132 @@ touched: `init.lua`, `pt_engine.lua`, `brdf_params.txt`, the `Makefile`,
 `dev/patch_subtype_probe.py`, `dev/patch_compute_skin.py` and every existing
 rung are unchanged (`git status` shows only the three new `dev/` files, the
 two `swaps.huntpaint*` directories and this doc).
+
+---
+
+# MILESTONE 3 — `hunt-paint` IS SHOT. The gate is real; one unanticipated false positive (2026-09-01)
+
+## 14. The read-out
+
+**USER VERDICT 2026-09-01:** *"The capture is working very close to as
+intended. Lots of cars have the green on them and we're separating materials
+way better. The green is also getting picked up by some market tarp roofs
+which may be a problem. Could be picking up that plastic tarp look as the car
+paint too. Thats probably the worst offender. But everything else would be
+awesome if they had specific better BRDF/BSDF's applied they seem pretty
+materially consistent."*
+
+Served the same way the fog rung was, and checked the same way: the launch
+line names `skinspec=hunt-paint`, and `swaps.skin/` is `cmp`-equal to
+`skin.set/hunt-paint`. §5's whole premise — *nobody has ever pointed a
+material probe at a car* — is now retired.
+
+### 14.1 What it settles
+
+**Car paint is `class 0, m ≥ 0.50, r ∈ [0.12, 0.30)`** — the first row of
+§12.3's decision table, the one the design was written for. That row's
+consequence stands unchanged: **build §4.1's coat at site C**, gate
+`m ≥ 0.5 ∧ r < 0.35`, and the glints are unblocked on the same predicate.
+`m_min` and `r_max` were guesses in §4.1 and the build was told to say so;
+they are now measured, and the measurement agrees with the guess.
+
+The second half of the read-out matters as much and was **not** what the probe
+was built to answer: the buckets *as a taxonomy* separate Night City's
+materials cleanly and consistently. That is a reusable result. The gate is not
+a car-paint gate; it is a **material classifier that happens to have a
+car-paint bucket**, and the other five buckets are candidates for their own
+treatments (chrome and mirror metal, rough metal, smooth dielectric, the
+semi-metal band). That is a much larger programme than `94` and is recorded
+here, not designed here.
+
+### 14.2 The false-positive census — one problem, and it is not the metals
+
+Everything else the window caught is **painted or smooth metal**, and the user
+called all of it acceptable or wanted:
+
+| what else reads green | is it a false positive? |
+|---|---|
+| metal gratings in windows | **no.** A window grating is painted steel. `m ≥ 0.5` with `r ∈ [0.12, 0.30)` is what painted steel *is*, and a clearcoat is the correct model for it |
+| the grating inside road-edge light housings | same, and the coat's Fresnel is what makes a grille read as metal rather than as a texture |
+| AC units, and some other metals | same. USER: *"I wouldn't mind if they randomly got materialed the same way it might look cool"* |
+| chrome, polished signage, mirror cyberware (§4.1's pre-registered set) | bounded, as §4.1 argued — a mild Fresnel whitening |
+| **market tarp roofs** | **YES — the only one.** USER: *"Overall just the tarp would be a problem"* |
+
+That census is the useful shape of the result: the gate is not over-firing on
+a grab-bag, it is selecting **smooth metal with a coat on it**, which is
+exactly the material class §4.1 set out to find. Painted steel props landing in
+it is the gate working, not leaking.
+
+### 14.2a The one that is a problem
+
+**Market tarp roofs read green.** **Tarps were not on §4.1's list**, and they are
+worse than everything that was: they are large, matte-looking and overhead, so
+a wrong specular on them reads as a bug rather than as a sheen. They are also
+the only entry in §14.2 that is not metal — which is itself a clue. A woven
+polymer sheet has no business at `m ≥ 0.5`; either the tarp material is
+authored with a high metalness it does not physically have, or it shares a
+template with something that does. That is worth one grep of the material
+library if the bisect (§14.3) fails, because a mis-authored source would mean
+no `(m, r)` threshold can ever separate it cleanly.
+
+Two things are true at once and the design should exploit the split:
+
+- **A clearcoat on a plastic tarp is not obviously wrong.** A tarp genuinely
+  *is* a smooth polymer sheet over a woven base — the same layered
+  construction the coat models. If the coat alone ships, a tarp gaining a
+  Fresnel-weighted sheen is arguably a fix, not an artefact.
+- **Metallic flake glints on a tarp are unambiguously wrong.** Nothing in a
+  tarp glitters. §4.4's glints are the half that must not fire here.
+
+So the coat and the glints, which §12.3 already treats as separately gated,
+should ship on **different** predicates: the coat on the measured window, the
+glints on whatever narrower window §14.3 can find — and if it finds none, the
+glints stay unbuilt rather than firing on tarps.
+
+### 14.3 Two rungs, built, to find out whether the tarp is separable at all
+
+The thresholds are build-time `OpConstant`s precisely so this costs a launch
+and not a patcher edit (§9). Two hypotheses, one knob each, both parked:
+
+| rung | knob | hypothesis it tests |
+|---|---|---|
+| `hunt-paint-r20` | `r_mid` 0.30 → **0.20** | tarps are **rougher** than car paint. Green narrows to `r ∈ [0.12, 0.20)`; anything above turns **orange** |
+| `hunt-paint-m70` | `m_hi` 0.50 → **0.70** | tarps are **less metallic** than car paint. Green needs `m ≥ 0.70`; anything below turns **grey** |
+
+**One frame each, the same frame, holding a car and a tarp roof together.**
+
+| what happens | reading |
+|---|---|
+| tarp turns orange (or grey), **car stays green** | separable. Move that threshold in §4.1's gate and the false positive is gone for both coat and glints |
+| **both** turn, together | the two materials overlap on that axis; that knob cannot separate them |
+| neither turns | both sit deeper inside the window than the new threshold; bisect again |
+
+If both axes fail, `(m, r)` cannot separate tarp from paint at site C and
+that is a real limit, not a tuning problem — the honest response is §14.2's
+split (ship the coat, hold the glints), **not** a threshold that half-works.
+`96` §4.2's 5-bit sub-enum would be the discriminator, and it is blocked on
+the unfound fragment write site.
+
+## 15. What the read-out did NOT report, and what that costs
+
+Recorded so nobody later mistakes silence for a pass. §12.3 pre-registered
+five checks that this read-out does not explicitly answer:
+
+- **skin red / hair yellow** — the void condition. Almost certainly fine (a
+  broken class read would not have produced a coherent material separation),
+  but *almost* is not the standard this table was written to.
+- **the car window teal, not green** — the "kills the read-out" row.
+- **the road vs the body** — `38` D2 *wants* wet asphalt, so this needs to be
+  decided explicitly rather than discovered later.
+- **chrome cyan**, and **black anywhere** (which would falsify `§1`'s census
+  and `96` §2 with it).
+- **`hunt-paint-ctl` vs the standing rung** — unshot. It is the cheapest and
+  most load-bearing control in the repo: 93 of 93 modules byte-identical, so
+  if it looks different the layer is not serving what it claims and *every*
+  A/B here inherits the doubt.
+
+No screenshot was archived, so this is an eyeball read-out and not a pixel
+measurement. That is enough to unblock §4.1 — the signal ("lots of cars",
+"separating way better") is far above any plausible reading error — and it is
+**not** enough for the four rows above, which are exactly the ones a glance
+would miss.

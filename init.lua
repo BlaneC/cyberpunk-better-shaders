@@ -308,6 +308,15 @@ local SKIN_LEVELS = {
     -- rung. If it is not, the layer is not serving what it claims.
     { id = "hunt-paint",     label = "PROBE: hunt-paint -- class + metallic/roughness hue paint (94; one frame, then throw it away)" },
     { id = "hunt-paint-ctl", label = "PROBE: hunt-paint CONTROL (gain 0) -- must be indistinguishable from -cone2all" },
+    -- 94 sec 14: hunt-paint IS SHOT. Cars read GREEN -- paint is class 0,
+    -- m >= 0.50, r in [0.12, 0.30) -- but so do market TARP ROOFS, which the
+    -- pre-registration missed. These two bisect the window, one knob each,
+    -- to find out whether the tarp is separable from the paint at all.
+    -- Shoot ONE frame holding a car and a tarp roof together, on each.
+    -- Tarp moves and car stays green -> move that threshold in the real gate.
+    -- Both move together -> that axis cannot separate them (94 sec 14.3).
+    { id = "hunt-paint-r20", label = "PROBE: hunt-paint r_mid 0.30->0.20 -- is the TARP rougher than the paint?" },
+    { id = "hunt-paint-m70", label = "PROBE: hunt-paint m_hi 0.50->0.70 -- is the TARP less metallic than the paint?" },
     -- 77: skin-only sample count (29 B4, unblocked by the 56 sentinel).
     -- Class-1 pixels path-trace max(RayNumber,4) spp; everything else keeps
     -- the engine count (non-skin is bit-identical to the base rung).
