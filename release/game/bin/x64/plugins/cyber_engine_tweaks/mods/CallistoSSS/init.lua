@@ -22,7 +22,12 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- Shader execution reordering rung (handoff/41, 44). Off is
                -- the A/B control (ser.disable); class/byte/hit/class+hit are
                -- the hint variants parked in ser.set/ by dev/patch_ser.sh.
-               ser = "off",
+               -- DEFAULT CHANGED 2026-09-01 from "off" to "class": the
+               -- shipped skinspec above carries SER splices, and gi_refuse
+               -- empties the whole overlay when ser=off is requested with a
+               -- raygen-bearing rung. off is still the A/B control, but it
+               -- can only be paired with a skinspec that ships no raygens.
+               ser = "class",
                -- Path tracing (handoff/23 tier 1). ptreg is the only one that
                -- trades look for noise, so it is the only one defaulting off.
                shadowset = "full-shadow",
@@ -50,7 +55,14 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- painted (pores, creases, the oily T-zone against matte cheeks), which
                -- is exactly the "faces read soft, not like real people" complaint.
                -- See handoff/33. The ladder is kept; it is opt-in now.
-               skinspec = "off" }
+               -- DEFAULT CHANGED 2026-09-01 to the 95 height-fog rung: the
+               -- standing GI selection (-cone2all) with Beer-Lambert
+               -- extinction on the sun ray. It ships 12 rgs_reference_main +
+               -- 4 rgs_restirgi_*, so sync_settings.sh's gi_refuse block
+               -- REQUIRES ser=class and shadowset=full-shadow -- that is why
+               -- `ser` above no longer defaults to off. An unbuilt level
+               -- still falls back to off, loudly, on the sync side.
+               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog" }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
@@ -258,6 +270,44 @@ local SKIN_LEVELS = {
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2gf",      label = "  + CAVITY CONE 2 taps sun-only, GATE FIXED  <-- 90's candidate" },
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2allgf",   label = "  + CAVITY CONE ALL LIGHTS k_local=0.85, GATE FIXED" },
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all35gf", label = "  + CAVITY ALL LIGHTS k_local=0.35, GATE FIXED (sun stays 0.85)" },
+    -- handoff/95. HEIGHT FOG on the SUN SHADOW RAY: the direct sun term is
+    -- multiplied by a Beer-Lambert transmittance T = exp(-tau) with an
+    -- analytic exponential height fog, at EVERY bounce -- deliberately
+    -- ungated, the opposite of 88's cavity cone, and 95 sec 6 says why: a
+    -- shadow ray at bounce k really does travel through the same atmosphere,
+    -- so the product over a path IS the physical integral. Zero rays, zero
+    -- PRNG draws, zero added variance.
+    -- READ 95 sec 0 BEFORE JUDGING: this gives NO light shafts and NO
+    -- distance-based aerial perspective. Both need in-scattering along the
+    -- CAMERA ray, which a multiply on a surface term cannot do and which 53's
+    -- multiplicative-only constraint forbids. What it gives is sun-elevation
+    -- and HEIGHT dependent extinction plus beam reddening: a low sun goes
+    -- warm and dim through the boundary layer, a rooftop is cleaner than the
+    -- street, and indirect sun is attenuated by the same physics as direct.
+    -- tau is the AIRMASS EXCESS over zenith, so T == 1.0 EXACTLY at noon and
+    -- the atmosphere the artist already baked into the sun radiance is never
+    -- double-counted. T <= 1 everywhere, so no pixel is ever brightened.
+    -- REACH: reference/photo-mode PT only -- all 77 compute and all 4
+    -- ReSTIR-GI modules are byte-identical to -cone2all. Judge it in photo
+    -- mode or not at all. Pin the weather CLEAR: the engine composites its
+    -- own volumetric fog and foggy weather double-counts (95 F2).
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog",    label = "  + HEIGHT FOG on the sun ray, A=0.25 H=120m p=1 (95's ship candidate)  <-- DEFAULT" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-foghi",  label = "  + HEIGHT FOG A=0.50 -- STRENGTH alone (double)" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fogx",   label = "  + HEIGHT FOG A=1.00 -- DIAGNOSTIC only: is the term live? x0.006 at 10deg sun" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fogn",   label = "  + HEIGHT FOG neutral tint (p=0) -- the TINT axis; identical green, R/B = 1.00" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fogcam", label = "  + HEIGHT FOG camera-relative height -- the F3 discriminator, not a look" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fogy",   label = "  + HEIGHT FOG up=Y -- ONE-FRAME FALSIFIER for the up axis (95 F1). NEVER SHIP" },
+    -- handoff/94 sec 9-12. Material PROBE, not a look: hue-paints every
+    -- radiance write of the 77 compute modules by class (skin red, hair
+    -- yellow, vegetation magenta) and, under class 0, by a metallic x
+    -- roughness bucket -- green is the car-paint candidate window
+    -- (m >= 0.5, 0.15 < r <= 0.35), cyan chrome, orange rough metal, dark
+    -- azure smooth dielectric. Skin MUST read red or the capture is void.
+    -- -ctl is the gain-0 control: 93 of 93 modules byte-identical to
+    -- -cone2all, so selecting it must be indistinguishable from the standing
+    -- rung. If it is not, the layer is not serving what it claims.
+    { id = "hunt-paint",     label = "PROBE: hunt-paint -- class + metallic/roughness hue paint (94; one frame, then throw it away)" },
+    { id = "hunt-paint-ctl", label = "PROBE: hunt-paint CONTROL (gain 0) -- must be indistinguishable from -cone2all" },
     -- 77: skin-only sample count (29 B4, unblocked by the 56 sentinel).
     -- Class-1 pixels path-trace max(RayNumber,4) spp; everything else keeps
     -- the engine count (non-skin is bit-identical to the base rung).

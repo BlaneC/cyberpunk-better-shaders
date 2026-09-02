@@ -1,4 +1,4 @@
-# CallistoSSS — current state (2026-09-01, after the six-agent offline session)
+# CallistoSSS — current state (2026-09-01 22:00, after the fog deploy)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
@@ -12,6 +12,47 @@ the 2026-08-31 late read-only pass that falsified `43` M1, zero launches):**
 
 **2026-09-01 six-agent offline session — docs `82`-`87`, zero launches, offline-verified
 only. Read the doc before serving anything.**
+
+**2026-09-01 22:00 — DEPLOY, not a verdict. `95`'s height fog is parked,
+selectable and is now the shipped default `skinspec`; `94`'s `hunt-paint`
+probe is parked too. NOTHING here has been seen on screen yet.**
+
+- **The record correction that matters more than the deploy.** The 21:33–21:43
+  launch ran `skinspec=off`: `status.txt` read `want_skinspec_req=off` and the
+  served `swaps.skin/` hashed `0d0f3ee45ea0d538`, i.e. `skin.set/off` byte for
+  byte — 77 compute modules, **no raygens**. The reference raygens it served
+  came from `swaps.ptq` (`55ed4e5c…`), which is neither the fog rung
+  (`1f09268e…`) nor even the standing base `-cone2all` (`fcfe0b9f…`). **So the
+  whole GI chain — `-cone2all`, `-clothhi`, the cloth sheen, the luma-neutral
+  bleed, the cavity cone — has not been on screen in that session at all**, and
+  any impression formed from it is not evidence about any of them. `refract=fres`
+  and `ser=class` were live; the skin/GI half was not. This is the third time
+  the project has been bitten by "a switch position is a request, not evidence"
+  (`09` I6); it is why the check is `cmp` against the served bytes and never
+  the settings page.
+- **What was deployed at 22:00.** `./dev/build_volsun.sh --install` parked all
+  six `95` rungs (93 modules each, gates re-run green: 36/36 sites, 0 rays
+  added, closed form 3.4e-06 – 6.0e-06 worst rel err, `--a 0` byte-identical
+  12/12). `./dev/build_hunt_paint.sh --install` parked `hunt-paint` and
+  `hunt-paint-ctl`. `init.lua` gained selector rows for all eight — without a
+  row `init.lua:288` coerces an unknown `skinspec` to `off`, which is a
+  **silent no-op**, not an error, and is exactly how a park-and-launch turns
+  into base-vs-base. `make install` carried **only** that `init.lua` change:
+  the live CET Lua was already identical to `HEAD`, so `82`/`84`/`90`'s
+  "undeployed changes" caveat is now stale — they went out at 15:20.
+- **Shipped defaults changed:** `skinspec` `off` →
+  `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog`, and `ser` `off` →
+  `class` because it must be: the rung ships 12 `rgs_reference_main` + 4
+  `rgs_restirgi_*`, and `sync_settings.sh`'s `gi_refuse` empties the whole
+  overlay when `ser=off` is requested with a raygen-bearing rung. The live
+  `brdf_params.txt` was set to the fog rung (backup:
+  `brdf_params.txt.bak_prefog`). All three `gi_refuse` provenance gates were
+  dry-run against the parked rung and pass: `ser_sha=310513f3008cbde4` matches
+  `ser.set/class`, `ptq_sha=55ed4e5c6884ab71` matches the served `swaps.ptq`,
+  `shadowset=full-shadow`.
+- **What is owed.** `95` §10's A/B: `-cone2all` vs `-cone2all-fog`, V1 long
+  sightline at 10–20° sun, V2 the interior null, V3 the height sweep, weather
+  pinned clear. Until that runs this is a deploy and nothing else.
 
 **2026-09-01 later, `91` — ONE LAUNCH AND ONE KEEP: `refract=fres` is on screen
 and is the standing glass look. `76`'s Phase 0.5 refraction is retired as
