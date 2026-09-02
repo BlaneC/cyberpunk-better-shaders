@@ -1,4 +1,4 @@
-# CallistoSSS — current state (2026-09-01 22:45, after the bisect read-out)
+# CallistoSSS — current state (2026-09-01 23:10, after the coat consult)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
@@ -12,6 +12,38 @@ the 2026-08-31 late read-only pass that falsified `43` M1, zero launches):**
 
 **2026-09-01 six-agent offline session — docs `82`-`87`, zero launches, offline-verified
 only. Read the doc before serving anything.**
+
+**2026-09-01 23:10 — CONSULT (`94` §17): the dielectric arm is KILLED on
+physics, the gate becomes a ramp, and the next step is one probe frame, not a
+coat build.**
+
+- **The teal cars must not be coated, and it is not a gating compromise.** A
+  solid dielectric finish is pigment under an `n ≈ 1.5` binder and the engine
+  **already renders it that way** — `m < 0.10` gives `F0 = 0.04`, which *is*
+  the n = 1.5 dielectric Fresnel. Adding §4.2's coat there is an
+  index-matched interface: physically it reflects nothing and in the shader it
+  just **doubles the Fresnel**. §16.4's "separate document" framing was too
+  generous; the dielectric arm is a double-count, not a gap, and `96` §4.2's
+  sub-enum is not needed for it. The metallic cars are the ones genuinely
+  missing a colourless layer over a coloured F0 — that is the whole build.
+- **The gate becomes a ramp** (`w = smoothstep(m_lo, m_hi, m)`), because the
+  teal→green blend across one body means a hard `m ≥ m_min` would draw a
+  visible edge in the coat highlight mid-panel — an artefact the boolean gate
+  invents by itself. Still identity at `w = 0`, so `53` holds.
+- **Do not park two `m_min` coat builds.** Deciding it from a coat A/B is
+  eyeballing a subtle sheen; deciding it from the probe is reading a saturated
+  tint. `hunt-paint-m70` and now `hunt-paint-m60` are parked and selectable —
+  authored metalness is 8-bit, so bisect the `[0.50, 0.70)` bracket first.
+- **Pre-registered, so it is not logged as a failure:** site C owns **direct
+  light only**. The environment/sky reflection, which §2.3 already calls the
+  biggest visual component of car paint, lives at the raygen bounce weight and
+  this build does not touch it. Expect sharper, whiter sun and neon highlights
+  on metallic cars — not a showroom finish.
+- **Killed:** the dielectric arm and its glass discriminator; two parked
+  `m_min` coat builds; a `-schlick` coat rung (invisible); `coat_rough = 0.06`
+  as sole default (`D_c` peaks ~24 500 vs ~630 for the base lobe — the firefly
+  path; A/B it against 0.12). Glints stay held: the flake hash is world-locked
+  in 8 mm cells, so on a moving car the sparkle slides over the body.
 
 **2026-09-01 22:45 — the bisect rungs are shot. The tarp is bracketed at
 `m ∈ [0.50, 0.70)`, `r ∈ [0.12, 0.20)`, and ONE unread frame decides whether it

@@ -1096,3 +1096,93 @@ move."* The probe stays at its original thresholds (`m_hi = 0.50`,
 `r_mid = 0.30`), which are the ones §14.1 measured and the ones §4.1 was
 written against — **pending §16.3**, which can still move `m_min` to 0.70 at
 no cost, since it is one `OpConstant`.
+
+---
+
+## 17. Consult, 2026-09-01 — the dielectric arm is killed on physics, and the gate becomes a ramp
+
+A second model was consulted on §16.4's fork and on the build plan. Its
+conclusions are adopted; the ones that overturn something are marked.
+
+### 17.1 The teal cars must NOT be coated — and the reason is not gating convenience
+
+**OVERTURNS §16.4's framing.** §16.4 treated the teal (dielectric-paint) cars
+as a population the metallic gate regrettably misses, with the dielectric arm
+"a separate document". That is too generous to the idea. A solid dielectric
+car finish is pigment under an `n ≈ 1.5` binder, and **the engine already
+renders it that way**: `m < 0.10` gives `F0 = 0.04`, which *is* the n = 1.5
+dielectric Fresnel, applied by Schlick at the compute sites and again at the
+raygen bounce weight. The teal cars are already clearcoated. Adding §4.2's
+coat on top is an **index-matched interface** — physically it reflects
+nothing, and in the shader it would simply double the Fresnel (8% at normal
+incidence, far worse at grazing).
+
+So the dielectric arm is not a missing feature, it is a **double-count**, and
+`96` §4.2's sub-enum is not needed to unblock it. The only deviation from a
+true coat on those cars is that the lobe uses the authored roughness rather
+than a coat's ~0.05, which is a roughness question, not a layering one.
+
+The metallic cars are the ones genuinely missing a coat: at `m ≥ 0.5` the
+single lobe carries the metal's *coloured* F0 and there is no colourless
+dielectric layer above it. That is where the added lobe is new physics, and it
+is the whole justification for the build.
+
+**Also recorded, so it is not re-derived later:** a glass-vs-dielectric-paint
+discriminator *does* exist at the site — base colour / diffuse albedo
+(`%685 %687 %689`, §3.2); glass is authored near-black, paint is not. It fails
+on black paint and on dark tint, and §17.1 makes it moot. **Do not build it.**
+
+### 17.2 The gate becomes a ramp, not a boolean
+
+**AMENDS §4.1.** The teal→green blend across a single body (§16.4) is
+metalness varying over a panel. A hard `m ≥ m_min` therefore draws a **visible
+edge in the coat highlight mid-body** — an artefact the boolean gate creates
+by itself. Replace it with a ramp on the metallic axis:
+
+```
+w     = smoothstep(m_lo, m_hi, m) * (r <= r_max)
+spec' = spec*(1 - w*F_h) + w*coat
+diff' = diff*(1 - w*F_v)
+```
+
+Identity at `w = 0`, so `53`'s multiplicative-only rule and the
+gate-false-is-bit-identical rule both still hold; about 4 extra ops.
+
+### 17.3 Do not park two `m_min` coat builds — read the probe instead
+
+**OVERTURNS the plan in §16.3's last line.** Deciding `m_min` from a *coat*
+A/B means eyeballing a subtle Fresnel sheen; deciding it from the *probe* is
+reading a saturated diagnostic tint. `hunt-paint-m70` is already built and
+parked. One frame, car and tarp together, answers it. `hunt-paint-m60` is
+built too, because authored metalness is 8-bit and a tarp is likely at a round
+value, so the bracket `[0.50, 0.70)` is worth one bisect before the constant
+is chosen. Then **one** coat build with the decided number:
+ramp `(0.55, 0.70)` if the cars are `≥ 0.70`, and if car and tarp genuinely
+share `[0.50, 0.70)`, accept the tarp on the coat per §14.2a.
+
+### 17.4 What the coat will and will not look like — pre-registered
+
+The 77 compute evaluators own **direct light only**. The environment/sky
+reflection — which §2.3 already names as the single biggest visual component
+of car paint — lives at the raygen bounce weight (site B) and **this build
+does not touch it**. What ships is sharper, whiter sun and neon highlights on
+metallic cars, *not* a showroom finish. Pre-registered so that "it looks the
+same in overcast" is logged as the expected reach of site C and not as a
+failure of the coat.
+
+"Wet car" versus "clearcoated car" is n = 1.33 versus n = 1.5 and is not a
+risk worth designing around.
+
+### 17.5 Kill list, adopted
+
+| killed | why |
+|---|---|
+| the dielectric/teal arm, and any glass discriminator | §17.1 — it is a double-count, not a gap |
+| two parked `m_min` coat builds | §17.3 — the probe decides it more cheaply and more reliably |
+| a `-schlick` coat rung | a 4-point Fresnel difference at 85° on a highlight is not visible. Spend the rung on `coat_rough` instead |
+| `coat_rough = 0.06` as the sole default | `D_c` peaks at `1/(π·a_c²) ≈ 24 500` against ~630 for the base lobe at r = 0.15 — a highlight ~3× brighter and 40× narrower, on a sampled sun at 1 spp under a denoiser. **That is the firefly path.** Park 0.06 against 0.12 as the A/B |
+| glints holding the coat hostage | held back anyway, and there is a second reason: the flake hash is world-locked in 8 mm cells, so on a *moving* car the sparkle slides over the body. They may never ship |
+
+**Kept:** exact unpolarized Fresnel at the six sites, the `(1 - F_h)`
+reciprocity and `(1 - F_v)` diffuse damp, `k_coat = 1.0` default. §4.3's
+energy argument is sound as written.
