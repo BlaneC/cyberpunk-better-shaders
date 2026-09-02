@@ -1,4 +1,4 @@
-# CallistoSSS — current state (2026-09-01 22:00, after the fog deploy)
+# CallistoSSS — current state (2026-09-01 22:05, after the fog keep)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
@@ -13,9 +13,36 @@ the 2026-08-31 late read-only pass that falsified `43` M1, zero launches):**
 **2026-09-01 six-agent offline session — docs `82`-`87`, zero launches, offline-verified
 only. Read the doc before serving anything.**
 
-**2026-09-01 22:00 — DEPLOY, not a verdict. `95`'s height fog is parked,
-selectable and is now the shipped default `skinspec`; `94`'s `hunt-paint`
-probe is parked too. NOTHING here has been seen on screen yet.**
+**2026-09-01 22:05 — ON SCREEN AND KEPT. `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog`
+is the standing selection and the user's stated default.** USER VERDICT
+2026-09-01: *"Fog looks great!"* … *"gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog
+is my new default"*.
+
+- **Served, proven from the run, not from the switch.** Launch line
+  `2026-09-01T22:05:18-05:00 … skinspec=gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog
+  skin_sha=4dc824ca77d95feb ser=class:in-skin cache=cleared payload=d76c5b9811008e50`.
+  The served `swaps.skin/` is byte-identical to the parked rung (93 files,
+  `4dc824ca77d95feb`; reference raygens `1f09268e…`, which is **not** the base
+  `-cone2all`'s `fcfe0b9f…`). The journal shows **all 12**
+  `rgs_reference_main` permutations loaded from `swaps.skin/` and bound into
+  RT pipelines with `swapped: 1`, so `88` §1's dispatch lottery cannot matter
+  here — every permutation the game could pick carried the term. Layer hits:
+  resolve 77, raygen 15, refl 3, **gi 4** (0 in the previous run, because the
+  previous run had no GI overlay at all), failed 0.
+- **What the verdict does NOT attribute, stated plainly.** That launch moved
+  **two** things against its predecessor: `skinspec` went `off` → the whole GI
+  chain (`-cone2all`, `-clothhi` cloth sheen, luma-neutral bleed, cavity cone)
+  **and** the fog term arrived. And the fog multiply lives only in
+  `rgs_reference_main` — reference / photo-mode PT — while no `trace_rays`
+  line in the run names a reference raygen (one-directional rule, `88` §2b: a
+  missing line voids nothing and proves nothing). So this is a keep of the
+  **rung**, not a measurement of the fog term. `-cone2all` vs `-cone2all-fog`
+  remains the one-variable pair, both halves parked, if attribution is ever
+  wanted; `95` §10's V1/V2/V3 frames are unshot.
+- **The ladder is unshot too:** `-foghi` (strength), `-fogn` (the tint axis —
+  if it is indistinguishable from `-fog`, the per-channel σ is not earning its
+  three extra `Exp2`s), `-fogcam` (F3), `-fogy` (the up-axis falsifier, F1).
+  The up axis is still argued structurally, never measured.
 
 - **The record correction that matters more than the deploy.** The 21:33–21:43
   launch ran `skinspec=off`: `status.txt` read `want_skinspec_req=off` and the
@@ -50,9 +77,8 @@ probe is parked too. NOTHING here has been seen on screen yet.**
   dry-run against the parked rung and pass: `ser_sha=310513f3008cbde4` matches
   `ser.set/class`, `ptq_sha=55ed4e5c6884ab71` matches the served `swaps.ptq`,
   `shadowset=full-shadow`.
-- **What is owed.** `95` §10's A/B: `-cone2all` vs `-cone2all-fog`, V1 long
-  sightline at 10–20° sun, V2 the interior null, V3 the height sweep, weather
-  pinned clear. Until that runs this is a deploy and nothing else.
+- **What is owed.** Attribution (above), the four unshot ladder rungs, and
+  `94`'s `hunt-paint` probe — parked, selectable, never launched.
 
 **2026-09-01 later, `91` — ONE LAUNCH AND ONE KEEP: `refract=fres` is on screen
 and is the standing glass look. `76`'s Phase 0.5 refraction is retired as
