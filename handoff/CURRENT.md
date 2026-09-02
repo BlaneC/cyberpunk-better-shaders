@@ -1,4 +1,4 @@
-# CallistoSSS — current state (2026-09-01 22:30, after the hunt-paint read-out)
+# CallistoSSS — current state (2026-09-01 22:45, after the bisect read-out)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
@@ -12,6 +12,39 @@ the 2026-08-31 late read-only pass that falsified `43` M1, zero launches):**
 
 **2026-09-01 six-agent offline session — docs `82`-`87`, zero launches, offline-verified
 only. Read the doc before serving anything.**
+
+**2026-09-01 22:45 — the bisect rungs are shot. The tarp is bracketed at
+`m ∈ [0.50, 0.70)`, `r ∈ [0.12, 0.20)`, and ONE unread frame decides whether it
+is separable. Car paint turns out not to be one material.** (`94` §16.)
+
+- **The `m70` read-out was misread the first time, and the correction matters.**
+  *"the tarp turns blindingly reflective"* is the tarp **leaving** the paint
+  bucket: under `m_hi = 0.70` it falls into the semi-metal band, whose
+  diagnostic tint is `grey = (2.40, 2.40, 2.40)` — a **2.4× multiply**, i.e. a
+  blown-out white on a daylit tarp. That is the probe's paint, not the
+  material's specular. So the tarp is `m ∈ [0.50, 0.70)`.
+- **`r20` genuinely failed:** narrowing the window can only shrink the green
+  set, so the tarp staying green means tarp roughness < 0.20 — and the cars are
+  below it too. **The roughness axis cannot separate them.**
+- **The one question that decides it (`94` §16.3): under `m70`, did the CAR
+  BODIES stay green?** If yes, cars are `m ≥ 0.70`, the gate ships with
+  `m_min = 0.70`, and the tarp is excluded from both the coat and the glints —
+  one `OpConstant`, no split needed. If they went grey too, `(m, r)` cannot
+  separate them and §14.2a's split stands.
+- **§15's void conditions PASS:** skin red, hair yellow, car windows teal and
+  clear. The read-out is admissible. Still owed: road vs body, and
+  `hunt-paint-ctl` vs the standing rung.
+- **Car paint is three populations, not one** (`94` §16.4). Green = metallic
+  flake paint. **Teal = smooth DIELECTRIC paint** — a solid non-metallic finish
+  under gloss, which is physically what many car colours are. Rare **dark blue
+  = class 3**, not "the car was black": class tints outrank the m/r buckets in
+  the patcher, so a class-3 body never shows a bucket at all, and `§1.3`
+  predicted this exact read. **A gate of `m ≥ m_min` therefore misses every
+  teal car**, and widening it to the teal bucket would also catch the car
+  windows. Ship the coat on the metallic arm; the dielectric arm needs a second
+  discriminator and is a separate document.
+- USER: *"keep the old hunt-paint but do the coat clear coat idea would be the
+  move."* Probe stays at `m_hi = 0.50`, `r_mid = 0.30`, pending §16.3.
 
 **2026-09-01 22:30 — `94`'s `hunt-paint` IS SHOT and the car-paint gate is
 REAL: cars read green. One unanticipated false positive — market tarp roofs

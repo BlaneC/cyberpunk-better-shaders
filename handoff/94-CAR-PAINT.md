@@ -992,3 +992,107 @@ measurement. That is enough to unblock §4.1 — the signal ("lots of cars",
 "separating way better") is far above any plausible reading error — and it is
 **not** enough for the four rows above, which are exactly the ones a glance
 would miss.
+
+---
+
+# MILESTONE 4 — the bisect read-out, and the reading of it that the first pass got wrong (2026-09-01)
+
+## 16. What the two bisect rungs measured
+
+**USER READ-OUT:** *"[r20] makes more other tarps turn green. m70 the tarp
+turns blindingly reflective. I'd say keep the old hunt-paint but do the coat
+clear coat idea would be the move. skin was red and hair yellow. Lots of cars
+did have teal. Some cars were teal and then blending into green. Others were
+clearly green. Some dark blue (maybe because they were black to begin with?).
+Car windows maybe had a teal hue. They were very clear. The odd dark blue car
+that was kinda rare."*
+
+### 16.1 §15's five unreported checks — four now answered, and they pass
+
+| check | answer | consequence |
+|---|---|---|
+| skin red, hair yellow | **yes** | `§12.3`'s void row does **not** fire. The class read is sound and the rung was served. `14`'s read-out is admissible |
+| car window teal, not green | **yes** ("maybe had a teal hue. They were very clear") | the "kills the read-out" row does **not** fire. The m/r anchor is reading the right texel |
+| black anywhere | **not seen** | `§1`'s five-value census survives, and `96` §2 with it |
+| road vs body | still unreported | `38` D2's wet-asphalt question stays open |
+| `hunt-paint-ctl` vs the standing rung | still unshot | the most load-bearing control in the repo, still owed |
+
+### 16.2 The tarp is now bracketed — on BOTH axes
+
+Neither rung was read as a success, and the first of those readings is right
+while the second is **wrong**, in a way that matters:
+
+- **`hunt-paint-r20` (`r_mid` 0.30 → 0.20): the tarp stayed green.** Narrowing
+  the window can only ever *shrink* the green set, so "more other tarps turn
+  green" is more tarps in frame, not the gate widening. The measurement is
+  therefore **tarp roughness < 0.20** — and since the cars were not reported as
+  changing either, car paint is also below 0.20. **The roughness axis cannot
+  separate them.** That hypothesis is dead and the rung did its job.
+
+- **`hunt-paint-m70` (`m_hi` 0.50 → 0.70): "the tarp turns blindingly
+  reflective" is the tarp LEAVING the paint bucket.** It did not become
+  reflective. Under `m_hi = 0.70` a pixel with `m ∈ [0.10, 0.70)` falls into
+  the **semi-metal band**, whose diagnostic tint is `grey = (2.40, 2.40,
+  2.40)` — a **2.4× multiply**, which on a daylit tarp is exactly a blown-out
+  white. That is the probe's paint, not the material's specular. **So the
+  tarp's metalness is `m ∈ [0.50, 0.70)`** — it was captured at `m_hi = 0.50`
+  and excluded at `0.70`.
+
+Tarp, measured on both axes: **`m ∈ [0.50, 0.70)`, `r ∈ [0.12, 0.20)`**. A
+woven polymer sheet at half-metalness is authoring, not physics (§14.2a).
+
+### 16.3 The one question that decides whether the tarp is solved
+
+**Under `hunt-paint-m70`, did the car bodies stay green?**
+
+- **If yes** — cars are `m ≥ 0.70`, tarps are below it, and the two are
+  **separable on the metallic axis**. `§4.1`'s gate ships with `m_min = 0.70`
+  instead of `0.50`, the tarp is excluded from the coat *and* the glints, and
+  no split is needed. This is the good outcome and it is one frame away.
+- **If no** — cars went grey too, `m ∈ [0.50, 0.70)` holds both materials,
+  `(m, r)` cannot separate them at site C, and `§14.2a`'s split stands: ship
+  the coat, hold the glints.
+
+Nothing downstream should be built until this is read, because it selects the
+constant in the gate.
+
+### 16.4 Car paint is not one material — and this reshapes §4.1's gate
+
+The most consequential line in the read-out is the one that was not about
+tarps: **"Lots of cars did have teal. Some cars were teal and then blending
+into green. Others were clearly green. Some dark blue."**
+
+Three populations, all cars:
+
+| reads | bucket | what it means |
+|---|---|---|
+| **green** | `class 0, m ≥ 0.50, r ∈ [0.12, 0.30)` | the metallic-flake paint §4 was designed for |
+| **teal** | `class 0, m < 0.10, r < 0.35` | **smooth DIELECTRIC paint.** Non-metallic body colour under a gloss — which is what a solid non-metallic automotive finish physically is |
+| **dark blue** | **class 3** | not "the car was black": blue is the class-3 tint, and class tints take priority over the m/r buckets in the patcher, so a class-3 car never shows its bucket at all. `§1.3` predicted exactly this and called it "a usable if imprecise gate" — it is the high-precision normal decode, which the glossiest bodies get |
+
+The teal→green blend across a single body is the m/r pair crossing the
+thresholds over a panel — a paint authored with varying metalness, which is
+what a flake layer over a base coat looks like when it is baked into a texture.
+
+**Consequence for §4.1, stated as a fork, not resolved here:** a gate of
+`m ≥ m_min` coats the green cars and **misses every teal one**. Widening it to
+include the teal bucket would also catch **the car windows** (measured teal in
+§16.1) and every other smooth dielectric in the city. So either
+
+1. **ship the coat on the metallic bucket only** — correct on the cars it
+   reaches, absent on the rest, no new false positives; or
+2. **build a two-armed gate** — metallic arm as designed, plus a dielectric arm
+   that needs a second discriminator to exclude glass. `96` §4.2's sub-enum is
+   the natural one and is blocked; class 3 is available today but is a
+   *decode* flag, not a material identity, and glass has it too.
+
+(1) is the shippable one and is what `§4.2`'s coat already models. (2) is a
+separate document.
+
+### 16.5 Standing decision, recorded
+
+USER: *"keep the old hunt-paint but do the coat clear coat idea would be the
+move."* The probe stays at its original thresholds (`m_hi = 0.50`,
+`r_mid = 0.30`), which are the ones §14.1 measured and the ones §4.1 was
+written against — **pending §16.3**, which can still move `m_min` to 0.70 at
+no cost, since it is one `OpConstant`.
