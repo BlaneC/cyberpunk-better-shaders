@@ -320,6 +320,73 @@ local SKIN_LEVELS = {
     -- 94 sec 17.3: authored metalness is 8-bit and a tarp is likely at a round
     -- value, so bisect the [0.50, 0.70) bracket before choosing the constant.
     { id = "hunt-paint-m60", label = "PROBE: hunt-paint m_hi 0.50->0.60 -- bisects the tarp bracket" },
+    -- handoff/99. POSITION probe, not a look. The 77 compute resolvers all
+    -- reconstruct a surface position P from the D32 depth at registers[1]+0
+    -- and a 4x4 matrix at cbv[registers[0]+12][69..72], and build
+    -- V = normalize(cbv[..][0].xyz - P). What the BYTES cannot say is which
+    -- SPACE that is: every one of the 1413 consumers of P is a SUBTRACTION
+    -- (the camera, and the light-list positions), and a difference of
+    -- positions is invariant to translating the space. No module adds any
+    -- world offset to P -- 0 of 75. So these rungs measure it on screen.
+    -- hunt-wpos paints a 1 m hash-cell pattern on P with a 1 m brightness
+    -- stripe on the up axis; hunt-wpos-cam paints the SAME pattern on P - C,
+    -- which is camera-relative BY CONSTRUCTION and MUST slide. Welded +
+    -- sliding => P is world. Indistinguishable => C is zero, P is
+    -- camera-relative, and there is no world offset here at all.
+    -- Skin MUST read red (94's palette, verbatim) or the capture is void.
+    { id = "hunt-wpos",      label = "PROBE: hunt-wpos -- 1 m world hash cells on the resolvers' P (99; translate the camera 2 m and look)" },
+    { id = "hunt-wpos-cam",  label = "PROBE: hunt-wpos CAMERA-RELATIVE (P - camera) -- the control that MUST slide" },
+    { id = "hunt-wpos-frac", label = "PROBE: hunt-wpos frac(P) as RGB -- reads the UP AXIS and the UNITS off one frame" },
+    { id = "hunt-wpos-ctl",  label = "PROBE: hunt-wpos CONTROL (gain 0) -- 93/93 byte-identical to the -fog default" },
+    -- handoff/98. GEOMETRY probe, not a look. The 10 paintable reference
+    -- raygens run a RAY QUERY (SPV_KHR_ray_query, flags 517 =
+    -- Opaque|TerminateOnFirstHit|SkipAABBs, one Proceed) on the module's own
+    -- %accel and hash the committed InstanceId (or CustomIndex, or
+    -- PrimitiveIndex) to a hue, multiplied into the radiance write: the hit
+    -- gets an IDENTITY the payload never carried. REQUIRES a layer with
+    -- VK_KHR_ray_query enabled; without it these fall through to the next
+    -- overlay (never vanilla) and the launch reads as the base image with
+    -- rayq_reject in callisto_swap.jsonl.
+    --
+    -- SHOOT THESE FIRST. -p clones the module's OWN reconstructed CAMERA ray:
+    -- origin = the zero triple (the camera's position in P's own space, 94
+    -- sec 3.3), direction = the module's own normalized view ray, t = |P|
+    -- bracketed at +-0.1%. One identity per VISIBLE pixel, so the reading is
+    -- a flat per-object silhouette in a single frame -- no denoiser argument.
+    -- The SKY MUST STAY UNPAINTED: a miss is identity here, deliberately, and
+    -- a coloured sky means the query is committing garbage and the frame is
+    -- void. A thin unpainted rim at silhouettes or on hair is the expected
+    -- depth-vs-BVH mismatch (85 sec 1), not a failure. Everything unpainted
+    -- means the bracket is empty -- widen it before concluding anything.
+    { id = "hunt-rayq-p",     label = "PROBE: hunt-rayq PRIMARY -- ray-query InstanceId hue per VISIBLE object (98; needs VK_KHR_ray_query)" },
+    { id = "hunt-rayq-pcust", label = "PROBE: hunt-rayq PRIMARY InstanceCustomIndex -- the id the ENGINE authored, not the TLAS slot" },
+    { id = "hunt-rayq-pprim", label = "PROBE: hunt-rayq PRIMARY PrimitiveIndex -- stable confetti says the query commits the SAME triangle each frame" },
+    { id = "hunt-rayq-pclosest", label = "PROBE: hunt-rayq PRIMARY InstanceId, CLOSEST hit (flags 513) -- kills the coplanar-candidate explanation" },
+    -- 98 sec 13: -pprim came back STABLE confetti while -pcust and -pclosest
+    -- both flickered, so the query commits the same triangle every frame and
+    -- BOTH instance fields are per-frame. The identity, if there is one, is
+    -- not in the instance slot. These three ask somewhere else, same splice,
+    -- same flags 517, differing ONLY in what feeds the hash.
+    { id = "hunt-rayq-psbt",  label = "PROBE: hunt-rayq PRIMARY instanceSBTRecordOffset -- the app-assigned hit-group/MATERIAL selector" },
+    { id = "hunt-rayq-pgeom", label = "PROBE: hunt-rayq PRIMARY GeometryIndex -- per-geometry within a BLAS; one or two hues is the EXPECTED reading" },
+    { id = "hunt-rayq-pxf",   label = "PROBE: hunt-rayq PRIMARY ObjectToWorld[3] RAW BITS -- buildings stable, moving cars/NPCs flicker, BY CONSTRUCTION" },
+    { id = "hunt-rayq-pxfq",  label = "PROBE: hunt-rayq PRIMARY ObjectToWorld[3] QUANTISED to 1 cm, no offset -- the CONTROL for -pxfw (98 sec 14)" },
+    { id = "hunt-rayq-pxfw",  label = "PROBE: hunt-rayq PRIMARY ObjectToWorld[3] + cbv[..][56] WORLD offset, 1 cm -- statics stable under camera motion is the PASS" },
+    { id = "hunt-rayq-pctl",  label = "PROBE: hunt-rayq PRIMARY CONTROL (gain 0) -- query runs, paint is 1.0; must match the -fog default" },
+    -- The BOUNCE family, second. Same machinery, but the query clones the
+    -- module's own bounce trace (same origin/direction ids, t bracketed at
+    -- +-0.1% of the payload's own hit distance), so it paints the FIRST
+    -- BOUNCE, which is stochastic: stable per-object hue TINTS are the
+    -- reading here, not silhouettes. A no-hit is BLACK in this family (the
+    -- bounce ray has a hit distance, so an empty bracket is a real failure).
+    -- Kept because it is the only family that can say anything about the
+    -- light INSIDE a reflection. Read handoff/98 sec 5 before the screen.
+    -- Each family has its OWN gain-0 control (-pctl / -ctl): the two splices
+    -- emit different instructions, so one cannot stand in for the other.
+    { id = "hunt-rayq",      label = "PROBE: hunt-rayq -- ray-query InstanceId hue on the bounce hit (98; needs VK_KHR_ray_query)" },
+    { id = "hunt-rayq-cust", label = "PROBE: hunt-rayq InstanceCustomIndex -- the id the ENGINE authored, not the TLAS slot" },
+    { id = "hunt-rayq-prim", label = "PROBE: hunt-rayq PrimitiveIndex -- triangle-level; confetti is the PASS reading here" },
+    { id = "hunt-rayq-ctl",  label = "PROBE: hunt-rayq CONTROL (gain 0) -- query runs, paint is 1.0; must match the -fog default" },
     -- 77: skin-only sample count (29 B4, unblocked by the 56 sentinel).
     -- Class-1 pixels path-trace max(RayNumber,4) spp; everything else keeps
     -- the engine count (non-skin is bit-identical to the base rung).

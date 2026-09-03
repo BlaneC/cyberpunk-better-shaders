@@ -23,7 +23,9 @@
  *   CALLISTO_SWAP_QUIET=1   log swap hits/errors only, not every module
  *   CALLISTO_DUMP_DIR       dump incoming SPIR-V of every module here
  *   CALLISTO_DUMP_MATCH     only dump ids containing this substring
- *   CALLISTO_SER_DISABLE=1  never touch vkCreateDevice (see "SER" below)
+ *   CALLISTO_SER_DISABLE=1  never ask for VK_NV_ray_tracing_invocation_reorder
+ *   CALLISTO_RAYQ_DISABLE=1 never ask for VK_KHR_ray_query (see "RAY QUERY")
+ *   CALLISTO_ASJOURNAL_DISABLE=1  do not journal acceleration structures
  *
  * SER -- Shader Execution Reordering (handoff/41-SER-BUILD.md, idea A1 of
  * handoff/38-WILD-IDEAS.md). Cyberpunk uses the DXR HitObject/SER path on
@@ -54,6 +56,31 @@
  * that failed to enable the extension would turn into a raytracing-pipeline
  * creation failure, i.e. a black screen, rather than a log line.
  *
+ * RAY QUERY -- handoff/98-RAYQUERY.md, "Unlock 1". Exactly the same shape as
+ * SER, for exactly the same reason. A module that declares OpCapability
+ * RayQueryKHR is REJECTED at pipeline creation unless VK_KHR_ray_query is
+ * enabled on the VkDevice, and vkd3d-proton never asks for it (it translates
+ * DXR 1.0 pipelines; DXR 1.1 inline ray tracing is not what Cyberpunk's
+ * reference path tracer uses). This layer asks on the app's behalf in
+ * xCreateDevice, next to the SER request and through the same code path, and
+ * xCreateShaderModule refuses a ray-query swap on a device that did not get
+ * it -- refusing to the NEXT OVERLAY, never to vanilla (GOTCHAS: "an overlay
+ * reject must fall through", 44 sec 2.1).
+ *   {"ev":"rayq","action":"enabled"|"skipped","reason":...}
+ *   {"ev":"rayq_reject","id":...,"action":"next_overlay"}
+ * ./dev/patch_rayq.sh --selftest proves both halves against the real driver
+ * without launching the game.
+ *
+ * AS JOURNAL -- handoff/98 section 8 (Unlock 2a). One line per distinct
+ * acceleration structure and per distinct device address, so "how many TLAS
+ * are there, which one does the path tracer use, and is its address stable
+ * across frames" is answerable from an ordinary launch with no shader change
+ * and no risk. Deduped by handle, so it costs a short table walk per
+ * vkGetAccelerationStructureDeviceAddressKHR and nothing else.
+ *   {"ev":"as_create","as":...,"type":"TLAS"|"BLAS","size":N}
+ *   {"ev":"as_addr","as":...,"type":...,"addr":"0x...","distinct":N}
+ *   {"ev":"as_build","dst":...,"type":...,"n":N,"builds":N}
+ *
  * Dispatch evidence (the missing link between "created" and "dispatched"):
  * the layer records every module's identity, then hooks
  * vkCreateRayTracingPipelinesKHR to log which raygen module each RT pipeline
@@ -75,6 +102,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <pthread.h>
 #include <dlfcn.h>
 #include <unistd.h>
@@ -93,6 +121,8 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_seq;
 static int g_quiet, g_disabled;
 static int g_ser_disabled;       /* CALLISTO_SER_DISABLE */
+static int g_rayq_disabled;      /* CALLISTO_RAYQ_DISABLE */
+static int g_asj_disabled;       /* CALLISTO_ASJOURNAL_DISABLE */
 static const char *g_dump_dir;   /* CALLISTO_DUMP_DIR */
 
 /* The constructor can run before the sandbox has finished setting up the
@@ -110,6 +140,10 @@ static void log_open(void) {
     g_dump_dir = getenv("CALLISTO_DUMP_DIR");
     g_ser_disabled = getenv("CALLISTO_SER_DISABLE")
                      && !strcmp(getenv("CALLISTO_SER_DISABLE"), "1");
+    g_rayq_disabled = getenv("CALLISTO_RAYQ_DISABLE")
+                     && !strcmp(getenv("CALLISTO_RAYQ_DISABLE"), "1");
+    g_asj_disabled = getenv("CALLISTO_ASJOURNAL_DISABLE")
+                     && !strcmp(getenv("CALLISTO_ASJOURNAL_DISABLE"), "1");
 }
 
 /* call with g_mu held */
@@ -469,6 +503,7 @@ static void status_hit(const char *id, int ok) {
 }
 
 static int spv_declares_ser(const uint32_t *w, size_t bytes);
+static int spv_declares_rayq(const uint32_t *w, size_t bytes);
 
 /* First-file-wins across the overlays, then the base dir -- with one
  * exception (44-LOW-HANGING-FRUIT): when the device has no SER, a candidate
@@ -476,13 +511,27 @@ static int spv_declares_ser(const uint32_t *w, size_t bytes);
  * CONTINUES to the next overlay. Before this the reject happened after the
  * search, so a stale/unusable swaps.ser/ file turned the module VANILLA --
  * bypassing swaps.ptq/ and every splice below it, with a log line that read
- * as a SER problem rather than a PT-stack problem. */
-static uint32_t *load_swap(const char *name, size_t *out_size, int allow_ser) {
+ * as a SER problem rather than a PT-stack problem.
+ *
+ * The ray query gate (handoff/98) is the identical rule for capability
+ * RayQueryKHR, and it is here rather than after the search for exactly that
+ * reason: a hunt-rayq overlay served on a device without VK_KHR_ray_query
+ * must fall through to swaps.skin/ and produce the BASE image, not vanilla
+ * raygens on top of a patched compute set. */
+static uint32_t *load_swap(const char *name, size_t *out_size, int allow_ser,
+                           int allow_rayq) {
     for (int i = 0; i < g_noverlay; i++) {
         uint32_t *c = load_swap_from(g_overlaydir[i], name, out_size);
         if (!c) continue;
         if (!allow_ser && spv_declares_ser(c, *out_size)) {
             LOGF("\"ev\":\"ser_reject\",\"id\":\"%s\",\"size\":%zu,\"dir\":\"%s\","
+                 "\"reason\":\"device_extension_not_enabled\",\"action\":\"next_overlay\"}",
+                 name, *out_size, g_overlaydir[i]);
+            free(c);
+            continue;
+        }
+        if (!allow_rayq && spv_declares_rayq(c, *out_size)) {
+            LOGF("\"ev\":\"rayq_reject\",\"id\":\"%s\",\"size\":%zu,\"dir\":\"%s\","
                  "\"reason\":\"device_extension_not_enabled\",\"action\":\"next_overlay\"}",
                  name, *out_size, g_overlaydir[i]);
             free(c);
@@ -529,6 +578,15 @@ typedef struct {
      * processes and their devices load this layer, and serving a SER module
      * to a device without the extension is a pipeline-creation failure. */
     int ser;
+    /* 1 iff VK_KHR_ray_query is enabled on THIS device (handoff/98). Same
+     * per-device reasoning as `ser`: a ray-query module handed to a device
+     * without the extension is a raytracing-pipeline creation failure, i.e.
+     * a black screen with no obvious cause. */
+    int rayq;
+    /* AS journal (handoff/98 sec 8). NULL when VK_KHR_acceleration_structure
+     * is not enabled, in which case the hooks are never exposed. */
+    PFN_vkCreateAccelerationStructureKHR CreateAS;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR GetASAddr;
 } DevData;
 
 static InstData g_inst[MAX_OBJ]; static int g_ninst;
@@ -631,6 +689,12 @@ static PFN_vkCmdDispatchIndirect g_next_dispatch_ind;
 static PFN_vkCmdTraceRaysKHR g_next_trace;
 static PFN_vkCmdTraceRaysIndirectKHR g_next_trace_ind;
 static PFN_vkCmdTraceRaysIndirect2KHR g_next_trace_ind2;
+/* AS journal: command-buffer scoped, so device-independent like the rest. */
+static PFN_vkCmdBuildAccelerationStructuresKHR g_next_build_as;
+/* AS journal frame tick. Present is the real frame boundary; submit is the
+ * fallback for a device with no swapchain (the self-test probe). */
+static PFN_vkQueuePresentKHR g_next_present;
+static PFN_vkQueueSubmit g_next_submit;
 
 /* call with g_id_mu held */
 static int modid_find(uint64_t h) {
@@ -768,6 +832,484 @@ static void trace_maybe_log(const void *cb) {
 }
 
 /* ------------------------------------------------------------------ */
+/* AS journal (handoff/98 sec 8, Stage 2a)                             */
+/* ------------------------------------------------------------------ */
+/* Pure measurement: it answers "how many top-level acceleration structures
+ * does this game have, how often is each one rebuilt, and how many instances
+ * does it carry" without touching a single shader byte.  Everything here is
+ * throttled -- these calls run every frame and an untuned log would be
+ * gigabytes -- so the invariant is: a bounded number of lines per RUN, not per
+ * frame.  CALLISTO_ASJOURNAL_DISABLE=1 makes every entry point a passthrough.
+ *
+ * ---- What the first version got wrong, and why (98 sec 12.5) --------------
+ *
+ * v1 took the AS type from VkAccelerationStructureCreateInfoKHR::type.
+ * vkd3d-proton creates EVERY acceleration structure as
+ * VK_ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR -- D3D12 does not commit to
+ * top/bottom at creation either -- so v1 saw `type:"generic"` on all 24 logged
+ * creates, classified nothing as top-level, and reported
+ * `distinct_top_addr:0` on every launch.  The real type is only knowable at
+ * BUILD time, from VkAccelerationStructureBuildGeometryInfoKHR::type, and a
+ * build whose geometry is VK_GEOMETRY_TYPE_INSTANCES_KHR is a TLAS whatever
+ * that field claims.  Classification therefore moved to asj_note_build().
+ *
+ * v1 also reported `type:"untracked"` on 31 of 32 as_build lines.  That was a
+ * second, independent bug: the build line took its type from the handle table,
+ * so a dstAccelerationStructure the table did not hold printed "untracked".
+ * The table did not hold it because MAX_AS was 128 while a streaming world
+ * creates thousands of BLASes; g_as_overflow counted the loss but was only
+ * printed by the device_destroy summary, and the game never destroys its
+ * device cleanly, so that line was never emitted in any launch.  Three fixes,
+ * and any one of them alone would have removed the symptom:
+ *   1. the build line's type now comes from the build info, never the table,
+ *      so "untracked" is unreachable by construction;
+ *   2. asj_note_build() INSERTS a missing destination instead of shrugging;
+ *   3. the table is larger, evicts round-robin, PINS anything classified
+ *      top-level so a TLAS can never be evicted, and every summary -- now
+ *      emitted periodically, not only at device teardown -- prints the
+ *      overflow and eviction counters.
+ *
+ * Handle recycling: we deliberately do not hook vkDestroyAccelerationStructure.
+ * A destroyed handle whose value is later reused by a fresh AS would otherwise
+ * read as "the address moved", so as_create resets any entry it collides with
+ * and counts it as a reuse; a reuse between the create and the next address
+ * query is therefore visible in the journal rather than silently miscounted. */
+#define MAX_AS        2048   /* handle table entries (TLASes are pinned)    */
+#define AS_IX_BITS    12
+#define AS_IX_SZ      (1u << AS_IX_BITS)     /* open-addressed index slots  */
+#define MAX_TLAS      64     /* distinct handles ever classified top-level  */
+#define MAX_TLAS_ADDR 64     /* distinct (handle, device address) pairs     */
+#define ASJ_MAX_CREATE_LINES 24   /* BLAS creates past this are counted only */
+#define ASJ_MAX_ADDR_LINES   64
+#define ASJ_MAX_BUILD_LINES  32   /* first build of each BLAS destination    */
+#define ASJ_MAX_TLAS_LINES   64   /* "a new TLAS appeared" lines             */
+#define ASJ_SUMMARY_EVERY  8192   /* address queries between summary lines   */
+#define ASJ_SUMMARY_FRAMES  600   /* frames between summary lines            */
+#define ASJ_BPF_BUCKETS       9   /* builds-per-frame histogram, 8 = "8 or more" */
+
+typedef struct {
+    uint64_t h;            /* VkAccelerationStructureKHR                  */
+    uint64_t addr;         /* last device address returned, 0 = unqueried */
+    uint64_t size;         /* VkAccelerationStructureCreateInfoKHR.size   */
+    uint32_t create_type;  /* as DECLARED at create; vkd3d says "generic" */
+    uint32_t build_type;   /* as CLASSIFIED at build; the authority       */
+    uint32_t queries;      /* vkGetAccelerationStructureDeviceAddressKHR  */
+    uint32_t moved;        /* address changed while the handle lived      */
+    uint32_t builds;       /* MODE_BUILD as a build destination           */
+    uint32_t updates;      /* MODE_UPDATE as a build destination          */
+    uint32_t reused;       /* handle value recycled by a later create     */
+    uint32_t last_prims;   /* last build's total primitiveCount           */
+    uint32_t max_prims;    /*  (for a TLAS: the instance count)           */
+    uint32_t geoms;        /* last build's geometryCount                  */
+    uint32_t flags;        /* last build's VkBuildAccelerationStructureFlags */
+    uint64_t frame_last;   /* frame tick of the most recent build         */
+    uint32_t in_frame;     /* builds recorded during frame_last           */
+    uint32_t bpf[ASJ_BPF_BUCKETS];  /* histogram of builds-per-frame      */
+    uint8_t  pinned;       /* classified top-level: never evict           */
+} AsEnt;
+
+static AsEnt   g_as[MAX_AS];
+static int     g_nas;
+static int32_t g_as_ix[AS_IX_SZ];   /* 0 empty, -1 tombstone, else idx+1  */
+static int     g_as_ix_used;        /* slots that are not empty            */
+static int     g_as_evict_cur;
+static uint64_t g_as_evictions, g_as_ix_rebuilds;
+static int     g_as_overflow;               /* inserts dropped, all pinned */
+static struct { uint64_t addr, h; } g_tlas_addr[MAX_TLAS_ADDR];
+static int     g_ntlas_addr, g_tlas_addr_overflow;
+static uint64_t g_tlas_handles[MAX_TLAS];
+static int     g_ntlas_handles, g_tlas_handle_overflow;
+static uint64_t g_as_creates, g_as_creates_declared_top;
+static uint64_t g_as_addr_calls, g_as_build_calls, g_as_build_ranges;
+static uint64_t g_as_builds_top, g_as_updates_top, g_as_builds_bottom;
+static uint64_t g_frame;                    /* frame tick                  */
+static const char *g_frame_src = "none";    /* present | submit | none     */
+static int      g_asj_create_lines, g_asj_addr_lines;
+static int      g_asj_build_lines, g_asj_tlas_lines;
+static pthread_mutex_t g_as_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static const char *as_type_name(uint32_t t) {
+    switch (t) {
+    case VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR:    return "top";
+    case VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR: return "bottom";
+    case VK_ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR:      return "generic";
+    default:                                              return "unknown";
+    }
+}
+
+/* The one function that decides what an acceleration structure IS.
+ * Precedence, strongest first:
+ *   1. any geometry of type INSTANCES  -> top-level, whatever ::type says.
+ *      An instance-geometry build is a TLAS build by definition; nothing else
+ *      can consume VkAccelerationStructureInstanceKHR.
+ *   2. ::type when it is explicitly top or bottom.
+ *   3. GENERIC with non-instance geometry -> bottom-level. This is the
+ *      vkd3d-proton case for every BLAS in the game. */
+static uint32_t asj_classify(const VkAccelerationStructureBuildGeometryInfoKHR *gi) {
+    for (uint32_t g = 0; g < gi->geometryCount; g++) {
+        const VkAccelerationStructureGeometryKHR *ge =
+            gi->pGeometries    ? &gi->pGeometries[g] :
+            gi->ppGeometries   ?  gi->ppGeometries[g] : NULL;
+        if (ge && ge->geometryType == VK_GEOMETRY_TYPE_INSTANCES_KHR)
+            return VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    }
+    if (gi->type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR ||
+        gi->type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+        return gi->type;
+    return VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+}
+
+/* Effective type of a tracked handle: the build-time answer if there has been
+ * a build, otherwise the create-time declaration -- but only when that
+ * declaration was not GENERIC, because GENERIC says nothing. */
+static uint32_t as_eff_type(const AsEnt *e) {
+    if (e->build_type != (uint32_t)-1) return e->build_type;
+    if (e->create_type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR ||
+        e->create_type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+        return e->create_type;
+    return (uint32_t)-1;
+}
+
+/* ---- handle table: open addressing, linear probing, tombstones ---- */
+static uint32_t as_hash(uint64_t h) {
+    h *= 0x9E3779B97F4A7C15ull;
+    return (uint32_t)(h >> (64 - AS_IX_BITS)) & (AS_IX_SZ - 1);
+}
+static void as_ix_rebuild(void) {
+    memset(g_as_ix, 0, sizeof g_as_ix);
+    g_as_ix_used = 0;
+    for (int i = 0; i < g_nas; i++) {
+        uint32_t s = as_hash(g_as[i].h);
+        while (g_as_ix[s] > 0) s = (s + 1) & (AS_IX_SZ - 1);
+        g_as_ix[s] = i + 1;
+        g_as_ix_used++;
+    }
+    g_as_ix_rebuilds++;
+}
+/* Caller holds g_as_mu. */
+static AsEnt *as_find(uint64_t h) {
+    uint32_t s = as_hash(h);
+    for (uint32_t n = 0; n < AS_IX_SZ; n++, s = (s + 1) & (AS_IX_SZ - 1)) {
+        int32_t v = g_as_ix[s];
+        if (v == 0) return NULL;                    /* empty: definitely absent */
+        if (v > 0 && g_as[v - 1].h == h) return &g_as[v - 1];
+    }
+    return NULL;
+}
+static void as_ix_put(uint64_t h, int idx) {
+    uint32_t s = as_hash(h), ts = 0; int have_tomb = 0;
+    for (uint32_t n = 0; n < AS_IX_SZ; n++, s = (s + 1) & (AS_IX_SZ - 1)) {
+        int32_t v = g_as_ix[s];
+        if (v < 0) { if (!have_tomb) { have_tomb = 1; ts = s; } continue; }
+        if (v == 0) {
+            if (have_tomb) g_as_ix[ts] = idx + 1;    /* reuse: used unchanged */
+            else { g_as_ix[s] = idx + 1; g_as_ix_used++; }
+            return;
+        }
+        if (g_as[v - 1].h == h) { g_as_ix[s] = idx + 1; return; }
+    }
+    if (have_tomb) { g_as_ix[ts] = idx + 1; return; }
+    as_ix_rebuild();                                 /* index saturated */
+    as_ix_put(h, idx);
+}
+static void as_ix_drop(uint64_t h) {
+    uint32_t s = as_hash(h);
+    for (uint32_t n = 0; n < AS_IX_SZ; n++, s = (s + 1) & (AS_IX_SZ - 1)) {
+        int32_t v = g_as_ix[s];
+        if (v == 0) return;
+        if (v > 0 && g_as[v - 1].h == h) { g_as_ix[s] = -1; return; }
+    }
+}
+/* Caller holds g_as_mu. Returns an entry for h, creating (and if necessary
+ * evicting an UNPINNED entry) to make room. NULL only when every one of the
+ * MAX_AS entries is a pinned TLAS, which cannot happen with MAX_TLAS < MAX_AS
+ * but is handled rather than assumed. */
+static AsEnt *as_intern(uint64_t h) {
+    AsEnt *e = as_find(h);
+    if (e) return e;
+    int idx;
+    if (g_nas < MAX_AS) {
+        idx = g_nas++;
+    } else {
+        int start = g_as_evict_cur, found = -1;
+        for (int n = 0; n < MAX_AS; n++) {
+            int i = (start + n) % MAX_AS;
+            if (!g_as[i].pinned) { found = i; break; }
+        }
+        if (found < 0) { g_as_overflow++; return NULL; }
+        g_as_evict_cur = (found + 1) % MAX_AS;
+        as_ix_drop(g_as[found].h);
+        g_as_evictions++;
+        idx = found;
+    }
+    memset(&g_as[idx], 0, sizeof g_as[idx]);
+    g_as[idx].h = h;
+    g_as[idx].build_type = (uint32_t)-1;
+    g_as[idx].create_type = (uint32_t)-1;
+    as_ix_put(h, idx);
+    if (g_as_ix_used * 4 > (int)AS_IX_SZ * 3) as_ix_rebuild();  /* dump tombstones */
+    return &g_as[idx];
+}
+
+/* Caller holds g_as_mu. Records that h is a TLAS, and -- the requirement from
+ * the review -- keys the address table on the build destination AND its
+ * device address, so the pair is what is counted, not either half. */
+static int asj_note_tlas(AsEnt *e) {
+    int fresh = 0;
+    if (!e->pinned) {
+        e->pinned = 1;
+        if (g_ntlas_handles < MAX_TLAS) g_tlas_handles[g_ntlas_handles++] = e->h;
+        else g_tlas_handle_overflow++;
+        fresh = 1;
+    }
+    if (e->addr) {
+        int seen = 0;
+        for (int i = 0; i < g_ntlas_addr; i++)
+            if (g_tlas_addr[i].addr == e->addr && g_tlas_addr[i].h == e->h) { seen = 1; break; }
+        if (!seen) {
+            if (g_ntlas_addr < MAX_TLAS_ADDR) {
+                g_tlas_addr[g_ntlas_addr].addr = e->addr;
+                g_tlas_addr[g_ntlas_addr].h = e->h;
+                g_ntlas_addr++;
+            } else g_tlas_addr_overflow++;
+        }
+    }
+    return fresh;
+}
+
+/* ---- the summary: emitted periodically AND at device teardown ---- */
+/* v1 emitted the run's whole answer only from vkDestroyDevice, which this game
+ * never reaches -- not one device_destroy line exists in any launch's jsonl.
+ * The rows are snapshotted under the lock and logged outside it. */
+static void asj_report(const char *why) {
+    struct { uint64_t h, addr; uint32_t b, u, mx, lp, mp, gm, fl, mv;
+             uint32_t bpf[ASJ_BPF_BUCKETS]; } row[MAX_TLAS];
+    int nrow = 0;
+    pthread_mutex_lock(&g_as_mu);
+    uint64_t cr = g_as_creates, crt = g_as_creates_declared_top;
+    uint64_t ac = g_as_addr_calls, bc = g_as_build_calls, br = g_as_build_ranges;
+    uint64_t bt = g_as_builds_top, ut = g_as_updates_top, bb = g_as_builds_bottom;
+    uint64_t fr = g_frame, ev = g_as_evictions, rb = g_as_ix_rebuilds;
+    const char *fs = g_frame_src;
+    int nas = g_nas, nth = g_ntlas_handles, nta = g_ntlas_addr;
+    int ovf = g_as_overflow, tho = g_tlas_handle_overflow, tao = g_tlas_addr_overflow;
+    int moved = 0;
+    for (int i = 0; i < g_nas; i++) if (g_as[i].moved) moved++;
+    for (int i = 0; i < g_nas && nrow < MAX_TLAS; i++) {
+        if (!g_as[i].pinned) continue;
+        AsEnt *e = &g_as[i];
+        uint32_t mx = 0;
+        for (int b = ASJ_BPF_BUCKETS - 1; b >= 0; b--)
+            if (e->bpf[b]) { mx = (uint32_t)b; break; }
+        row[nrow].h = e->h; row[nrow].addr = e->addr;
+        row[nrow].b = e->builds; row[nrow].u = e->updates; row[nrow].mx = mx;
+        row[nrow].lp = e->last_prims; row[nrow].mp = e->max_prims;
+        row[nrow].gm = e->geoms; row[nrow].fl = e->flags; row[nrow].mv = e->moved;
+        memcpy(row[nrow].bpf, e->bpf, sizeof e->bpf);
+        nrow++;
+    }
+    pthread_mutex_unlock(&g_as_mu);
+    if (!cr && !ac && !bc) return;      /* nothing observed; stay silent */
+    for (int i = 0; i < nrow; i++) {
+        char hist[128]; int p = 0;
+        for (int b = 1; b < ASJ_BPF_BUCKETS && p < (int)sizeof hist - 12; b++)
+            if (row[i].bpf[b])
+                p += snprintf(hist + p, sizeof hist - p, "%s\"%d%s\":%u",
+                              p ? "," : "", b,
+                              b == ASJ_BPF_BUCKETS - 1 ? "+" : "", row[i].bpf[b]);
+        hist[p] = 0;
+        LOGF("\"ev\":\"as_tlas\",\"why\":\"%s\",\"as\":\"0x%llx\",\"addr\":\"0x%llx\","
+             "\"builds\":%u,\"updates\":%u,\"max_builds_per_frame\":%u,"
+             "\"builds_per_frame\":{%s},\"instances_last\":%u,\"instances_max\":%u,"
+             "\"geoms\":%u,\"build_flags\":%u,\"addr_moved\":%u}",
+             why, (unsigned long long)row[i].h, (unsigned long long)row[i].addr,
+             row[i].b, row[i].u, row[i].mx, hist,
+             row[i].lp, row[i].mp, row[i].gm, row[i].fl, row[i].mv);
+    }
+    LOGF("\"ev\":\"as_summary\",\"why\":\"%s\",\"frames\":%llu,\"frame_src\":\"%s\","
+         "\"tlas_handles\":%d,\"tlas_addr_pairs\":%d,\"creates\":%llu,"
+         "\"creates_declared_top\":%llu,\"builds\":%llu,\"build_geoms\":%llu,"
+         "\"tlas_builds\":%llu,\"tlas_updates\":%llu,\"blas_builds\":%llu,"
+         "\"addr_calls\":%llu,\"tracked\":%d,\"handles_with_moving_addr\":%d,"
+         "\"evictions\":%llu,\"index_rebuilds\":%llu,\"table_overflow\":%d,"
+         "\"tlas_handle_overflow\":%d,\"tlas_addr_overflow\":%d,"
+         "\"untracked_builds\":0}",
+         why, (unsigned long long)fr, fs, nth, nta,
+         (unsigned long long)cr, (unsigned long long)crt,
+         (unsigned long long)bc, (unsigned long long)br,
+         (unsigned long long)bt, (unsigned long long)ut,
+         (unsigned long long)bb, (unsigned long long)ac,
+         nas, moved, (unsigned long long)ev, (unsigned long long)rb,
+         ovf, tho, tao);
+}
+
+static void asj_note_create(uint64_t h, uint32_t type, uint64_t size) {
+    int log_it = 0, reuse = 0;
+    pthread_mutex_lock(&g_as_mu);
+    g_as_creates++;
+    if (type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR) g_as_creates_declared_top++;
+    AsEnt *e = as_find(h);
+    if (e) {                       /* handle value recycled -- start over */
+        uint32_t r = e->reused + 1;
+        memset(e, 0, sizeof *e);
+        e->h = h; e->reused = r; e->build_type = (uint32_t)-1; reuse = 1;
+    } else {
+        e = as_intern(h);
+    }
+    if (e) { e->create_type = type; e->size = size;
+             if (type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
+                 asj_note_tlas(e); }
+    /* A create that DECLARES top-level is worth a line (there are a handful);
+     * the rest are capped, because a streaming world makes thousands.  Note
+     * vkd3d-proton declares GENERIC for all of them -- see the header. */
+    if (type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR ||
+        g_asj_create_lines < ASJ_MAX_CREATE_LINES) {
+        g_asj_create_lines++;
+        log_it = 1;
+    }
+    uint64_t n = g_as_creates, nt = g_as_creates_declared_top;
+    pthread_mutex_unlock(&g_as_mu);
+    if (log_it)
+        LOGF("\"ev\":\"as_create\",\"as\":\"0x%llx\",\"type\":\"%s\","
+             "\"size\":%llu,\"reuse\":%d,\"n\":%llu,\"n_top\":%llu}",
+             (unsigned long long)h, as_type_name(type),
+             (unsigned long long)size, reuse,
+             (unsigned long long)n, (unsigned long long)nt);
+}
+
+static void asj_note_addr(uint64_t h, uint64_t addr) {
+    int log_it = 0, moved = 0, newaddr = 0, summary = 0;
+    uint32_t type = (uint32_t)-1, queries = 0;
+    pthread_mutex_lock(&g_as_mu);
+    g_as_addr_calls++;
+    AsEnt *e = as_intern(h);       /* intern, not find: an address query on an
+                                    * AS created before we were hooked is still
+                                    * a fact worth keeping */
+    if (e) {
+        if (e->addr && e->addr != addr) { e->moved++; moved = 1; }
+        if (!e->addr) newaddr = 1;
+        e->addr = addr;
+        e->queries++;
+        queries = e->queries;
+        type = as_eff_type(e);
+        /* Already known to be a TLAS? then this (handle,address) pair goes in
+         * the table now. If it is not classified yet, the first build will do
+         * it and pick the address up from the entry. */
+        if (type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR && addr) {
+            int before = g_ntlas_addr;
+            asj_note_tlas(e);
+            if (g_ntlas_addr != before) newaddr = 1;
+        }
+    }
+    if ((newaddr || moved) && g_asj_addr_lines < ASJ_MAX_ADDR_LINES) {
+        g_asj_addr_lines++;
+        log_it = 1;
+    }
+    if (g_as_addr_calls % ASJ_SUMMARY_EVERY == 0) summary = 1;
+    int ntl = g_ntlas_addr;
+    pthread_mutex_unlock(&g_as_mu);
+    if (log_it)
+        LOGF("\"ev\":\"as_addr\",\"as\":\"0x%llx\",\"addr\":\"0x%llx\","
+             "\"type\":\"%s\",\"moved\":%d,\"queries\":%u,"
+             "\"distinct_top_addr\":%d}",
+             (unsigned long long)h, (unsigned long long)addr,
+             type == (uint32_t)-1 ? "unclassified" : as_type_name(type),
+             moved, queries, ntl);
+    if (summary) asj_report("periodic_addr");
+}
+
+static void asj_note_build(uint32_t n,
+        const VkAccelerationStructureBuildGeometryInfoKHR *infos,
+        const VkAccelerationStructureBuildRangeInfoKHR *const *ranges) {
+    if (!infos) return;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t dst = (uint64_t)infos[i].dstAccelerationStructure;
+        uint32_t type = asj_classify(&infos[i]);   /* the authority. */
+        int is_top = type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        int upd = infos[i].mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+        uint32_t prims = 0;
+        if (ranges && ranges[i])
+            for (uint32_t g = 0; g < infos[i].geometryCount; g++)
+                prims += ranges[i][g].primitiveCount;
+        int log_it = 0, fresh_tlas = 0; uint32_t nb = 0, in_frame = 0;
+        uint32_t declared = (uint32_t)-1;
+        uint64_t addr = 0, frame;
+        pthread_mutex_lock(&g_as_mu);
+        g_as_build_calls++;
+        g_as_build_ranges += infos[i].geometryCount;
+        if (is_top) { if (upd) g_as_updates_top++; else g_as_builds_top++; }
+        else g_as_builds_bottom++;
+        frame = g_frame;
+        AsEnt *e = as_intern(dst);
+        if (e) {
+            e->build_type = type;
+            if (upd) e->updates++; else e->builds++;
+            e->last_prims = prims;
+            if (prims > e->max_prims) e->max_prims = prims;
+            e->geoms = infos[i].geometryCount;
+            e->flags = (uint32_t)infos[i].flags;
+            if (e->frame_last != frame || !e->in_frame) {
+                e->frame_last = frame; e->in_frame = 0;
+            }
+            /* Maintain the builds-per-frame histogram incrementally: move this
+             * destination out of its old bucket and into the new one. */
+            if (e->in_frame) {
+                int ob = e->in_frame < ASJ_BPF_BUCKETS - 1
+                       ? (int)e->in_frame : ASJ_BPF_BUCKETS - 1;
+                if (e->bpf[ob]) e->bpf[ob]--;
+            }
+            e->in_frame++;
+            {
+                int nbk = e->in_frame < ASJ_BPF_BUCKETS - 1
+                        ? (int)e->in_frame : ASJ_BPF_BUCKETS - 1;
+                e->bpf[nbk]++;
+            }
+            in_frame = e->in_frame;
+            nb = e->builds + e->updates;
+            addr = e->addr;
+            declared = e->create_type;   /* what the CREATE claimed, if seen */
+            if (is_top) fresh_tlas = asj_note_tlas(e);
+        }
+        /* Every first sighting of a TLAS gets a line; BLAS destinations get
+         * their first build only, capped. */
+        if (fresh_tlas) {
+            if (g_asj_tlas_lines < ASJ_MAX_TLAS_LINES) { g_asj_tlas_lines++; log_it = 2; }
+        } else if (!is_top && nb <= 1 && g_asj_build_lines < ASJ_MAX_BUILD_LINES) {
+            g_asj_build_lines++; log_it = 1;
+        }
+        pthread_mutex_unlock(&g_as_mu);
+        if (log_it)
+            LOGF("\"ev\":\"as_build\",\"dst\":\"0x%llx\",\"addr\":\"0x%llx\","
+                 "\"type\":\"%s\",\"build_info_type\":\"%s\","
+                 "\"declared_at_create\":\"%s\",\"mode\":\"%s\","
+                 "\"flags\":%u,\"geoms\":%u,\"prims\":%u,\"nth_build\":%u,"
+                 "\"in_frame\":%u,\"frame\":%llu,\"new_tlas\":%d}",
+                 (unsigned long long)dst, (unsigned long long)addr,
+                 as_type_name(type), as_type_name((uint32_t)infos[i].type),
+                 declared == (uint32_t)-1 ? "not_seen" : as_type_name(declared),
+                 upd ? "update" : "build",
+                 (unsigned)infos[i].flags, infos[i].geometryCount, prims,
+                 nb, in_frame, (unsigned long long)frame, log_it == 2);
+    }
+}
+
+/* The frame tick. vkQueuePresentKHR is the real frame boundary; vkQueueSubmit
+ * is the fallback for a device with no swapchain (the self-test probe), and
+ * whichever armed first is named in every summary as frame_src so a reader
+ * never has to guess what "frames" counts. */
+static void asj_note_frame(const char *src) {
+    uint64_t f; int summary;
+    pthread_mutex_lock(&g_as_mu);
+    g_frame_src = src;             /* the source of the MOST RECENT tick */
+    f = ++g_frame;
+    summary = (f % ASJ_SUMMARY_FRAMES) == 0;
+    pthread_mutex_unlock(&g_as_mu);
+    if (summary) asj_report("periodic_frame");
+}
+
+static void asj_final_summary(void) { asj_report("device_destroy"); }
+
+/* ------------------------------------------------------------------ */
 /* SER -- Shader Execution Reordering                                   */
 /* ------------------------------------------------------------------ */
 /* See the header comment. Two pieces:
@@ -798,6 +1340,12 @@ static void trace_maybe_log(const void *cb) {
  * ours is not added if one is already there. */
 #define CALLISTO_SER_EXT VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME
 #define CALLISTO_RTPIPE_EXT VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME
+/* VK_KHR_ray_query's own dependency is VK_KHR_acceleration_structure (plus
+ * SPIR-V 1.4, which is core in the Vulkan 1.2+ device vkd3d-proton creates).
+ * Enabling ours without it makes vkCreateDevice FAIL, and DXR is a setting
+ * the player can switch off, so this is not hypothetical. */
+#define CALLISTO_RAYQ_EXT VK_KHR_RAY_QUERY_EXTENSION_NAME
+#define CALLISTO_ASTRUCT_EXT VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME
 
 /* SPIR-V: Capability ShaderInvocationReorderNV. Not in vulkan_core.h -- it is
  * a SPIR-V enumerant, not a Vulkan one, so there is no header to include and
@@ -810,22 +1358,36 @@ static void trace_maybe_log(const void *cb) {
  *   extension. dev/patch_ser.sh --selftest is what caught it; keep that test
  *   working. */
 #define SPV_CAP_SHADER_INVOCATION_REORDER_NV 5383u
+/* SPIR-V: Capability RayQueryKHR. Same caveat as the SER enumerant above --
+ * it is a SPIR-V value, not a Vulkan one, so nothing here would fail to
+ * compile if it were wrong and the guard would silently never fire. 4472 was
+ * read out of an assembled module the same way (spirv-as a shader declaring
+ * OpCapability RayQueryKHR and dump the OpCapability operand);
+ * dev/patch_rayq.sh --selftest re-proves it against the real driver, and
+ * case B of that test is exactly the "the guard is dead" detector. */
+#define SPV_CAP_RAY_QUERY_KHR 4472u
 #define SPV_OP_CAPABILITY 17u
 
-/* Does this module declare the SER capability? Capabilities are the first
+/* Does this module declare capability `cap`? Capabilities are the first
  * section after the 5-word header and are contiguous, so the scan stops at
  * the first instruction that is not OpCapability. */
-static int spv_declares_ser(const uint32_t *w, size_t bytes) {
+static int spv_declares_cap(const uint32_t *w, size_t bytes, uint32_t cap) {
     size_t n = bytes / 4, i;
     if (!w || n < 5 || w[0] != 0x07230203) return 0;
     for (i = 5; i < n; ) {
         uint32_t len = w[i] >> 16, op = w[i] & 0xffffu;
         if (len == 0 || i + len > n) break;
         if (op != SPV_OP_CAPABILITY) break;
-        if (len >= 2 && w[i + 1] == SPV_CAP_SHADER_INVOCATION_REORDER_NV) return 1;
+        if (len >= 2 && w[i + 1] == cap) return 1;
         i += len;
     }
     return 0;
+}
+static int spv_declares_ser(const uint32_t *w, size_t bytes) {
+    return spv_declares_cap(w, bytes, SPV_CAP_SHADER_INVOCATION_REORDER_NV);
+}
+static int spv_declares_rayq(const uint32_t *w, size_t bytes) {
+    return spv_declares_cap(w, bytes, SPV_CAP_RAY_QUERY_KHR);
 }
 
 static int names_have(const char *const *names, uint32_t n, const char *want) {
@@ -834,95 +1396,85 @@ static int names_have(const char *const *names, uint32_t n, const char *want) {
     return 0;
 }
 
-/* Decide + build. Returns 1 if *out was filled with a modified create-info
- * (caller owns *out_exts and must free it), 0 for "leave the caller's struct
- * alone". *reason is always set to a short token for the log. */
-static int ser_enable_setup(InstData *inst, VkPhysicalDevice phys,
-        const VkDeviceCreateInfo *ci, VkDeviceCreateInfo *out,
-        VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV *feat,
-        const char ***out_exts, const char **reason) {
-    *out_exts = NULL;
-    if (g_ser_disabled)            { *reason = "env_disabled";   return 0; }
-    if (!inst || !inst->EnumDevExt) { *reason = "no_enum_fn";     return 0; }
+/* Decide, per extension, whether to ASK for it. Nothing is built here --
+ * SER and the ray query both want to append a name and prepend a feature
+ * struct, and each used to build its own copy of the VkDeviceCreateInfo, so
+ * the second copy would have thrown the first away. They are decided
+ * separately and assembled once, below.
+ *
+ * *reason is always set to a short token for the log. `already` is 1 when the
+ * application enabled the extension itself, which is `enabled` as far as
+ * serving a module is concerned -- 44-LOW-HANGING-FRUIT: treating our own
+ * no-op as "off" made the layer reject every SER swap on the one device that
+ * had the extension. */
+typedef struct { int want, already; const char *reason; } ExtWant;
+
+static void ext_decide(InstData *inst, VkPhysicalDevice phys,
+        const VkDeviceCreateInfo *ci, const char *ext, const char *dep,
+        VkStructureType feat_stype, int env_disabled, ExtWant *w) {
+    w->want = 0; w->already = 0; w->reason = "not_attempted";
+    if (env_disabled)               { w->reason = "env_disabled";  return; }
+    if (!inst || !inst->EnumDevExt) { w->reason = "no_enum_fn";    return; }
 
     const char *const *names = ci->ppEnabledExtensionNames;
     uint32_t n = ci->enabledExtensionCount;
-    if (n && !names)               { *reason = "bad_ext_array";  return 0; }
-    if (names_have(names, n, CALLISTO_SER_EXT)) {
-        /* Somebody already asked for it (vkd3d-proton does, every launch:
-         * "app_exts":71 in the log) -- nothing to add, and the feature struct
-         * is theirs to own. The caller treats every already_enabled* reason
-         * as SER ON. 44-LOW-HANGING-FRUIT: until then this returned 0 with
-         * ser_on=0, so the layer REJECTED every SER swap on the one device
-         * that actually had the extension, and served vanilla raygens. */
-        *reason = "already_enabled";
+    if (n && !names)                { w->reason = "bad_ext_array"; return; }
+    if (names_have(names, n, ext)) {
+        w->already = 1;
+        w->reason = "already_enabled_no_feature_struct";
         for (const VkBaseInStructure *p = ci->pNext; p; p = p->pNext)
-            if (p->sType ==
-                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV) {
-                const VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV *f =
-                    (const VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV *)p;
-                *reason = f->rayTracingInvocationReorder
-                        ? "already_enabled_feature_on"
-                        : "already_enabled_feature_off";
-                return 0;
+            if (p->sType == feat_stype) {
+                /* The first member of every VkPhysicalDevice*FeaturesKHR/NV
+                 * used here is the single VkBool32 we care about, right after
+                 * sType+pNext. Both structs this layer chains have that
+                 * layout, and both are checked at compile time below. */
+                const VkBool32 *on = (const VkBool32 *)((const char *)p
+                        + sizeof(VkBaseInStructure));
+                w->reason = *on ? "already_enabled_feature_on"
+                                : "already_enabled_feature_off";
+                return;
             }
-        *reason = "already_enabled_no_feature_struct";
-        return 0;
+        return;
     }
-    /* The extension's own dependency. Enabling ours without it makes
-     * vkCreateDevice FAIL, which means the game does not start -- and DXR is
-     * a setting the player can turn off, so this is not hypothetical. */
-    if (!names_have(names, n, CALLISTO_RTPIPE_EXT)) {
-        *reason = "no_ray_tracing_pipeline";
-        return 0;
-    }
+    if (!names_have(names, n, dep))  { w->reason = "missing_dependency"; return; }
 
     /* Ask the driver, do not assume. */
     uint32_t cnt = 0;
     if (inst->EnumDevExt(phys, NULL, &cnt, NULL) != VK_SUCCESS || !cnt) {
-        *reason = "enum_failed";
-        return 0;
+        w->reason = "enum_failed";
+        return;
     }
     VkExtensionProperties *props = calloc(cnt, sizeof *props);
-    if (!props)                    { *reason = "oom";            return 0; }
+    if (!props)                      { w->reason = "oom";          return; }
     int have = 0;
     if (inst->EnumDevExt(phys, NULL, &cnt, props) == VK_SUCCESS)
         for (uint32_t i = 0; i < cnt && !have; i++)
-            if (!strcmp(props[i].extensionName, CALLISTO_SER_EXT)) have = 1;
+            if (!strcmp(props[i].extensionName, ext)) have = 1;
     free(props);
-    if (!have)                     { *reason = "unsupported";    return 0; }
+    if (!have)                       { w->reason = "unsupported";  return; }
 
     /* A duplicate sType in a pNext chain is invalid usage. If the app already
      * chained the feature struct (it does not today, but a future
      * vkd3d-proton might), leave the chain alone and let it speak. */
     for (const VkBaseInStructure *p = ci->pNext; p; p = p->pNext)
-        if (p->sType ==
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV) {
-            *reason = "feature_already_chained";
-            return 0;
+        if (p->sType == feat_stype) {
+            w->reason = "feature_already_chained";
+            return;
         }
-
-    const char **e = malloc((size_t)(n + 1) * sizeof *e);
-    if (!e)                        { *reason = "oom";            return 0; }
-    for (uint32_t i = 0; i < n; i++) e[i] = names[i];
-    e[n] = CALLISTO_SER_EXT;
-
-    feat->sType =
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
-    /* Prepending keeps every node the caller built -- including the loader's
-     * own VkLayerDeviceCreateInfo, whose pLayerInfo this function's caller
-     * advances and restores by pointer. Nothing is copied but the head. */
-    feat->pNext = (void *)(uintptr_t)ci->pNext;
-    feat->rayTracingInvocationReorder = VK_TRUE;
-
-    *out = *ci;
-    out->pNext = feat;
-    out->enabledExtensionCount = n + 1;
-    out->ppEnabledExtensionNames = e;
-    *out_exts = e;
-    *reason = "enabled";
-    return 1;
+    w->want = 1;
+    w->reason = "enabled";
 }
+
+/* The compile-time half of ext_decide()'s "first VkBool32 after sType+pNext"
+ * assumption. If a header ever reorders these, this stops the build instead
+ * of silently misreading the app's feature struct. */
+_Static_assert(offsetof(VkPhysicalDeviceRayQueryFeaturesKHR, rayQuery)
+               == sizeof(VkBaseInStructure),
+               "VkPhysicalDeviceRayQueryFeaturesKHR layout changed");
+_Static_assert(offsetof(VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV,
+                        rayTracingInvocationReorder)
+               == sizeof(VkBaseInStructure),
+               "VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV layout changed");
 
 /* ------------------------------------------------------------------ */
 /* instance / device creation (loader chain advance)                   */
@@ -973,44 +1525,81 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
     if (!next_create) next_create = (PFN_vkCreateDevice)
         next_gipa(VK_NULL_HANDLE, "vkCreateDevice");
     if (!next_create) return VK_ERROR_INITIALIZATION_FAILED;
-    /* ---- SER: ask for VK_NV_ray_tracing_invocation_reorder on the app's
-     * behalf. Everything here is conditional and reversible; see the header
-     * comment and ser_enable_setup(). */
+    /* ---- Ask for VK_NV_ray_tracing_invocation_reorder (SER, handoff/41)
+     * and VK_KHR_ray_query (handoff/98) on the app's behalf. Everything here
+     * is conditional and reversible: on any failure the call is retried with
+     * strictly less added, and finally with exactly what the caller passed,
+     * so this can never be the reason the game does not start.
+     *
+     * Backward compatibility is explicit rather than assumed: if adding both
+     * fails, the SER-only create -- the one every launch before handoff/98
+     * made -- is retried before giving up. A launch that uses no ray query is
+     * bit-for-bit the old behaviour. */
+    ExtWant ws, wq;
+    ext_decide(id, phys, ci, CALLISTO_SER_EXT, CALLISTO_RTPIPE_EXT,
+               VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV,
+               g_ser_disabled, &ws);
+    ext_decide(id, phys, ci, CALLISTO_RAYQ_EXT, CALLISTO_ASTRUCT_EXT,
+               VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+               g_rayq_disabled, &wq);
+
+    VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV serfeat = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV,
+        NULL, VK_TRUE };
+    VkPhysicalDeviceRayQueryFeaturesKHR rqfeat = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, NULL, VK_TRUE };
+    const char **exts = NULL;
     VkDeviceCreateInfo ci2;
-    VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV serfeat;
-    const char **ser_exts = NULL;
-    const char *ser_reason = "not_attempted";
-    int ser_try = ser_enable_setup(id, phys, ci, &ci2, &serfeat,
-                                   &ser_exts, &ser_reason);
-    int ser_on = 0;
+    int ser_on = 0, rayq_on = 0;
+
+    /* build(want_ser, want_rayq) -> ci2; returns the number added */
+    uint32_t n0 = ci->enabledExtensionCount;
+    int nadd = ws.want + wq.want;
+    if (nadd) {
+        exts = malloc((size_t)(n0 + 2) * sizeof *exts);
+        if (!exts) { nadd = 0; ws.want = wq.want = 0; ws.reason = "oom"; }
+    }
 
     VkLayerDeviceCreateInfo save = *lc;
     ((VkLayerDeviceCreateInfo *)lc)->u.pLayerInfo = lc->u.pLayerInfo->pNext;
-    VkResult r = next_create(phys, ser_try ? &ci2 : ci, ac, pDev);
-    if (ser_try && r == VK_SUCCESS) {
-        ser_on = 1;
-    } else if (!ser_try && r == VK_SUCCESS
-               && !strncmp(ser_reason, "already_enabled", 15)) {
-        /* The app enabled the extension itself: SER modules are legal on
-         * this device. (feature_off is logged as such; per 41 s7 this driver
-         * accepts the modules either way -- only a frame-time delta proves
-         * the reorder happens.) */
-        ser_on = 1;
-    } else if (ser_try) {
-        /* Never be the reason the game does not start. Retry with exactly
-         * what the caller passed; the link info is still advanced, which is
-         * what the next layer expects on either call. */
-        LOGF("\"ev\":\"ser\",\"action\":\"fallback\",\"result\":%d,"
-             "\"note\":\"modified vkCreateDevice failed; retrying vanilla\"}",
-             (int)r);
-        r = next_create(phys, ci, ac, pDev);
-        ser_reason = "create_failed";
+
+    VkResult r;
+    int try_ser = ws.want, try_rayq = wq.want;
+    for (;;) {
+        if (!try_ser && !try_rayq) { r = next_create(phys, ci, ac, pDev); break; }
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < n0; i++) exts[k++] = ci->ppEnabledExtensionNames[i];
+        if (try_ser)  exts[k++] = CALLISTO_SER_EXT;
+        if (try_rayq) exts[k++] = CALLISTO_RAYQ_EXT;
+        /* Prepending keeps every node the caller built -- including the
+         * loader's own VkLayerDeviceCreateInfo, whose pLayerInfo is advanced
+         * and restored by pointer around this loop. Nothing is copied but
+         * the head. */
+        const void *head = ci->pNext;
+        if (try_ser)  { serfeat.pNext = (void *)(uintptr_t)head; head = &serfeat; }
+        if (try_rayq) { rqfeat.pNext  = (void *)(uintptr_t)head; head = &rqfeat; }
+        ci2 = *ci;
+        ci2.pNext = head;
+        ci2.enabledExtensionCount = k;
+        ci2.ppEnabledExtensionNames = exts;
+        r = next_create(phys, &ci2, ac, pDev);
+        if (r == VK_SUCCESS) { ser_on = try_ser; rayq_on = try_rayq; break; }
+        LOGF("\"ev\":\"devext\",\"action\":\"fallback\",\"result\":%d,"
+             "\"tried_ser\":%d,\"tried_rayq\":%d}", (int)r, try_ser, try_rayq);
+        if (try_rayq) { try_rayq = 0; wq.reason = "create_failed"; continue; }
+        try_ser = 0; ws.reason = "create_failed";
     }
     ((VkLayerDeviceCreateInfo *)lc)->u.pLayerInfo = save.u.pLayerInfo;
-    free(ser_exts);
+    free(exts);
+    if (ws.already && r == VK_SUCCESS) ser_on = 1;
+    if (wq.already && r == VK_SUCCESS) rayq_on = 1;
     LOGF("\"ev\":\"ser\",\"action\":\"%s\",\"reason\":\"%s\","
          "\"ext\":\"%s\",\"app_exts\":%u,\"result\":%d}",
-         ser_on ? "enabled" : "skipped", ser_reason, CALLISTO_SER_EXT,
+         ser_on ? "enabled" : "skipped", ws.reason, CALLISTO_SER_EXT,
+         ci->enabledExtensionCount, (int)r);
+    LOGF("\"ev\":\"rayq\",\"action\":\"%s\",\"reason\":\"%s\","
+         "\"ext\":\"%s\",\"app_exts\":%u,\"result\":%d}",
+         rayq_on ? "enabled" : "skipped", wq.reason, CALLISTO_RAYQ_EXT,
          ci->enabledExtensionCount, (int)r);
     if (r != VK_SUCCESS) return r;
 
@@ -1025,6 +1614,7 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
     }
     d->gdpa = next_gdpa;
     d->ser = ser_on;
+    d->rayq = rayq_on;
     d->DestroyDevice = (PFN_vkDestroyDevice)d->gdpa(dev, "vkDestroyDevice");
     d->CreateShaderModule = (PFN_vkCreateShaderModule)d->gdpa(dev, "vkCreateShaderModule");
     d->DestroyShaderModule = (PFN_vkDestroyShaderModule)d->gdpa(dev, "vkDestroyShaderModule");
@@ -1050,6 +1640,29 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
     if (!g_next_trace_ind2)
         g_next_trace_ind2 = (PFN_vkCmdTraceRaysIndirect2KHR)
             d->gdpa(dev, "vkCmdTraceRaysIndirect2KHR");
+    /* AS journal. gdpa returns NULL when VK_KHR_acceleration_structure is not
+     * enabled on this device, and the hooks below are only exposed when the
+     * pointer resolved -- so a non-RT device (every Proton helper) pays
+     * nothing, and CALLISTO_ASJOURNAL_DISABLE=1 skips resolution entirely. */
+    if (!g_asj_disabled) {
+        d->CreateAS = (PFN_vkCreateAccelerationStructureKHR)
+            d->gdpa(dev, "vkCreateAccelerationStructureKHR");
+        d->GetASAddr = (PFN_vkGetAccelerationStructureDeviceAddressKHR)
+            d->gdpa(dev, "vkGetAccelerationStructureDeviceAddressKHR");
+        if (!g_next_build_as)
+            g_next_build_as = (PFN_vkCmdBuildAccelerationStructuresKHR)
+                d->gdpa(dev, "vkCmdBuildAccelerationStructuresKHR");
+        if (!g_next_present)
+            g_next_present = (PFN_vkQueuePresentKHR)
+                d->gdpa(dev, "vkQueuePresentKHR");
+        if (!g_next_submit)
+            g_next_submit = (PFN_vkQueueSubmit)d->gdpa(dev, "vkQueueSubmit");
+        LOGF("\"ev\":\"asjournal\",\"action\":\"%s\",\"create\":%d,"
+             "\"addr\":%d,\"build\":%d,\"present\":%d,\"submit\":%d}",
+             (d->CreateAS || d->GetASAddr) ? "armed" : "unavailable",
+             d->CreateAS ? 1 : 0, d->GetASAddr ? 1 : 0, g_next_build_as ? 1 : 0,
+             g_next_present ? 1 : 0, g_next_submit ? 1 : 0);
+    }
     LOGF("\"ev\":\"vkCreateDevice\",\"dev\":\"%p\"}", (void *)dev);
     return r;
 }
@@ -1120,11 +1733,11 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
     }
 
     uint32_t *code = NULL; size_t size = 0;
-    if (has_id) code = load_swap(id, &size, d->ser); /* <hash>.<entry>.spv */
+    if (has_id) code = load_swap(id, &size, d->ser, d->rayq); /* <hash>.<entry>.spv */
     if (!code) {
         char name[80];
         snprintf(name, sizeof name, "sha256-%s", SHA());
-        code = load_swap(name, &size, d->ser);        /* sha256-<hex>.spv */
+        code = load_swap(name, &size, d->ser, d->rayq);  /* sha256-<hex>.spv */
     }
 
     /* SER: a swap that declares ShaderInvocationReorderNV is only legal on a
@@ -1139,6 +1752,16 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
         /* Unreachable since load_swap() filters per overlay; kept as the
          * last line of defence for the base dir. */
         LOGF("\"ev\":\"ser_reject\",\"id\":\"%s\",\"size\":%zu,"
+             "\"reason\":\"device_extension_not_enabled\",\"action\":\"vanilla\"}",
+             has_id ? id : "", size);
+        free(code);
+        code = NULL;
+    }
+    /* Same rule, same reason, for capability RayQueryKHR (handoff/98). Also
+     * unreachable for overlays; the base dir has no ray-query module today
+     * and this is what keeps that true safely. */
+    if (code && spv_declares_rayq(code, size) && !d->rayq) {
+        LOGF("\"ev\":\"rayq_reject\",\"id\":\"%s\",\"size\":%zu,"
              "\"reason\":\"device_extension_not_enabled\",\"action\":\"vanilla\"}",
              has_id ? id : "", size);
         free(code);
@@ -1363,9 +1986,54 @@ static void VKAPI_CALL xCmdTraceRaysIndirect2KHR(VkCommandBuffer cb,
     g_next_trace_ind2(cb, indirect);
 }
 
+/* --- AS journal entry points (Stage 2a): observe, never alter. Each one
+ * calls down unconditionally; the journal call cannot change any argument,
+ * and a failed create is recorded as nothing at all. --- */
+static VkResult VKAPI_CALL xCreateAccelerationStructureKHR(VkDevice dev,
+        const VkAccelerationStructureCreateInfoKHR *ci,
+        const VkAllocationCallbacks *ac, VkAccelerationStructureKHR *pAS) {
+    DevData *d = find_dev(dev);
+    if (!d || !d->CreateAS) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = d->CreateAS(dev, ci, ac, pAS);
+    if (r == VK_SUCCESS && ci && pAS)
+        asj_note_create((uint64_t)*pAS, (uint32_t)ci->type, (uint64_t)ci->size);
+    return r;
+}
+
+static VkDeviceAddress VKAPI_CALL xGetAccelerationStructureDeviceAddressKHR(
+        VkDevice dev, const VkAccelerationStructureDeviceAddressInfoKHR *info) {
+    DevData *d = find_dev(dev);
+    if (!d || !d->GetASAddr) return 0;
+    VkDeviceAddress a = d->GetASAddr(dev, info);
+    if (info) asj_note_addr((uint64_t)info->accelerationStructure, (uint64_t)a);
+    return a;
+}
+
+static void VKAPI_CALL xCmdBuildAccelerationStructuresKHR(VkCommandBuffer cb,
+        uint32_t n, const VkAccelerationStructureBuildGeometryInfoKHR *infos,
+        const VkAccelerationStructureBuildRangeInfoKHR *const *ranges) {
+    asj_note_build(n, infos, ranges);
+    g_next_build_as(cb, n, infos, ranges);
+}
+
+/* The frame tick, and nothing else: neither hook inspects or alters an
+ * argument, and both call down unconditionally. Present wins when both are
+ * available -- it is armed first (see asj_note_frame) because a swapchain
+ * device presents long before the submit path can matter. */
+static VkResult VKAPI_CALL xQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
+    asj_note_frame("present");
+    return g_next_present(q, pi);
+}
+static VkResult VKAPI_CALL xQueueSubmit(VkQueue q, uint32_t n,
+        const VkSubmitInfo *si, VkFence f) {
+    if (!g_next_present) asj_note_frame("submit");
+    return g_next_submit(q, n, si, f);
+}
+
 static void VKAPI_CALL xDestroyDevice(VkDevice dev, const VkAllocationCallbacks *ac) {
     DevData *d = find_dev(dev);
     PFN_vkDestroyDevice next = d ? d->DestroyDevice : NULL;
+    asj_final_summary();
     del_dev(dev);                       /* drop before the handle dies */
     if (next) next(dev, ac);
 }
@@ -1404,6 +2072,19 @@ static PFN_vkVoidFunction cond_dev_hook(VkDevice dev, const char *name) {
         DevData *d = find_dev(dev);
         if (d && d->CreateComputePipelines)
             return (PFN_vkVoidFunction)xCreateComputePipelines;
+    } else if (!strcmp(name, "vkCreateAccelerationStructureKHR")) {
+        DevData *d = find_dev(dev);
+        if (d && d->CreateAS) return (PFN_vkVoidFunction)xCreateAccelerationStructureKHR;
+    } else if (!strcmp(name, "vkGetAccelerationStructureDeviceAddressKHR")) {
+        DevData *d = find_dev(dev);
+        if (d && d->GetASAddr)
+            return (PFN_vkVoidFunction)xGetAccelerationStructureDeviceAddressKHR;
+    } else if (!strcmp(name, "vkCmdBuildAccelerationStructuresKHR")) {
+        if (g_next_build_as) return (PFN_vkVoidFunction)xCmdBuildAccelerationStructuresKHR;
+    } else if (!strcmp(name, "vkQueuePresentKHR")) {
+        if (g_next_present) return (PFN_vkVoidFunction)xQueuePresentKHR;
+    } else if (!strcmp(name, "vkQueueSubmit")) {
+        if (g_next_submit) return (PFN_vkVoidFunction)xQueueSubmit;
     } else if (!strcmp(name, "vkCmdDispatch")) {
         if (g_next_dispatch) return (PFN_vkVoidFunction)xCmdDispatch;
     } else if (!strcmp(name, "vkCmdDispatchIndirect")) {

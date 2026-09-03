@@ -289,6 +289,9 @@ So **`P_world = (%727,%729,%731) + cbv[104][56].xyz`**, 1 access chain + 1 load
 + 3 extracts + 3 adds, once per module invocation. All 12 permutations use
 `cbv[104][56]` (6–10 uses each), so the anchor is universal.
 
+> **PROVEN ON SCREEN 2026-09-02 — see `98` §15 and §7 below.** The paragraph
+> below is left as it was written, before the test.
+>
 > This is a **contract about a space** (GOTCHAS 5) and it is *inferred from two
 > consumers*, not proven. The build must assert that the same CB member is the
 > one added to the reservoir store, and the launch verifier is behavioural:
@@ -649,7 +652,7 @@ milestone is forbidden to do; the decision is the build's first question.
 | The reference raygen does not shade the primary hit's direct light | **high** | the material phis feed only the BSDF-sampling region; all six GGX blocks read the post-trace payload ids |
 | The payload carries no material class | **certain** | 4-member struct, every access chain indexes 0..3 |
 | 60/60 blocks resolve N/V/H/NoH/NoV/NoL/VoH; metallic 18/18 per module | **certain** | measured, §3.4 |
-| `cbv[104][56].xyz + P` is frame-stable world space | **inferred, not proven** | two consumers agree (reservoir store, light vector); §6.2 check 8 turns it into an assertion, §6.3 step 4 tests it on screen |
+| `cbv[104][56].xyz + P` is frame-stable world space | **PROVEN ON SCREEN** (2026-09-02; was "inferred, not proven") | `98` §15: `hunt-rayq-pxfw` adds this exact CB member — re-derived structurally as member **56** in 10/10 permutations by the trace-origin rule, never by index — to a ray query's `ObjectToWorld[3]`, and static geometry goes flat and stable under camera motion, while the otherwise-identical `hunt-rayq-pxfq` without the offset stays unstable. The TLAS is built in **camera-relative** space and this member is the camera offset. The two original consumers (reservoir store, light vector) agreed; a third, independent quantity now agrees too, on screen |
 | Vehicle paint is `class 0` with `metallic ≥ 0.5, roughness ≤ 0.35` | **hypothesis** | this is what §5 measures. Do not build past `hunt-paint` on it |
 | Any of this renders | **unknown** | nothing has been built |
 

@@ -120,6 +120,12 @@ default 2, and §8 F1 is the one-frame falsifier.
 **World units are metres**, already established by `85`/`88` (tmax `0.006` =
 6 mm, the engine's own offset floor `0.005` = 5 mm at face range).
 
+**MEASURED 2026-09-02 — both claims in this section are now confirmed on screen:
+`99` §10.8** read `frac(P)` off a wall and found the vertical sawtooth in the
+**blue** channel (component 2, so **Z-up**, and +Z) with a period of 512.5 px
+against V's 945 px extent = a **1.00 m cell**. `--up 2` and metres are no longer
+structural assumptions.
+
 ---
 
 ## 2. Engine fog parameters: **not readable. Three hardcoded knobs, and the doc says so.**
