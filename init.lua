@@ -89,7 +89,42 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- to the rung above. Same contract: ser=class,
                -- shadowset=full-shadow, and the layer's rayq_reject fallback
                -- still applies to all 10 painted permutations.
-               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense" }
+               -- handoff/109: plus curvature-driven skin scattering at g=1.
+               -- kappa=|dN|/|dP| from 4 extra G-buffer taps drives the
+               -- terminator band width AND its red amplitude per pixel. The
+               -- 16 raygens are the cap6-glintdense default's, byte for byte.
+               -- content sha 024998da26d84333. SHOT 2026-09-03, LIVE read-out
+               -- only: "looks incredible" / "preferring using the default
+               -- curv option".
+               -- DEFAULT CHANGED 2026-09-03, fourth time today, to
+               -- handoff/111's EAR GLOW v7 -- the stack above with the ear
+               -- glow's TRANSFER replaced by MEASURED skin transmittance.
+               -- Nothing else moves: no cutoff, no fade, query B's 18 mm
+               -- tmax and 101 sec 18's 6 mm floor exactly as shipped, all
+               -- three ray queries byte-identical to the rung above, and the
+               -- 77 compute modules are 109's curv bytes. What moved, all
+               -- inside the transfer: the six lobe rates + two amplitudes are
+               -- FITTED to a layered skin slab (Prahl haemoglobin + Jacques,
+               -- integrated over the sRGB bands, dev/transmit_model.py) --
+               -- red's effective ld 3.67 -> 1.55 mm -- and the wrap's
+               -- SmoothStep(0, 0.35, -N.S), which SATURATED at 1 over almost
+               -- the whole pinna, becomes max(-N.S, 0), the real entry-face
+               -- Lambert factor (up to 2.86x less sun at the knee). k
+               -- 0.22 -> 7.1497 is a NORMALISATION, not a brightness knob:
+               -- it pins peak red to the previous default's 0.094542, so RED
+               -- IS UNCHANGED and only hue and depth shape move (R/G at the
+               -- floor 2.48 -> 45; term luminance 0.447x at the floor,
+               -- 0.019x at 12 mm, so the nose bridge dies on the exponential
+               -- with no cutoff). content sha 1d28a6adae300c9b.
+               -- SERVED 2026-09-03 (status.txt want_skinspec=earglow7, the
+               -- manifest guard satisfied -- see 111 sec 0.1) and kept on a
+               -- LIVE read-out only, no capture: "earglow-7 ended up being
+               -- incredible". earglow7-ctl below is this stack's predecessor
+               -- byte for byte and is the A/B control.
+               -- Same contract as every rung since the fog one: ser=class,
+               -- shadowset=full-shadow, and the layer's rayq_reject fallback
+               -- on a device with no VK_KHR_ray_query.
+               skinspec = "earglow7" }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
@@ -342,7 +377,16 @@ local SKIN_LEVELS = {
     -- k_glint=0 on that base reproduces earglow-cap6 at 93/93 cmp, the glint
     -- census equals carglint-dense's, and BOTH earglow verifiers pass on the
     -- output (verify_earglow_rq3.py --floor, verify_earglow_cap.py --cap 0.006).
-    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense", label = "  + EAR GLOW (6 mm floor) + car-paint GLINTS (dense)  <-- DEFAULT" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense", label = "  + EAR GLOW (6 mm floor) + car-paint GLINTS (dense)  <-- the previous default; the base of everything below" },
+    -- handoff/109. The default PLUS curvature-driven skin scattering at g = 1:
+    -- kappa = |dN|/|dP| from 4 extra G-buffer taps drives the terminator band
+    -- width AND its red amplitude per pixel (nose/lips/ears wider + redder,
+    -- chest tighter, cheek the unmoved pivot). 78's luminance hold rides the
+    -- same value, so the change is chromaticity + width only. 93/93 bytes are
+    -- skin.set/curv; the 16 raygens are the old default's. content sha
+    -- 024998da26d84333. SHOT 2026-09-03, LIVE read-out only, no capture:
+    -- "tested the curvature based bleed effect and it looks incredible".
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv", label = "  + CURVATURE-DRIVEN skin scattering (109)  <-- the previous default; = earglow7-ctl" },
     -- handoff/101 sec 17. THE STANDING SELECTION. The fog rung above plus the
     -- ray-query ear glow (rq3: instance-matched sunward thickness AND a
     -- sun-visibility query from the exit point). SHOT backlit and KEPT.
@@ -540,6 +584,89 @@ local SKIN_LEVELS = {
     { id = "contact-rq-hit", label = "DIAGNOSTIC: contact occlusion map -- BLACK = fully occluded within 10 cm, WHITE = open sky" },
     { id = "contact-rq",     label = "Contact occlusion TRACED, K=4 (replaces the cavity cone, same k=0.85)" },
     { id = "contact-rq-8",   label = "Contact occlusion TRACED, K=8 (same k, twice the rays -- quality axis)" },
+    -- handoff/109. Curvature-driven skin scattering, single rungs on the
+    -- cap6-glintdense base (compute only; 75 of 77 resolvers, 142 bleed sites).
+    -- Shoot curv-vis FIRST: a flat ramp = the estimator is not following
+    -- geometry and the family is void. Contract: ser=class,
+    -- shadowset=full-shadow, direct sun on a close-up face, non-skin control.
+    { id = "curv-vis",  label = "PROBE: curvature kappa ramp on skin, blue=flat -> red=tight (109; SHOOT THIS FIRST -- flat ramp = family void)" },
+    { id = "curv",      label = "  CURVATURE-DRIVEN skin scattering, g = 1 -- KEPT 2026-09-03; identical bytes to the DEFAULT stack" },
+    { id = "curv-hi",   label = "  curvature skin at g = 2 -- twice the contrast; differs from curv ONLY on foreheads/temples (109 sec 3.3)" },
+    { id = "curv-ctl",  label = "  curvature CONTROL (g = 0) -- 93/93 BYTE-identical to the cap6-glintdense default; must be indistinguishable" },
+    -- handoff/105. Backlit translucency for EVERY thin surface: 101's sunward
+    -- front-cull query with a class-0 rough-dielectric gate, STACKED on the
+    -- cap6-glintdense default (ear glow bit-identical on skin, asserted).
+    -- Market tarps are a known FALSE NEGATIVE (metallic >= 0.5, 94 sec 14.2a);
+    -- backlit foliage is the known FALSE POSITIVE (alpha-tested cards commit
+    -- solid). Frame: a curtain or plastic sheet backlit, plus a skin control.
+    -- Shoot -hit FIRST. Photo-mode/reference PT only. Read 105 sec 10 first.
+    { id = "thinglow-hit", label = "DIAGNOSTIC: thin translucency -- BLUE = 0.3 mm same-instance wall sunward, GREEN = 25 mm, RED = it cannot see the sun" },
+    { id = "thinglow",     label = "Backlit thin translucency (curtains/tents/sheets/paper, k=0.5, ld=2 mm) -- STACKS on the cap6-glintdense default, ear glow unchanged" },
+    { id = "thinglow-hi",  label = "Backlit thin translucency HI (k=1.0, same ld=2 mm) -- the ONLY variable vs thinglow is k" },
+    { id = "thinglow-ctl", label = "CONTROL for thinglow -- byte-identical to the cap6-glintdense default" },
+    -- handoff/110. EAR GLOW v5 on the cap6-glintdense default, raygens only:
+    -- USER VERDICT on the shipped glow, verbatim: "looks like a lightbulb
+    -- behind ears. Needs to be like 3/4 less bright ... a hard cutoff at a
+    -- certain thickness ... shallow depth transmission should still be
+    -- coloured more red". Three variables: k 0.22 -> 0.055; a HARD cutoff
+    -- (query B tmax = t_cut, 1 mm fade, exactly zero beyond); colour by a
+    -- tint (c1) or by shorter ld_G/ld_B (c2). Query, instance match and the
+    -- 6 mm floor UNTOUCHED (110 sec 3.2: that floor flattens every ear under
+    -- 6 mm to ONE colour -- the floor rungs below are the fix). These carry
+    -- NO curvature: the compute half is the cap6-glintdense default's.
+    -- Frame: backlit head, child + adult + a nose-bridge view, full-shadow.
+    { id = "earglow5-ctl",    label = "CONTROL for ear glow v5 -- byte-identical to the cap6-glintdense default (this is the 'before')" },
+    { id = "earglow5",        label = "Ear glow v5 (k=0.055, hard cutoff 8 mm + 1 mm fade, tint 1.0/0.40/0.22 -> R/G 6.19) -- the pick" },
+    { id = "earglow5-cut6",   label = "Ear glow v5, cutoff 6 mm -- aggressive: kills the nose bridge AND the concha of an adult ear" },
+    { id = "earglow5-cut10",  label = "Ear glow v5, cutoff 10 mm -- permissive: a thin nose bridge may still glow" },
+    { id = "earglow5-rate",   label = "Ear glow v5, colour by SHORTER ld_G/ld_B (0.70/0.35 mm) instead of a tint -> R/G 7.31; A/B this against earglow5 on colour alone" },
+    { id = "earglow5-floor3", label = "Ear glow v5 with the thickness floor at 3 mm, not 6 mm -- restores the depth gradient earglow5 cannot have; A/B against earglow5" },
+    { id = "earglow5-floor2", label = "Ear glow v5 with the thickness floor at 2 mm -- the strongest gradient; check a CHILD's ear for blow-out (101 sec 18's original reason for 6 mm)" },
+    -- handoff/110 sec 14. EAR GLOW v6 LADDER. v5's 8 mm cut removed the glow
+    -- entirely: t is a SUN-PATH CHORD, not ear thickness (a 3 mm pinna reads
+    -- 8.8 mm at 70 deg), so every backlit grazing ray missed. Eight rungs,
+    -- each ONE constant from the centre; earglow5-ctl is the control. Note
+    -- earglow6 is ~110% of the brightness the user liked (k 0.75x but the
+    -- 3 mm floor 1.46x); -k11 is the literal 75%. Raygens only, no curvature.
+    { id = "earglow6",        label = "Ear glow v6 CENTRE (k 0.165, cutoff 12 mm, floor 3 mm, tint 1.0/0.40/0.22) -- shoot this and earglow5-ctl in one frame" },
+    { id = "earglow6-cut10",  label = "Ear glow v6, CUTOFF axis: 10 mm instead of 12 -- the tightest cut that should still survive a grazing sun" },
+    { id = "earglow6-cut15",  label = "Ear glow v6, CUTOFF axis: 15 mm instead of 12 -- admits a 4 mm pinna out to 75 deg" },
+    { id = "earglow6-cutoff", label = "Ear glow v6, CUTOFF axis: NONE. tmax back to the shipped 18 mm, no fade; the transfer's own decay is the only falloff. If this wins, drop the cutoff entirely" },
+    { id = "earglow6-k11",    label = "Ear glow v6, BRIGHTNESS axis: k 0.11 -- peak R 0.0691, the rung that is literally 75% of the brightness the user asked to get back" },
+    { id = "earglow6-k22",    label = "Ear glow v6, BRIGHTNESS axis: k 0.22, the ORIGINAL shipped brightness with the new cutoff, floor and tint -- tests whether k was ever the problem" },
+    { id = "earglow6-mild",   label = "Ear glow v6, COLOUR axis: tint (1.0,0.55,0.35), R/G 3.31 at the peak -- less red than the centre" },
+    { id = "earglow6-deep",   label = "Ear glow v6, COLOUR axis: tint (1.0,0.30,0.15), R/G 6.07 at the peak -- more red than the centre" },
+    -- handoff/111. EAR GLOW v7 -- MEASURED TRANSMITTANCE. User ask, verbatim:
+    -- "actually reduce the luminance of the sun and tweak the hue of the light
+    -- based on the actual transmittance of skin", and "I need the default
+    -- values we had before ... but just with better transmittance". So this
+    -- is the standing cap6-glintdense-curv DEFAULT with NO cutoff, NO fade,
+    -- the 6 mm floor and query B's 18 mm tmax exactly as shipped; v5/v6 are
+    -- NOT stacked. What moved: the two lobes per channel are REFITTED to a
+    -- layered skin slab (Prahl haemoglobin + Jacques' fits, integrated over
+    -- the sRGB bands, dev/transmit_model.py) -- red's effective ld 3.67 ->
+    -- 1.55 mm; the per-channel amplitude comes out of that same spectrum
+    -- (1 / 0.019 / 0.085) instead of a knob; and the wrap's
+    -- SmoothStep(0, 0.35, -N.S), which SATURATED AT 1 over almost the whole
+    -- pinna, becomes max(-N.S, 0) -- the real entry-face Lambert factor, up
+    -- to 2.9x less sun at the knee. k is a NORMALISATION, not a brightness
+    -- knob: it holds peak red at the default's 0.094542, so RED IS
+    -- UNCHANGED and only hue + depth shape move. Term luminance 0.447x.
+    -- Frame: backlit head, ear + nose bridge + nostril, sun near grazing.
+    { id = "earglow7-ctl",    label = "CONTROL for ear glow v7 -- byte-identical to the PREVIOUS default (cap6-glintdense-curv); this is the 'before'" },
+    { id = "earglow7",        label = "Ear glow v7 (fitted skin transmittance, k=7.15 holds peak red at 0.094542, R/G 45 at the floor, cos wrap)  <-- DEFAULT; A/B against earglow7-ctl" },
+    { id = "earglow7-ss",     label = "Ear glow v7, ANGULAR axis: keeps the old saturating SmoothStep wrap instead of max(-N.S,0) -- isolates how much of the dimming is the cosine alone" },
+    { id = "earglow7-hue1",   label = "Ear glow v7, COLOUR axis: dermal blood 1% instead of 2% -> R/G 35 at the floor, and the hue is flat in depth; less red if v7 reads as neon" },
+    { id = "earglow7-floor2", label = "Ear glow v7, DEPTH axis: floor 2 mm not 6 -- the ONLY rung with a real hue gradient (R/G 14.5 -> 34 over 2..12 mm); peak red still 0.094542. Check a CHILD's ear" },
+    -- handoff/103. STAGE 2b/2c: a layer-delivered 64-bit TLAS address read by
+    -- a COMPUTE resolver through a fixed-up PhysicalStorageBuffer pointer,
+    -- and a compute-side inline ray query on it. Driver self-test 54/54 and
+    -- 2c ran off-screen; hole 4 (do the real resolvers build as compute
+    -- pipelines) is a LAUNCH question. REQUIRES the rebuilt layer: make
+    -- install + cmp BEFORE shooting, or the probes read RED. Read 103 sec 8.
+    { id = "bda-ctl",      label = "BDA CONTROL (byte-identical to the cap6-glintdense default; control for the selector and the layer)" },
+    { id = "bda-probe",    label = "DIAGNOSTIC (Stage 2b): skin GREEN = the layer's TLAS slot was read through a fixed-up 64-bit pointer, RED = it was not" },
+    { id = "bda-rq-probe", label = "DIAGNOSTIC (Stage 2c): compute-side ray query straight up, 5cm-3m -- skin BLUE = hit, AMBER = miss, RED = the slot magic was wrong" },
     -- 55: G-U5 payload sentinel (diagnostic; read handoff/55 sec 4 BEFORE launching)
     { id = "sentinel",   label = "SENTINEL: injected-trace probe A -- magenta = trace runs" },
     { id = "sentinel-b", label = "SENTINEL-B: probe B (only if A dark) -- cyan = trace runs" },

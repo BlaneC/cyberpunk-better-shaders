@@ -26,6 +26,7 @@
  *   CALLISTO_SER_DISABLE=1  never ask for VK_NV_ray_tracing_invocation_reorder
  *   CALLISTO_RAYQ_DISABLE=1 never ask for VK_KHR_ray_query (see "RAY QUERY")
  *   CALLISTO_ASJOURNAL_DISABLE=1  do not journal acceleration structures
+ *   CALLISTO_BDA_DISABLE=1  never allocate the BDA slot (see "BDA SLOT")
  *
  * SER -- Shader Execution Reordering (handoff/41-SER-BUILD.md, idea A1 of
  * handoff/38-WILD-IDEAS.md). Cyberpunk uses the DXR HitObject/SER path on
@@ -81,6 +82,33 @@
  *   {"ev":"as_addr","as":...,"type":...,"addr":"0x...","distinct":N}
  *   {"ev":"as_build","dst":...,"type":...,"n":N,"builds":N}
  *
+ * BDA SLOT -- handoff/103-STAGE-2B.md (Stage 2b of handoff/98 section 10.3).
+ * Compute modules CANNOT reach the RTAS heap: in a compute pipeline
+ * vkd3d-proton binds AtomicCounters at set 1 binding 0, where a raygen has
+ * RTASHeap (98 section 10.2, measured). So a compute-side inline ray query needs
+ * the 64-bit TLAS device address delivered by the layer instead.
+ *
+ * This layer allocates ONE 256-byte host-visible buffer per RT-capable device
+ * with SHADER_DEVICE_ADDRESS usage, writes a magic word into it, and refreshes
+ * word 2/3 with the newest populated TOP-LEVEL acceleration structure address
+ * every time a TLAS build is RECORDED (the same hook the AS journal uses).
+ * A patched module carries a reserved marker
+ *      OpString "CALLISTO_BDA_SLOT_V1 lo=%<id> hi=%<id> sent=... magic=..."
+ * plus the two OpConstant %uint the marker NAMES BY SSA ID, holding the two
+ * halves of a sentinel address. At vkCreateShaderModule the layer rewrites
+ * exactly those two literals with the real buffer address. It is NOT a value
+ * scan (98 section 10.3 hole 2): the ids come from the module's own marker and all
+ * four conjuncts -- marker present, ids well formed, ids are 32-bit unsigned
+ * OpConstants, their current values are the sentinel -- must hold, or the
+ * candidate is REFUSED and the search falls through to the next overlay.
+ *   {"ev":"bda","action":"armed"|"skipped","reason":...,"addr":"0x..."}
+ *   {"ev":"bda_fixup","id":...,"addr":"0x..."}
+ *   {"ev":"bda_reject","id":...,"reason":...,"action":"next_overlay"|"vanilla"}
+ *   {"ev":"bda_tlas","addr":"0x...","gen":N,"prims":N}
+ * ./dev/selftest_bda.sh proves the whole chain against the real driver --
+ * including a real DISPATCH that reads the magic back through the fixed-up
+ * pointer -- without launching the game.
+ *
  * Dispatch evidence (the missing link between "created" and "dispatched"):
  * the layer records every module's identity, then hooks
  * vkCreateRayTracingPipelinesKHR to log which raygen module each RT pipeline
@@ -123,6 +151,7 @@ static int g_quiet, g_disabled;
 static int g_ser_disabled;       /* CALLISTO_SER_DISABLE */
 static int g_rayq_disabled;      /* CALLISTO_RAYQ_DISABLE */
 static int g_asj_disabled;       /* CALLISTO_ASJOURNAL_DISABLE */
+static int g_bda_disabled;       /* CALLISTO_BDA_DISABLE */
 static const char *g_dump_dir;   /* CALLISTO_DUMP_DIR */
 
 /* The constructor can run before the sandbox has finished setting up the
@@ -144,6 +173,8 @@ static void log_open(void) {
                      && !strcmp(getenv("CALLISTO_RAYQ_DISABLE"), "1");
     g_asj_disabled = getenv("CALLISTO_ASJOURNAL_DISABLE")
                      && !strcmp(getenv("CALLISTO_ASJOURNAL_DISABLE"), "1");
+    g_bda_disabled = getenv("CALLISTO_BDA_DISABLE")
+                     && !strcmp(getenv("CALLISTO_BDA_DISABLE"), "1");
 }
 
 /* call with g_mu held */
@@ -504,6 +535,13 @@ static void status_hit(const char *id, int ok) {
 
 static int spv_declares_ser(const uint32_t *w, size_t bytes);
 static int spv_declares_rayq(const uint32_t *w, size_t bytes);
+/* BDA slot (handoff/103). `spv_has_bda_marker` is a cheap yes/no on the
+ * reserved OpString; `bda_fixup` does the full four-conjunct validation and
+ * rewrites the two named constants in place. Both are defined next to the
+ * other SPIR-V helpers below. */
+static int spv_has_bda_marker(const uint32_t *w, size_t bytes);
+static int bda_fixup(uint32_t *w, size_t bytes, uint64_t addr,
+                     const char **reason, uint32_t ids[2]);
 
 /* First-file-wins across the overlays, then the base dir -- with one
  * exception (44-LOW-HANGING-FRUIT): when the device has no SER, a candidate
@@ -518,8 +556,11 @@ static int spv_declares_rayq(const uint32_t *w, size_t bytes);
  * reason: a hunt-rayq overlay served on a device without VK_KHR_ray_query
  * must fall through to swaps.skin/ and produce the BASE image, not vanilla
  * raygens on top of a patched compute set. */
+static uint64_t g_bda_fixups, g_bda_fixup_lines;
+#define BDA_MAX_FIXUP_LINES 8
+
 static uint32_t *load_swap(const char *name, size_t *out_size, int allow_ser,
-                           int allow_rayq) {
+                           int allow_rayq, uint64_t bda_addr) {
     for (int i = 0; i < g_noverlay; i++) {
         uint32_t *c = load_swap_from(g_overlaydir[i], name, out_size);
         if (!c) continue;
@@ -537,9 +578,59 @@ static uint32_t *load_swap(const char *name, size_t *out_size, int allow_ser,
             free(c);
             continue;
         }
+        /* The BDA marker is the SAME rule (98 section 7.2): a module whose
+         * sentinel we cannot rewrite would dereference a garbage 64-bit
+         * pointer, so it is refused HERE and the next overlay gets its turn.
+         * The check is on the module's own reserved OpString, never on a
+         * constant's value -- 3282 of 3323 dumped modules declare
+         * PhysicalStorageBufferAddresses, so the capability discriminates
+         * nothing (98 section 10.3 hole 1). */
+        if (spv_has_bda_marker(c, *out_size)) {
+            const char *why = "device_has_no_bda_slot";
+            uint32_t ids[2] = {0, 0};
+            int ok = bda_addr && bda_fixup(c, *out_size, bda_addr, &why, ids);
+            if (!ok) {
+                LOGF("\"ev\":\"bda_reject\",\"id\":\"%s\",\"size\":%zu,\"dir\":\"%s\","
+                     "\"reason\":\"%s\",\"action\":\"next_overlay\"}",
+                     name, *out_size, g_overlaydir[i], why);
+                free(c);
+                continue;
+            }
+            uint64_t n = __sync_fetch_and_add(&g_bda_fixups, 1);
+            if (__sync_fetch_and_add(&g_bda_fixup_lines, 0) < BDA_MAX_FIXUP_LINES) {
+                __sync_fetch_and_add(&g_bda_fixup_lines, 1);
+                LOGF("\"ev\":\"bda_fixup\",\"id\":\"%s\",\"size\":%zu,\"dir\":\"%s\","
+                     "\"addr\":\"0x%llx\",\"lo_id\":%u,\"hi_id\":%u,\"nth\":%llu}",
+                     name, *out_size, g_overlaydir[i],
+                     (unsigned long long)bda_addr, ids[0], ids[1],
+                     (unsigned long long)(n + 1));
+            }
+        }
         return c;
     }
-    return load_swap_from(g_swapdir, name, out_size);
+    /* The BASE swaps/ dir gets the SAME guard, and it is applied HERE rather
+     * than in xCreateShaderModule for one reason: the fixup is DESTRUCTIVE.
+     * Once a module's two constants hold the device address they no longer
+     * hold the sentinel, so a second pass over the same bytes would refuse --
+     * correctly, by conjunct 4 -- a module that is already right, and the
+     * caller would fall back to vanilla. The marker is guarded and rewritten
+     * exactly once, in exactly one place. */
+    {
+        uint32_t *c = load_swap_from(g_swapdir, name, out_size);
+        if (c && spv_has_bda_marker(c, *out_size)) {
+            const char *why = "device_has_no_bda_slot";
+            uint32_t ids[2] = {0, 0};
+            if (!bda_addr || !bda_fixup(c, *out_size, bda_addr, &why, ids)) {
+                LOGF("\"ev\":\"bda_reject\",\"id\":\"%s\",\"size\":%zu,"
+                     "\"dir\":\"%s\",\"reason\":\"%s\",\"action\":\"vanilla\"}",
+                     name, *out_size, g_swapdir, why);
+                free(c);
+                return NULL;
+            }
+            __sync_fetch_and_add(&g_bda_fixups, 1);
+        }
+        return c;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -563,6 +654,11 @@ typedef struct {
      * try to enable it. Resolved through the NEXT layer's gipa, so it is the
      * driver's answer, not ours. */
     PFN_vkEnumerateDeviceExtensionProperties EnumDevExt;
+    /* Needed by the BDA slot (handoff/103) to pick a host-visible coherent
+     * memory type. Resolved with the REAL VkInstance -- gipa(NULL, ...) only
+     * hands out the global commands, so a NULL-instance lookup here would
+     * silently return NULL and the slot would never arm. */
+    PFN_vkGetPhysicalDeviceMemoryProperties GetMemProps;
 } InstData;
 typedef struct {
     DispatchKey key;
@@ -587,6 +683,19 @@ typedef struct {
      * is not enabled, in which case the hooks are never exposed. */
     PFN_vkCreateAccelerationStructureKHR CreateAS;
     PFN_vkGetAccelerationStructureDeviceAddressKHR GetASAddr;
+    /* BDA slot (handoff/103). `bda_addr` is 0 unless the whole chain came up:
+     * the bufferDeviceAddress feature is on, the 256 B buffer was created,
+     * bound to host-visible memory, mapped and given a device address. It is
+     * the ONE value xCreateShaderModule needs, and 0 is the right default --
+     * a marker-carrying module is then refused rather than handed a garbage
+     * pointer. Per device for the same reason `ser`/`rayq` are. */
+    uint64_t bda_addr;
+    VkBuffer bda_buf;
+    VkDeviceMemory bda_mem;
+    volatile uint32_t *bda_map;
+    PFN_vkDestroyBuffer DestroyBuffer;
+    PFN_vkFreeMemory FreeMemory;
+    PFN_vkUnmapMemory UnmapMemory;
 } DevData;
 
 static InstData g_inst[MAX_OBJ]; static int g_ninst;
@@ -1218,6 +1327,9 @@ static void asj_note_addr(uint64_t h, uint64_t addr) {
     if (summary) asj_report("periodic_addr");
 }
 
+/* Stage 2b's refresh hook; defined below, next to the slot it writes. */
+static void bda_note_tlas(uint64_t addr, uint32_t prims, uint64_t frame);
+
 static void asj_note_build(uint32_t n,
         const VkAccelerationStructureBuildGeometryInfoKHR *infos,
         const VkAccelerationStructureBuildRangeInfoKHR *const *ranges) {
@@ -1290,6 +1402,10 @@ static void asj_note_build(uint32_t n,
                  upd ? "update" : "build",
                  (unsigned)infos[i].flags, infos[i].geometryCount, prims,
                  nb, in_frame, (unsigned long long)frame, log_it == 2);
+        /* Stage 2b: the newest top-level address goes into the layer's slot.
+         * Done OUTSIDE g_as_mu (bda_note_tlas takes its own lock) and at
+         * command-RECORD time, which is before the submit that consumes it. */
+        if (is_top && addr) bda_note_tlas(addr, prims, frame);
     }
 }
 
@@ -1308,6 +1424,349 @@ static void asj_note_frame(const char *src) {
 }
 
 static void asj_final_summary(void) { asj_report("device_destroy"); }
+
+/* ------------------------------------------------------------------ */
+/* BDA SLOT -- Stage 2b (handoff/103-STAGE-2B.md)                       */
+/* ------------------------------------------------------------------ */
+/* One 256 B host-visible buffer per RT-capable device. Layout, in uint32
+ * words, and this table is the normative copy -- dev/patch_bda.py reads the
+ * same offsets and dev/verify_bda.py asserts them:
+ *
+ *   [0] magic          CALLISTO_BDA_MAGIC, written once at allocation
+ *   [1] generation     bumped every time [2]/[3] change
+ *   [2] tlas_addr_lo   newest POPULATED top-level AS device address, low 32
+ *   [3] tlas_addr_hi   ... high 32
+ *   [4] tlas_prims     that build's instance count
+ *   [5] tlas_builds    how many top-level builds have been recorded
+ *   [6] frame          the AS journal's frame counter at the last refresh
+ *   [7] flags          bit 0: a POPULATED TLAS has been seen (prims > 0)
+ *
+ * Why host-visible and not staged: the address is written at COMMAND RECORD
+ * time, i.e. before the vkQueueSubmit that consumes it, and Vulkan's implicit
+ * host-to-device domain operation at submit makes a host write to coherent
+ * memory visible to that submission. And in the steady state the write is a
+ * no-op: 98 section 13.4 measured `addr_moved:0` / `handles_with_moving_addr:0`
+ * over 600 presents and 632 TLAS builds, so after the first frame the same 64
+ * bits are re-written, which is why nothing here needs a barrier. The refresh
+ * still exists rather than a one-shot constant because a per-launch constant
+ * cannot survive an address that moves, and the journal's evidence is one
+ * session -- the indirection costs one dword load and removes the assumption. */
+#define CALLISTO_BDA_MARKER  "CALLISTO_BDA_SLOT_V1"
+#define CALLISTO_BDA_SENT_LO 0x0BDA0001u
+#define CALLISTO_BDA_SENT_HI 0xCA115700u
+#define CALLISTO_BDA_MAGIC   0xCA115701u
+#define CALLISTO_BDA_WORDS   64          /* 256 bytes */
+#define BDA_W_MAGIC 0u
+#define BDA_W_GEN   1u
+#define BDA_W_LO    2u
+#define BDA_W_HI    3u
+#define BDA_W_PRIMS 4u
+#define BDA_W_BUILDS 5u
+#define BDA_W_FRAME 6u
+#define BDA_W_FLAGS 7u
+
+/* The device whose slot the AS-journal build hook refreshes. The hook is a
+ * command-buffer entry point and cannot name a VkDevice, and the game creates
+ * exactly one AS-capable device; a second one arming is logged rather than
+ * silently ignored, because "the wrong device's address" is the failure this
+ * would produce and it would be invisible on screen. */
+static DevData *g_bda_dev;
+static uint64_t g_bda_tlas_addr, g_bda_tlas_refreshes, g_bda_tlas_changes;
+static int g_bda_multi_dev;
+static pthread_mutex_t g_bda_mu = PTHREAD_MUTEX_INITIALIZER;
+
+#define SPV_OP_STRING     7u
+#define SPV_OP_TYPE_INT  21u
+#define SPV_OP_CONSTANT  43u
+#define SPV_OP_FUNCTION  54u
+
+/* Read the packed literal string of an OpString-shaped instruction into `out`
+ * (always NUL-terminated). Returns 0 if it does not fit. */
+static int spv_literal_string(const uint32_t *w, uint32_t first, uint32_t last,
+                              char *out, size_t cap) {
+    size_t k = 0;
+    for (uint32_t i = first; i < last; i++) {
+        for (int b = 0; b < 4; b++) {
+            char c = (char)((w[i] >> (8 * b)) & 0xffu);
+            if (k + 1 >= cap) return 0;
+            out[k++] = c;
+            if (!c) { return 1; }
+        }
+    }
+    if (k >= cap) return 0;
+    out[k] = 0;
+    return 1;
+}
+
+/* Count the reserved marker OpStrings, and copy the first one's text out.
+ * The scan stops at the first OpFunction: OpString lives in the debug section,
+ * so nothing after the function bodies begin can be one, and a module's whole
+ * body is not walked on every one of ~3300 vkCreateShaderModule calls.
+ *
+ * Returns the COUNT, saturating at 2, and the distinction matters: a module
+ * carrying TWO markers must be REFUSED, not quietly served. Returning a bare
+ * "not found" for it would make spv_has_bda_marker() say no, the reject guard
+ * would never run, and the module would reach the driver still holding the
+ * sentinel -- i.e. a wild 64-bit pointer. Ambiguous is a reject, never a pass. */
+static int spv_bda_marker_count(const uint32_t *w, size_t bytes,
+                                char *out, size_t cap) {
+    size_t n = bytes / 4, i;
+    int found = 0;
+    if (!w || n < 5 || w[0] != 0x07230203) return 0;
+    for (i = 5; i < n; ) {
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffffu;
+        if (len == 0 || i + len > n) break;
+        if (op == SPV_OP_FUNCTION) break;
+        if (op == SPV_OP_STRING && len >= 3) {
+            char buf[256];
+            if (spv_literal_string(w, i + 2, i + len, buf, sizeof buf)
+                && !strncmp(buf, CALLISTO_BDA_MARKER,
+                            sizeof CALLISTO_BDA_MARKER - 1)) {
+                if (found) return 2;          /* two markers: ambiguous */
+                found = 1;
+                if (out) snprintf(out, cap, "%s", buf);
+            }
+        }
+        i += len;
+    }
+    return found;
+}
+
+static int spv_has_bda_marker(const uint32_t *w, size_t bytes) {
+    return spv_bda_marker_count(w, bytes, NULL, 0) > 0;
+}
+
+/* Rewrite the two OpConstant literals the marker NAMES. Four conjuncts, all
+ * required, and any failure leaves the module untouched and refused:
+ *   1. exactly one well-formed marker string, parsed for lo=/hi=/sent=/magic=
+ *   2. the declared sentinel and magic match this build's
+ *   3. each named id is defined by exactly one OpConstant of a 32-bit
+ *      UNSIGNED OpTypeInt
+ *   4. each of those constants currently holds its half of the sentinel
+ * This is what makes the fixup structural rather than a value scan
+ * (98 section 10.3 hole 2): a stray module that happens to contain the sentinel
+ * words has no marker, so nothing is rewritten in it, and a forged marker
+ * naming ids that are not sentinel-valued uint constants is refused. */
+static int bda_fixup(uint32_t *w, size_t bytes, uint64_t addr,
+                     const char **reason, uint32_t ids[2]) {
+    char m[256];
+    unsigned lo_id = 0, hi_id = 0;
+    unsigned long long sent = 0; unsigned long magic = 0;
+    size_t n = bytes / 4, i;
+    {
+        int nm = spv_bda_marker_count(w, bytes, m, sizeof m);
+        *reason = "no_marker";
+        if (nm == 0) return 0;
+        *reason = "two_markers";
+        if (nm != 1) return 0;
+    }
+    *reason = "marker_malformed";
+    if (sscanf(m, CALLISTO_BDA_MARKER " lo=%%%u hi=%%%u sent=%llx magic=%lx",
+               &lo_id, &hi_id, &sent, &magic) != 4) return 0;
+    if (!lo_id || !hi_id || lo_id == hi_id) return 0;
+    *reason = "sentinel_mismatch";
+    if (sent != (((unsigned long long)CALLISTO_BDA_SENT_HI << 32)
+                 | CALLISTO_BDA_SENT_LO)) return 0;
+    if (magic != CALLISTO_BDA_MAGIC) return 0;
+    if (lo_id >= w[3] || hi_id >= w[3]) { *reason = "id_out_of_bound"; return 0; }
+
+    /* Pass 1: the set of 32-bit unsigned integer type ids. */
+    uint32_t uint_ty[8]; int n_uint_ty = 0;
+    for (i = 5; i < n; ) {
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffffu;
+        if (len == 0 || i + len > n) break;
+        if (op == SPV_OP_FUNCTION) break;
+        if (op == SPV_OP_TYPE_INT && len == 4 && w[i + 2] == 32 && w[i + 3] == 0
+            && n_uint_ty < (int)(sizeof uint_ty / sizeof uint_ty[0]))
+            uint_ty[n_uint_ty++] = w[i + 1];
+        i += len;
+    }
+    if (!n_uint_ty) { *reason = "no_uint32_type"; return 0; }
+
+    /* Pass 2: locate the two named constants and check their current value. */
+    size_t at_lo = 0, at_hi = 0; int n_lo = 0, n_hi = 0;
+    for (i = 5; i < n; ) {
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffffu;
+        if (len == 0 || i + len > n) break;
+        if (op == SPV_OP_FUNCTION) break;
+        if (op == SPV_OP_CONSTANT && len == 4) {
+            uint32_t rid = w[i + 2], ty = w[i + 1];
+            int is_uint = 0;
+            for (int k = 0; k < n_uint_ty; k++) if (uint_ty[k] == ty) is_uint = 1;
+            if (is_uint && rid == lo_id) { at_lo = i + 3; n_lo++; }
+            if (is_uint && rid == hi_id) { at_hi = i + 3; n_hi++; }
+        }
+        i += len;
+    }
+    if (n_lo != 1 || n_hi != 1) { *reason = "named_ids_are_not_uint_constants"; return 0; }
+    if (w[at_lo] != CALLISTO_BDA_SENT_LO || w[at_hi] != CALLISTO_BDA_SENT_HI) {
+        *reason = "constants_do_not_hold_the_sentinel";
+        return 0;
+    }
+    w[at_lo] = (uint32_t)(addr & 0xffffffffu);
+    w[at_hi] = (uint32_t)(addr >> 32);
+    ids[0] = lo_id; ids[1] = hi_id;
+    *reason = "ok";
+    return 1;
+}
+
+/* Called from asj_note_build() for every TOP-LEVEL build whose device address
+ * is known. Prefers a POPULATED TLAS: 98 section 13.4 measured TWO top-level
+ * structures built in lockstep every frame, one of them permanently empty
+ * (`instances_last:0` in every row), and a query against the empty one commits
+ * nothing. Once a populated one has been seen, empty builds are ignored. */
+static void bda_note_tlas(uint64_t addr, uint32_t prims, uint64_t frame) {
+    DevData *d;
+    int changed = 0;
+    if (!addr) return;
+    pthread_mutex_lock(&g_bda_mu);
+    d = g_bda_dev;
+    if (d && d->bda_map) {
+        uint32_t flags = d->bda_map[BDA_W_FLAGS];
+        if (prims > 0 || !(flags & 1u)) {
+            uint32_t lo = (uint32_t)(addr & 0xffffffffu), hi = (uint32_t)(addr >> 32);
+            changed = (d->bda_map[BDA_W_LO] != lo || d->bda_map[BDA_W_HI] != hi);
+            if (changed) {
+                d->bda_map[BDA_W_LO] = lo;
+                d->bda_map[BDA_W_HI] = hi;
+                d->bda_map[BDA_W_GEN] = d->bda_map[BDA_W_GEN] + 1;
+                g_bda_tlas_changes++;
+            }
+            d->bda_map[BDA_W_PRIMS] = prims;
+            d->bda_map[BDA_W_BUILDS] = d->bda_map[BDA_W_BUILDS] + 1;
+            d->bda_map[BDA_W_FRAME] = (uint32_t)frame;
+            if (prims > 0) d->bda_map[BDA_W_FLAGS] = flags | 1u;
+            g_bda_tlas_addr = addr;
+            g_bda_tlas_refreshes++;
+        }
+    }
+    pthread_mutex_unlock(&g_bda_mu);
+    if (changed)
+        LOGF("\"ev\":\"bda_tlas\",\"addr\":\"0x%llx\",\"prims\":%u,"
+             "\"frame\":%llu,\"changes\":%llu}",
+             (unsigned long long)addr, prims, (unsigned long long)frame,
+             (unsigned long long)g_bda_tlas_changes);
+}
+
+/* Allocate, bind, map and address the slot. Every failure is soft: the layer
+ * logs a reason, leaves d->bda_addr at 0, and a marker-carrying module is then
+ * refused rather than served a garbage pointer. */
+static void bda_setup(DevData *d, VkDevice dev, VkPhysicalDevice phys,
+                      InstData *inst, int feature_on, int want_rt,
+                      const char *decide) {
+    const char *reason = "not_attempted";
+    uint32_t mt = UINT32_MAX, chosen_flags = 0;
+    if (g_bda_disabled)  { reason = "env_disabled";       goto out; }
+    if (!feature_on)     { reason = "feature_not_enabled"; goto out; }
+    /* Only the device that can hold a TLAS gets a slot. A dozen Proton helper
+     * processes create devices through this layer and none of them has an
+     * acceleration structure to point at, so they pay nothing. */
+    if (!want_rt)        { reason = "not_an_rt_device";   goto out; }
+    {
+    PFN_vkCreateBuffer CreateBuffer = (PFN_vkCreateBuffer)
+        d->gdpa(dev, "vkCreateBuffer");
+    PFN_vkGetBufferMemoryRequirements GetReq = (PFN_vkGetBufferMemoryRequirements)
+        d->gdpa(dev, "vkGetBufferMemoryRequirements");
+    PFN_vkAllocateMemory Alloc = (PFN_vkAllocateMemory)
+        d->gdpa(dev, "vkAllocateMemory");
+    PFN_vkBindBufferMemory Bind = (PFN_vkBindBufferMemory)
+        d->gdpa(dev, "vkBindBufferMemory");
+    PFN_vkMapMemory Map = (PFN_vkMapMemory)d->gdpa(dev, "vkMapMemory");
+    PFN_vkGetBufferDeviceAddress GetAddr = (PFN_vkGetBufferDeviceAddress)
+        d->gdpa(dev, "vkGetBufferDeviceAddress");
+    if (!GetAddr) GetAddr = (PFN_vkGetBufferDeviceAddress)
+        d->gdpa(dev, "vkGetBufferDeviceAddressKHR");
+    PFN_vkGetPhysicalDeviceMemoryProperties MemProps =
+        inst ? inst->GetMemProps : NULL;
+    d->DestroyBuffer = (PFN_vkDestroyBuffer)d->gdpa(dev, "vkDestroyBuffer");
+    d->FreeMemory = (PFN_vkFreeMemory)d->gdpa(dev, "vkFreeMemory");
+    d->UnmapMemory = (PFN_vkUnmapMemory)d->gdpa(dev, "vkUnmapMemory");
+    if (!CreateBuffer || !GetReq || !Alloc || !Bind || !Map || !GetAddr
+        || !MemProps) { reason = "entrypoint_missing"; goto out; }
+
+    VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size = CALLISTO_BDA_WORDS * 4;
+    bci.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+              | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+              | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (CreateBuffer(dev, &bci, NULL, &d->bda_buf) != VK_SUCCESS) {
+        d->bda_buf = VK_NULL_HANDLE; reason = "create_buffer_failed"; goto out;
+    }
+    VkMemoryRequirements mr; GetReq(dev, d->bda_buf, &mr);
+    VkPhysicalDeviceMemoryProperties mp; MemProps(phys, &mp);
+    /* Prefer the BAR heap (DEVICE_LOCAL and HOST_VISIBLE at once) so the GPU
+     * read is local; fall back to plain host-visible coherent. Both are
+     * COHERENT on purpose -- a non-coherent choice would need an explicit
+     * vkFlushMappedMemoryRanges the record-time write has no natural place
+     * for. */
+    const VkMemoryPropertyFlags need = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                     | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (int pass = 0; pass < 2 && mt == UINT32_MAX; pass++) {
+        VkMemoryPropertyFlags want = need
+            | (pass == 0 ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : 0);
+        for (uint32_t k = 0; k < mp.memoryTypeCount; k++)
+            if ((mr.memoryTypeBits & (1u << k))
+                && (mp.memoryTypes[k].propertyFlags & want) == want) {
+                mt = k; chosen_flags = mp.memoryTypes[k].propertyFlags; break;
+            }
+    }
+    if (mt == UINT32_MAX) { reason = "no_host_visible_memory_type"; goto out; }
+    VkMemoryAllocateFlagsInfo mf = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+    mf.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.pNext = &mf; mai.allocationSize = mr.size; mai.memoryTypeIndex = mt;
+    if (Alloc(dev, &mai, NULL, &d->bda_mem) != VK_SUCCESS) {
+        d->bda_mem = VK_NULL_HANDLE; reason = "allocate_failed"; goto out;
+    }
+    if (Bind(dev, d->bda_buf, d->bda_mem, 0) != VK_SUCCESS) {
+        reason = "bind_failed"; goto out;
+    }
+    void *ptr = NULL;
+    if (Map(dev, d->bda_mem, 0, VK_WHOLE_SIZE, 0, &ptr) != VK_SUCCESS || !ptr) {
+        reason = "map_failed"; goto out;
+    }
+    d->bda_map = (volatile uint32_t *)ptr;
+    for (uint32_t k = 0; k < CALLISTO_BDA_WORDS; k++) d->bda_map[k] = 0;
+    d->bda_map[BDA_W_MAGIC] = CALLISTO_BDA_MAGIC;
+    VkBufferDeviceAddressInfo bi = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+    bi.buffer = d->bda_buf;
+    d->bda_addr = (uint64_t)GetAddr(dev, &bi);
+    if (!d->bda_addr) { reason = "zero_device_address"; goto out; }
+    reason = "armed";
+    pthread_mutex_lock(&g_bda_mu);
+    if (g_bda_dev) g_bda_multi_dev++;
+    else g_bda_dev = d;
+    pthread_mutex_unlock(&g_bda_mu);
+    }
+out:
+    LOGF("\"ev\":\"bda\",\"action\":\"%s\",\"reason\":\"%s\",\"decide\":\"%s\","
+         "\"addr\":\"0x%llx\",\"magic\":\"0x%08x\",\"bytes\":%u,\"mem_type\":%d,"
+         "\"mem_flags\":%u,\"second_device\":%d}",
+         d->bda_addr ? "armed" : "skipped", reason, decide,
+         (unsigned long long)d->bda_addr, CALLISTO_BDA_MAGIC,
+         CALLISTO_BDA_WORDS * 4, mt == UINT32_MAX ? -1 : (int)mt,
+         (unsigned)chosen_flags, g_bda_multi_dev);
+}
+
+static void bda_teardown(DevData *d, VkDevice dev) {
+    if (!d) return;
+    pthread_mutex_lock(&g_bda_mu);
+    if (g_bda_dev == d) g_bda_dev = NULL;
+    d->bda_addr = 0;
+    d->bda_map = NULL;
+    pthread_mutex_unlock(&g_bda_mu);
+    if (d->bda_mem && d->UnmapMemory) d->UnmapMemory(dev, d->bda_mem);
+    if (d->bda_buf && d->DestroyBuffer) d->DestroyBuffer(dev, d->bda_buf, NULL);
+    if (d->bda_mem && d->FreeMemory) d->FreeMemory(dev, d->bda_mem, NULL);
+    d->bda_buf = VK_NULL_HANDLE; d->bda_mem = VK_NULL_HANDLE;
+    LOGF("\"ev\":\"bda_summary\",\"why\":\"device_destroy\",\"fixups\":%llu,"
+         "\"tlas_refreshes\":%llu,\"tlas_changes\":%llu,\"last_tlas\":\"0x%llx\"}",
+         (unsigned long long)g_bda_fixups,
+         (unsigned long long)g_bda_tlas_refreshes,
+         (unsigned long long)g_bda_tlas_changes,
+         (unsigned long long)g_bda_tlas_addr);
+}
 
 /* ------------------------------------------------------------------ */
 /* SER -- Shader Execution Reordering                                   */
@@ -1465,6 +1924,63 @@ static void ext_decide(InstData *inst, VkPhysicalDevice phys,
     w->reason = "enabled";
 }
 
+/* bufferDeviceAddress is a FEATURE, not just an extension name, and on this
+ * app it is almost certainly already on: VK_KHR_acceleration_structure
+ * requires it, and vkd3d-proton enables the acceleration-structure extension
+ * on every RT device. So the decision is DETECT FIRST, enable only as a
+ * fallback -- and the one thing that must never happen is chaining
+ * VkPhysicalDeviceBufferDeviceAddressFeatures next to a
+ * VkPhysicalDeviceVulkan12Features, which is invalid usage
+ * (VUID-VkDeviceCreateInfo-pNext-02829/02830) and would fail device creation
+ * for the whole game. When a Vulkan12Features is present with the feature OFF
+ * the layer stands down and says so, rather than "fixing" it. */
+#define BDA_STYPE_VK12   VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+#define BDA_STYPE_BDAF   VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
+#define CALLISTO_BDA_EXT VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME
+
+static void bda_decide(InstData *inst, VkPhysicalDevice phys,
+                       const VkDeviceCreateInfo *ci, ExtWant *w) {
+    w->want = 0; w->already = 0; w->reason = "not_attempted";
+    if (g_bda_disabled) { w->reason = "env_disabled"; return; }
+    for (const VkBaseInStructure *p = ci->pNext; p; p = p->pNext) {
+        if (p->sType == BDA_STYPE_VK12) {
+            const VkPhysicalDeviceVulkan12Features *f =
+                (const VkPhysicalDeviceVulkan12Features *)p;
+            w->already = f->bufferDeviceAddress ? 1 : 0;
+            w->reason = f->bufferDeviceAddress ? "already_enabled_vk12"
+                                               : "vk12_features_chained_off";
+            return;                      /* cannot chain ours next to it */
+        }
+        if (p->sType == BDA_STYPE_BDAF) {
+            const VkPhysicalDeviceBufferDeviceAddressFeatures *f =
+                (const VkPhysicalDeviceBufferDeviceAddressFeatures *)p;
+            w->already = f->bufferDeviceAddress ? 1 : 0;
+            w->reason = f->bufferDeviceAddress ? "already_enabled_feature_struct"
+                                               : "feature_already_chained_off";
+            return;
+        }
+    }
+    if (!inst || !inst->EnumDevExt) { w->reason = "no_enum_fn"; return; }
+    uint32_t cnt = 0;
+    if (inst->EnumDevExt(phys, NULL, &cnt, NULL) != VK_SUCCESS || !cnt) {
+        w->reason = "enum_failed"; return;
+    }
+    VkExtensionProperties *props = calloc(cnt, sizeof *props);
+    if (!props) { w->reason = "oom"; return; }
+    int have = 0;
+    if (inst->EnumDevExt(phys, NULL, &cnt, props) == VK_SUCCESS)
+        for (uint32_t i = 0; i < cnt && !have; i++)
+            if (!strcmp(props[i].extensionName, CALLISTO_BDA_EXT)) have = 1;
+    free(props);
+    if (!have) { w->reason = "unsupported"; return; }
+    w->want = 1;
+    w->reason = "enabled";
+}
+
+_Static_assert(offsetof(VkPhysicalDeviceBufferDeviceAddressFeatures,
+                        bufferDeviceAddress) == sizeof(VkBaseInStructure),
+               "VkPhysicalDeviceBufferDeviceAddressFeatures layout changed");
+
 /* The compile-time half of ext_decide()'s "first VkBool32 after sType+pNext"
  * assumption. If a header ever reorders these, this stops the build instead
  * of silently misreading the app's feature struct. */
@@ -1505,6 +2021,8 @@ static VkResult VKAPI_CALL xCreateInstance(const VkInstanceCreateInfo *ci,
     d->DestroyInstance = (PFN_vkDestroyInstance)next_gipa(*pInst, "vkDestroyInstance");
     d->EnumDevExt = (PFN_vkEnumerateDeviceExtensionProperties)
         next_gipa(*pInst, "vkEnumerateDeviceExtensionProperties");
+    d->GetMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)
+        next_gipa(*pInst, "vkGetPhysicalDeviceMemoryProperties");
     LOGF("\"ev\":\"vkCreateInstance\",\"inst\":\"%p\"}", (void *)*pInst);
     return r;
 }
@@ -1535,42 +2053,50 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
      * fails, the SER-only create -- the one every launch before handoff/98
      * made -- is retried before giving up. A launch that uses no ray query is
      * bit-for-bit the old behaviour. */
-    ExtWant ws, wq;
+    ExtWant ws, wq, wb;
     ext_decide(id, phys, ci, CALLISTO_SER_EXT, CALLISTO_RTPIPE_EXT,
                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV,
                g_ser_disabled, &ws);
     ext_decide(id, phys, ci, CALLISTO_RAYQ_EXT, CALLISTO_ASTRUCT_EXT,
                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
                g_rayq_disabled, &wq);
+    bda_decide(id, phys, ci, &wb);
 
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV serfeat = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV,
         NULL, VK_TRUE };
     VkPhysicalDeviceRayQueryFeaturesKHR rqfeat = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, NULL, VK_TRUE };
+    VkPhysicalDeviceBufferDeviceAddressFeatures bdafeat = {
+        BDA_STYPE_BDAF, NULL, VK_TRUE, VK_FALSE, VK_FALSE };
     const char **exts = NULL;
     VkDeviceCreateInfo ci2;
-    int ser_on = 0, rayq_on = 0;
+    int ser_on = 0, rayq_on = 0, bda_on = 0;
 
-    /* build(want_ser, want_rayq) -> ci2; returns the number added */
+    /* build(want_ser, want_rayq, want_bda) -> ci2 */
     uint32_t n0 = ci->enabledExtensionCount;
-    int nadd = ws.want + wq.want;
+    int nadd = ws.want + wq.want + wb.want;
     if (nadd) {
-        exts = malloc((size_t)(n0 + 2) * sizeof *exts);
-        if (!exts) { nadd = 0; ws.want = wq.want = 0; ws.reason = "oom"; }
+        exts = malloc((size_t)(n0 + 3) * sizeof *exts);
+        if (!exts) {
+            nadd = 0; ws.want = wq.want = wb.want = 0; ws.reason = "oom";
+        }
     }
 
     VkLayerDeviceCreateInfo save = *lc;
     ((VkLayerDeviceCreateInfo *)lc)->u.pLayerInfo = lc->u.pLayerInfo->pNext;
 
     VkResult r;
-    int try_ser = ws.want, try_rayq = wq.want;
+    int try_ser = ws.want, try_rayq = wq.want, try_bda = wb.want;
     for (;;) {
-        if (!try_ser && !try_rayq) { r = next_create(phys, ci, ac, pDev); break; }
+        if (!try_ser && !try_rayq && !try_bda) {
+            r = next_create(phys, ci, ac, pDev); break;
+        }
         uint32_t k = 0;
         for (uint32_t i = 0; i < n0; i++) exts[k++] = ci->ppEnabledExtensionNames[i];
         if (try_ser)  exts[k++] = CALLISTO_SER_EXT;
         if (try_rayq) exts[k++] = CALLISTO_RAYQ_EXT;
+        if (try_bda)  exts[k++] = CALLISTO_BDA_EXT;
         /* Prepending keeps every node the caller built -- including the
          * loader's own VkLayerDeviceCreateInfo, whose pLayerInfo is advanced
          * and restored by pointer around this loop. Nothing is copied but
@@ -1578,14 +2104,21 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
         const void *head = ci->pNext;
         if (try_ser)  { serfeat.pNext = (void *)(uintptr_t)head; head = &serfeat; }
         if (try_rayq) { rqfeat.pNext  = (void *)(uintptr_t)head; head = &rqfeat; }
+        if (try_bda)  { bdafeat.pNext = (void *)(uintptr_t)head; head = &bdafeat; }
         ci2 = *ci;
         ci2.pNext = head;
         ci2.enabledExtensionCount = k;
         ci2.ppEnabledExtensionNames = exts;
         r = next_create(phys, &ci2, ac, pDev);
-        if (r == VK_SUCCESS) { ser_on = try_ser; rayq_on = try_rayq; break; }
+        if (r == VK_SUCCESS) {
+            ser_on = try_ser; rayq_on = try_rayq; bda_on = try_bda; break;
+        }
         LOGF("\"ev\":\"devext\",\"action\":\"fallback\",\"result\":%d,"
-             "\"tried_ser\":%d,\"tried_rayq\":%d}", (int)r, try_ser, try_rayq);
+             "\"tried_ser\":%d,\"tried_rayq\":%d,\"tried_bda\":%d}",
+             (int)r, try_ser, try_rayq, try_bda);
+        /* Drop the NEWEST request first, so a launch that uses none of this
+         * degrades to exactly the behaviour of the build before it. */
+        if (try_bda)  { try_bda = 0;  wb.reason = "create_failed"; continue; }
         if (try_rayq) { try_rayq = 0; wq.reason = "create_failed"; continue; }
         try_ser = 0; ws.reason = "create_failed";
     }
@@ -1593,6 +2126,7 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
     free(exts);
     if (ws.already && r == VK_SUCCESS) ser_on = 1;
     if (wq.already && r == VK_SUCCESS) rayq_on = 1;
+    if (wb.already && r == VK_SUCCESS) bda_on = 1;
     LOGF("\"ev\":\"ser\",\"action\":\"%s\",\"reason\":\"%s\","
          "\"ext\":\"%s\",\"app_exts\":%u,\"result\":%d}",
          ser_on ? "enabled" : "skipped", ws.reason, CALLISTO_SER_EXT,
@@ -1623,6 +2157,12 @@ static VkResult VKAPI_CALL xCreateDevice(VkPhysicalDevice phys,
         d->gdpa(dev, "vkCreateRayTracingPipelinesKHR");
     d->CreateComputePipelines = (PFN_vkCreateComputePipelines)
         d->gdpa(dev, "vkCreateComputePipelines");
+    /* BDA slot (handoff/103, Stage 2b). After gdpa is live and before any
+     * shader module can be created on this device. */
+    bda_setup(d, dev, phys, id, bda_on,
+              names_have(ci->ppEnabledExtensionNames, ci->enabledExtensionCount,
+                         CALLISTO_ASTRUCT_EXT),
+              wb.reason);
     /* Command-buffer hooks are keyed by device-independent globals: the game
      * uses one VkDevice, so first resolution wins. */
     if (!g_next_bind)
@@ -1733,11 +2273,11 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
     }
 
     uint32_t *code = NULL; size_t size = 0;
-    if (has_id) code = load_swap(id, &size, d->ser, d->rayq); /* <hash>.<entry>.spv */
+    if (has_id) code = load_swap(id, &size, d->ser, d->rayq, d->bda_addr);
     if (!code) {
         char name[80];
         snprintf(name, sizeof name, "sha256-%s", SHA());
-        code = load_swap(name, &size, d->ser, d->rayq);  /* sha256-<hex>.spv */
+        code = load_swap(name, &size, d->ser, d->rayq, d->bda_addr);
     }
 
     /* SER: a swap that declares ShaderInvocationReorderNV is only legal on a
@@ -1767,6 +2307,10 @@ static VkResult VKAPI_CALL xCreateShaderModule(VkDevice dev,
         free(code);
         code = NULL;
     }
+    /* The BDA marker needs no guard HERE: load_swap() is the single site that
+     * both checks and REWRITES it, for the overlays and for the base dir
+     * alike, and the rewrite is destructive -- a second pass would refuse a
+     * module it had already fixed. See load_swap(). */
 
     if (!code) {
         if (!g_quiet)
@@ -2034,6 +2578,7 @@ static void VKAPI_CALL xDestroyDevice(VkDevice dev, const VkAllocationCallbacks 
     DevData *d = find_dev(dev);
     PFN_vkDestroyDevice next = d ? d->DestroyDevice : NULL;
     asj_final_summary();
+    bda_teardown(d, dev);               /* unmap + free before the device dies */
     del_dev(dev);                       /* drop before the handle dies */
     if (next) next(dev, ac);
 }

@@ -1,8 +1,131 @@
-# CallistoSSS — current state (2026-09-03 01:35, after the cap6 thickness floor joined the ear-glow + glints stack as the default)
+# CallistoSSS — current state (2026-09-03 ~17:35, after ear glow v7 — measured skin transmittance — became the shipped default)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
 *working* — only an on-screen A/B is.
+
+**2026-09-03 ~17:35 — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
+`earglow7`, content sha `1d28a6adae300c9b`** — `111`'s ear glow v7: the block
+below (`024998da26d84333`) with the glow's transfer replaced by **measured skin
+transmittance**. USER VERDICT, verbatim: *"earglow-7 ended up being incredible.
+Add that to the default effects I run."*
+
+- **It was actually served this time.** `status.txt` reads
+  `want_skinspec_req=earglow7 / want_skinspec=earglow7` — the manifest guard of
+  §0.1 is satisfied, so the verdict is on the v7 bytes and not on a silent
+  fallback. `init.lua`'s `DEFAULTS.skinspec` is now the string `earglow7`
+  (a rung id, not a stack id — `skin.set/<name>` is what `sync_settings.sh`
+  resolves, and `swaps.earglow7/` IS the whole stack: 16 v7 raygens + `109`'s
+  77 curv compute modules). Deployed: repo == `release/` == live CET == live
+  `skin.set/earglow7` == live `swaps.skin/`, 93/93, layer byte-identical in all
+  three places.
+- **LIVE read-out only, again.** No frame was captured, so none of `111` §16's
+  pre-registered rows were read as written; `-ss`, `-hue1` and `-floor2` stay
+  parked, and `earglow7-ctl` remains the byte-exact A/B control (it is the
+  previous default). §7's blunt point is still open on the screen: the shipped
+  R/G 45 at the floor is above the physical 29, so `-hue1` (35) may be the more
+  correct rung — the user preferred 45 on sight.
+- **The next win is `111` §13, bounce light**, unchanged by this promotion: the
+  term is exactly zero whenever query C fails, so all shade, overcast and
+  interior backlighting still render nothing. Not to be built into the same
+  rung as anything else, or the A/B is unreadable.
+
+*(What follows is that build's record, kept verbatim.)*
+
+**`111` EAR GLOW v7: the transfer replaced with MEASURED skin transmittance.
+BUILT, ELEVEN GATES GREEN, INSTALLED, SERVED, KEPT — now the default.**
+
+- **READ `111` §0.1 BEFORE ANY SCREEN READ.** The 17:00 launch of `earglow7`
+  and `earglow7-ctl` showed no ear glow *at all* because `sync_settings.sh`
+  **refused the rung** (`status.txt`: `want_skinspec=off:gi-no-manifest`) —
+  a raygen-bearing skin rung must carry `src_ser`/`ser_sha`/`ptq_sha` in its
+  MANIFEST or `swaps.skin/` is wiped and `swaps.ser/` (pre-ear-glow raygens)
+  is served instead. `111`'s first build lacked them. **So do `110`'s
+  earglow5/6 and `105`'s thinglow: none has ever been served, and `110` §14's
+  "the v5 shot erased the effect" was this refusal, not the 8 mm cutoff.**
+  Fixed for `111` (gate 10 carries the base manifest through; new gate 11
+  replays the guard); the launch sync was re-run and now reads
+  `skinspec=earglow7 ser=class:in-skin`, `swaps.skin/` = `skin.set/earglow7`
+  at 93/93. Contract: `ser=class`, and read `status.txt` after every launch.
+
+- **Ask, verbatim:** *"actually reduce the luminance of the sun and tweak the
+  hue of the light based on the actual transmittance of skin"* and *"I need the
+  default values we had before baked into ...`-cap6-glintdense-curv`, but just
+  with better transmittance"*. So **`110` (v5/v6) is superseded, not stacked**:
+  no cutoff, no fade, query B's `tmax` at the shipped 18 mm, the 6 mm floor
+  where `101` §18 put it, all three ray queries untouched (gates 0/4/6 assert
+  each of those against the base).
+- **What moved,** all inside the transfer, +3 instructions / 7 in-place
+  constant rewrites / 2 declarations: the six lobe rates and two amplitudes are
+  **fitted to a layered skin slab** (Prahl haemoglobin + Jacques' fits,
+  integrated over the sRGB bands — `dev/transmit_model.py`, red's effective
+  `ld` 3.67 → **1.55 mm**); and the wrap's `SmoothStep(0, 0.35, -N·S)`, which
+  **saturated at 1** over almost the whole pinna, becomes `max(-N·S, 0)` — the
+  real entry-face Lambert factor, up to **2.86× less** sun at the knee.
+- **`k` 0.22 → 7.1497 is a NORMALISATION, not a brightness knob:** it pins peak
+  red to the default's **0.094542**, so red is unchanged and only hue and
+  depth-shape move. Term luminance at the floor **0.447×**; at 12 mm
+  **0.019×**, so the nose bridge dies on the exponential with no cutoff. R/G at
+  the floor **2.48 → 45**.
+- **The blunt part (`111` §7).** Green's two-lobe fit is the weak one (log RMS
+  0.225) and the residual lands in the hue: **45 shipped vs 29 physical** at
+  6 mm, so `earglow7-hue1` (R/G 35) may be the *more* correct rung, not merely
+  the less red one. And the "shallow should be redder" gradient still lives
+  **below** the 6 mm floor — `earglow7-floor2` is the only rung that has one.
+- **Bounce light (`111` §13): yes, and it is the bigger win.** The transfer is
+  source-agnostic; what is missing is a backside irradiance value. The term is
+  **exactly zero whenever query C fails** — all shade, overcast and interior
+  backlighting renders nothing today. Recommended route: one extra *shaded*
+  ray from the entry point along `-N` (inline queries return geometry only);
+  the cheap 80% is the ReSTIR-GI resolvers via `103`'s compute-side query.
+  **Not in the same build as this one** — it would make the A/B unreadable.
+- **Rungs** (`earglow7-ctl` = the PREVIOUS default byte for byte): `earglow7`
+  `1d28a6adae300c9b`, `-ss` `ab80503dc86dd86b`, `-hue1` `728b63de50c2a6a5`,
+  `-floor2` `a7a1c328bc56f1b7`. Nine decoys and three cross-reads rejected.
+  Settings contract and the pre-registered read: `111` §12 and §16.
+
+*(The block below is the PREVIOUS default, superseded as the shipped value by
+`earglow7` above; it is still served under its own name and as `earglow7-ctl`,
+and everything it records about the curvature term still stands — v7 changed
+the raygens only.)*
+
+**2026-09-03 ~12:30 — the standing selection and shipped default `skinspec` was
+`gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv`,
+content sha `024998da26d84333`** — the previous default (`3bb0aee03a1bfda8`)
+plus `109`'s **curvature-driven skin scattering** at g = 1. USER VERDICT,
+verbatim: *"tested the curvature based bleed effect and it looks incredible"*
+and *"I'm just preferring using the default curv option"*.
+
+- **Why.** `97` §3.4's terminator bleed ran one hard-coded diffusion band on
+  every skin pixel because curvature was not computable at the splice site.
+  `99` proved it is: four extra Lod-0 taps on the depth and normal G-buffers
+  give `kappa = |dN|/|dP|` in 1/m, and `s = clamp(kappa/10, 0.3, 2.0)` scales
+  both the band width and its red amplitude. A cheek is the pivot and does not
+  move; nose, lips, jaw and ear rims widen; a flat chest tightens. `78`'s
+  luminance hold rides the same value, so the change is chromaticity and width
+  only (residual 9e-8). The 16 raygens are the previous default's, byte for
+  byte; all 77 compute modules are `skin.set/curv`'s.
+- **Static gates.** 142 of 150 bleed sites in 75 of 77 modules; 2 declined by
+  hash (no P chain, `99`'s census); `spirv-val` clean on 93; `verify_curv.py`
+  passes on the shipped bytes and rejects 10 decoys.
+- **LIVE read-out only.** No frame was captured and `curv-vis`, the rung built
+  to falsify the estimator, was never shot. Zero of `109` §8's seven visual
+  rows were read as written. `curv-hi` was seen and not preferred; it and
+  `curv-vis` stay parked. Open: the close-range noise floor (`109` §9.2), the
+  ear-rim interaction with `earglow-cap6` (`109` §13.5), and frame cost.
+- **Same session, also built and reviewed, all UNSHOT:** `103` Stage 2b/2c
+  (compute-side ray query; driver self-test 54/54, 2c traversed a TLAS
+  off-screen; **needs the rebuilt layer installed** before its probes mean
+  anything), `105` thin-surface backlit translucency (`thinglow*`, stacks on
+  the cap6 default), and the `110` ear-glow v5 family (dimmer, hard thickness
+  cutoff, redder; in progress at the time of writing). Four more feature
+  builds (`104` traced concavity, `106` object-space glints, `107` world-hash
+  pack, `108` specular AA + conductor Fresnel) were cut off by a rate limit
+  mid-build; their partial files are untracked in `dev/` and are NOT gated,
+  parked or documented.
+
+*(The block below is the previous default and is SUPERSEDED as the shipped
+value; everything it records about the cap6 floor still stands.)*
 
 **2026-09-03 01:35 — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
 `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense`,
