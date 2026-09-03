@@ -30,6 +30,15 @@ three cross-reads rejected, installed.**
 > `0.094542`; only the fitted lobe constants moved. `earglow7` is now the parked
 > A/B handle.
 >
+> **~18:05 — the default was RENAMED, not rebuilt.** `skinspec` resolves to
+> `skin.set/<value>/`, so the field is a directory name; `dev/park_alias.sh`
+> parked a byte copy of `earglow7-hue1` as
+> `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1`
+> (93/93 cmp clean both directions, MANIFEST provenance carried through so the
+> §0.1 guard still accepts it) and `DEFAULTS.skinspec` names that. The stack
+> reads as a chain of edits in the selector again; `earglow7-hue1` remains the
+> short handle for the identical bytes. No shader byte changed.
+>
 > **The read-out was LIVE only, both times** — no frame was captured, so **none
 > of §16's pre-registered rows have been read**. §16 is owed, not void, and
 > `-floor2` (the only rung with a real hue gradient below the floor) and `-ss`

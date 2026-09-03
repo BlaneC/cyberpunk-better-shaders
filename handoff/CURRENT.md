@@ -5,7 +5,8 @@ this project keeps relearning: *built*, *loaded* and *swapped* are not
 *working* — only an on-screen A/B is.
 
 **2026-09-03 ~18:00 — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
-`earglow7-hue1`, content sha `728b63de50c2a6a5`** — `111`'s ear glow v7 on its
+`gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1`, content sha `728b63de50c2a6a5` — the same bytes as the rung
+`earglow7-hue1`, under the full chain name** — `111`'s ear glow v7 on its
 **colour axis**: dermal blood 1% instead of 2% in the fit, so R/G at the 6 mm
 floor is **35 instead of 45** and the hue is flat in depth rather than
 reddening. USER VERDICT, verbatim: *"earglow7-hue1 looks better."*
@@ -27,6 +28,17 @@ reddening. USER VERDICT, verbatim: *"earglow7-hue1 looks better."*
 - **Still LIVE read-out only.** No capture, so `111` §16's rows remain owed;
   `-ss` and `-floor2` are still untried, and `-floor2` is the only rung with a
   real hue gradient below the floor.
+- **The name, ~18:05.** `skinspec` **is a directory name** — `sync_settings.sh`
+  copies `skin.set/<value>/` into `swaps.skin/` — which is why a rung id
+  (`earglow7-hue1`) had leaked into a field that had always held a chain of
+  edits. `dev/park_alias.sh` (new) parks a byte copy of a rung under a second
+  name: 93/93 cmp clean **in both directions**, MANIFEST line 1 rewritten to
+  declare what it aliases and every provenance line (`src_ser`, `ser_sha`,
+  `ptq_sha`) carried through, because dropping those is precisely what §0.1's
+  refusal was. A copy, not a symlink — both `make install` and the sync `cp -a`,
+  and a dangling link serves an *empty* overlay. The default now names the
+  alias; `earglow7-hue1` stays parked as the short handle for the same shaders.
+  **No shader byte moved in this step.**
 
 *(The block below is the rung this replaced — the same v7 build at the redder
 2% blood. Everything it records still stands; only the colour constants moved.)*

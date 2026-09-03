@@ -136,10 +136,19 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- untouched. content sha 728b63de50c2a6a5. SERVED and kept on
                -- a LIVE read-out only, no capture: "earglow7-hue1 looks
                -- better". earglow7 stays parked as the A/B handle.
+               -- RENAMED, not rebuilt: the default now names the alias
+               -- ...-curv-t7hue1, which dev/park_alias.sh parked as a byte
+               -- copy of skin.set/earglow7-hue1 (93/93, cmp clean both ways,
+               -- the MANIFEST provenance carried through so the launch guard
+               -- still accepts it). skinspec IS a directory name -- that is
+               -- the whole reason a rung id ever leaked into this field --
+               -- so the stack keeps its chain-of-edits name in the selector
+               -- and earglow7-hue1 stays as the short A/B handle for the
+               -- SAME bytes. Nothing about the shaders moved.
                -- Same contract as every rung since the fog one: ser=class,
                -- shadowset=full-shadow, and the layer's rayq_reject fallback
                -- on a device with no VK_KHR_ray_query.
-               skinspec = "earglow7-hue1" }
+               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1" }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
@@ -402,6 +411,17 @@ local SKIN_LEVELS = {
     -- 024998da26d84333. SHOT 2026-09-03, LIVE read-out only, no capture:
     -- "tested the curvature based bleed effect and it looks incredible".
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv", label = "  + CURVATURE-DRIVEN skin scattering (109)  <-- the previous default; = earglow7-ctl" },
+    -- handoff/111. The stack above PLUS ear glow v7 at the -hue1 colour point,
+    -- parked under the full chain name by dev/park_alias.sh: 93/93 bytes are
+    -- skin.set/earglow7-hue1's, and the two names are asserted cmp-identical
+    -- in both directions, so picking either serves the same shaders. The
+    -- transfer is fitted to a layered skin slab (dev/transmit_model.py) at 1%
+    -- dermal blood -> R/G 35 at the 6 mm floor, hue flat in depth; peak red
+    -- still 0.094542. Only the 10 paintable rgs_reference_main differ from the
+    -- entry above -- all 77 compute modules and the other 6 raygens are equal.
+    -- content sha 728b63de50c2a6a5. SHOT 2026-09-03, LIVE read-out only:
+    -- "earglow7-hue1 looks better".
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1", label = "  + EAR GLOW v7, measured skin transmittance (111, -hue1 colour point)  <-- DEFAULT" },
     -- handoff/101 sec 17. THE STANDING SELECTION. The fog rung above plus the
     -- ray-query ear glow (rq3: instance-matched sunward thickness AND a
     -- sun-visibility query from the exit point). SHOT backlit and KEPT.
@@ -671,7 +691,7 @@ local SKIN_LEVELS = {
     { id = "earglow7-ctl",    label = "CONTROL for ear glow v7 -- byte-identical to the PREVIOUS default (cap6-glintdense-curv); this is the 'before'" },
     { id = "earglow7",        label = "Ear glow v7 (fitted skin transmittance, k=7.15 holds peak red at 0.094542, R/G 45 at the floor, cos wrap) -- the previous default; A/B handle for -hue1" },
     { id = "earglow7-ss",     label = "Ear glow v7, ANGULAR axis: keeps the old saturating SmoothStep wrap instead of max(-N.S,0) -- isolates how much of the dimming is the cosine alone" },
-    { id = "earglow7-hue1",   label = "Ear glow v7, COLOUR axis: dermal blood 1% -> R/G 35 at the floor, hue flat in depth  <-- DEFAULT; 111 sec 7.2 called it the MORE correct rung, and the screen agreed" },
+    { id = "earglow7-hue1",   label = "Ear glow v7, COLOUR axis: dermal blood 1% -> R/G 35 at the floor, hue flat in depth -- the DEFAULT's bytes under the short name (111 sec 7.2 called it the MORE correct rung; the screen agreed)" },
     { id = "earglow7-floor2", label = "Ear glow v7, DEPTH axis: floor 2 mm not 6 -- the ONLY rung with a real hue gradient (R/G 14.5 -> 34 over 2..12 mm); peak red still 0.094542. Check a CHILD's ear" },
     -- handoff/103. STAGE 2b/2c: a layer-delivered 64-bit TLAS address read by
     -- a COMPUTE resolver through a fixed-up PhysicalStorageBuffer pointer,
