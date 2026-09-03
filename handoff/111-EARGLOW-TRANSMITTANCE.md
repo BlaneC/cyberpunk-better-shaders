@@ -17,13 +17,23 @@ three cross-reads rejected, installed.**
 > done; repo == `release/` == live CET == live `skin.set/earglow7` == live
 > `swaps.skin/`, and the layer is byte-identical in all three places.
 > `earglow7-ctl` is the previous default byte for byte and stays parked as the
-> A/B control; `-ss`, `-hue1` and `-floor2` stay parked untried.
+> A/B control; `-ss` and `-floor2` stay parked untried.
 >
-> **The read-out was LIVE only** — no frame was captured, so **none of §16's
-> pre-registered rows have been read**, and §7's warning stands unresolved on
-> screen: the shipped R/G 45 at the floor is above the 29 the model gives, so
-> `-hue1` may still be the more *correct* rung. The user preferred 45 on sight,
-> which is the standard this project ships on; §16 is owed, not void.
+> **UPDATE ~18:00 — the default is now `earglow7-hue1` (`728b63de50c2a6a5`),
+> and §7.2 called it.** `-hue1` was served
+> (`status.txt`: `want_skinspec_req=earglow7-hue1` → `want_skinspec=earglow7-hue1`),
+> the user saw it against `earglow7` and said *"earglow7-hue1 looks better"*, so
+> `DEFAULTS.skinspec` is that rung. This is the outcome §7.2 pre-registered:
+> green's two-lobe residual leaves the shipped R/G at **45 against 29 physical**
+> at the 6 mm floor, and `-hue1`'s **35** is *closer to the model*, so the
+> preference is a correction, not a taste concession. Peak red is unchanged at
+> `0.094542`; only the fitted lobe constants moved. `earglow7` is now the parked
+> A/B handle.
+>
+> **The read-out was LIVE only, both times** — no frame was captured, so **none
+> of §16's pre-registered rows have been read**. §16 is owed, not void, and
+> `-floor2` (the only rung with a real hue gradient below the floor) and `-ss`
+> have never been on screen.
 
 > **§0.1 first.** The 17:00 launch of `earglow7` and `earglow7-ctl` showed
 > **no ear glow at all — not even the control's.** That was not the shaders.

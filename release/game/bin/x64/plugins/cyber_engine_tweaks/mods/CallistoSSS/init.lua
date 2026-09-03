@@ -119,12 +119,27 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- SERVED 2026-09-03 (status.txt want_skinspec=earglow7, the
                -- manifest guard satisfied -- see 111 sec 0.1) and kept on a
                -- LIVE read-out only, no capture: "earglow-7 ended up being
-               -- incredible". earglow7-ctl below is this stack's predecessor
+               -- incredible". earglow7-ctl below is that stack's predecessor
                -- byte for byte and is the A/B control.
+               -- DEFAULT CHANGED 2026-09-03, fifth time today, from earglow7
+               -- to its COLOUR-axis rung earglow7-hue1: the same v7 build with
+               -- dermal blood at 1% instead of 2% in the fit. R/G at the 6 mm
+               -- floor 45 -> 35, and the hue is flat in depth rather than
+               -- reddening. This is 111 sec 7.2 landing exactly as written:
+               -- green's two-lobe fit is the weak one, its residual shows up
+               -- as ~1.55x too much red at the floor (45 shipped vs 29
+               -- physical), so -hue1 at 35 is CLOSER TO THE PHYSICS than the
+               -- rung it replaces -- "less red" is the mechanism, not the
+               -- motive. Peak red is still the 0.094542 every rung since
+               -- earglow-cap6 has held; the ray queries, the 6 mm floor,
+               -- query B's 18 mm tmax and the 77 curv compute modules are
+               -- untouched. content sha 728b63de50c2a6a5. SERVED and kept on
+               -- a LIVE read-out only, no capture: "earglow7-hue1 looks
+               -- better". earglow7 stays parked as the A/B handle.
                -- Same contract as every rung since the fog one: ser=class,
                -- shadowset=full-shadow, and the layer's rayq_reject fallback
                -- on a device with no VK_KHR_ray_query.
-               skinspec = "earglow7" }
+               skinspec = "earglow7-hue1" }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
@@ -654,9 +669,9 @@ local SKIN_LEVELS = {
     -- UNCHANGED and only hue + depth shape move. Term luminance 0.447x.
     -- Frame: backlit head, ear + nose bridge + nostril, sun near grazing.
     { id = "earglow7-ctl",    label = "CONTROL for ear glow v7 -- byte-identical to the PREVIOUS default (cap6-glintdense-curv); this is the 'before'" },
-    { id = "earglow7",        label = "Ear glow v7 (fitted skin transmittance, k=7.15 holds peak red at 0.094542, R/G 45 at the floor, cos wrap)  <-- DEFAULT; A/B against earglow7-ctl" },
+    { id = "earglow7",        label = "Ear glow v7 (fitted skin transmittance, k=7.15 holds peak red at 0.094542, R/G 45 at the floor, cos wrap) -- the previous default; A/B handle for -hue1" },
     { id = "earglow7-ss",     label = "Ear glow v7, ANGULAR axis: keeps the old saturating SmoothStep wrap instead of max(-N.S,0) -- isolates how much of the dimming is the cosine alone" },
-    { id = "earglow7-hue1",   label = "Ear glow v7, COLOUR axis: dermal blood 1% instead of 2% -> R/G 35 at the floor, and the hue is flat in depth; less red if v7 reads as neon" },
+    { id = "earglow7-hue1",   label = "Ear glow v7, COLOUR axis: dermal blood 1% -> R/G 35 at the floor, hue flat in depth  <-- DEFAULT; 111 sec 7.2 called it the MORE correct rung, and the screen agreed" },
     { id = "earglow7-floor2", label = "Ear glow v7, DEPTH axis: floor 2 mm not 6 -- the ONLY rung with a real hue gradient (R/G 14.5 -> 34 over 2..12 mm); peak red still 0.094542. Check a CHILD's ear" },
     -- handoff/103. STAGE 2b/2c: a layer-delivered 64-bit TLAS address read by
     -- a COMPUTE resolver through a fixed-up PhysicalStorageBuffer pointer,

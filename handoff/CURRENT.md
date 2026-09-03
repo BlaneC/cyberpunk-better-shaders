@@ -1,10 +1,37 @@
-# CallistoSSS — current state (2026-09-03 ~17:35, after ear glow v7 — measured skin transmittance — became the shipped default)
+# CallistoSSS — current state (2026-09-03 ~18:00, after ear glow v7's `-hue1` colour rung became the shipped default)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
 *working* — only an on-screen A/B is.
 
-**2026-09-03 ~17:35 — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
+**2026-09-03 ~18:00 — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
+`earglow7-hue1`, content sha `728b63de50c2a6a5`** — `111`'s ear glow v7 on its
+**colour axis**: dermal blood 1% instead of 2% in the fit, so R/G at the 6 mm
+floor is **35 instead of 45** and the hue is flat in depth rather than
+reddening. USER VERDICT, verbatim: *"earglow7-hue1 looks better."*
+
+- **`111` §7.2 predicted this in writing, and it is not a concession.** Green's
+  two-lobe fit is the weak one; its residual is **~1.55× too much red at the
+  floor** (45 shipped vs **29 physical**). At 35, `-hue1` is **closer to the
+  physics at 6 mm than the rung it replaces** — the doc named it "the *more*
+  correct rung" and "the first thing to try if `earglow7` reads as neon"
+  before the screen was ever consulted. The screen agreed.
+- **Everything else is byte-untouched:** peak red still `0.094542` (the value
+  every rung since `earglow-cap6` has pinned), all three ray queries, `101`
+  §18's 6 mm floor, query B's 18 mm `tmax`, and `109`'s 77 curv compute
+  modules. The only moving parts are the fitted lobe constants.
+- **Served, from `status.txt`:** `want_skinspec_req=earglow7-hue1` →
+  `want_skinspec=earglow7-hue1`, `ser=class:in-skin`. Deployed and verified:
+  repo == `release/` == live CET == live `skin.set/earglow7-hue1` == live
+  `swaps.skin/` at 93/93. `earglow7` stays parked as the A/B handle.
+- **Still LIVE read-out only.** No capture, so `111` §16's rows remain owed;
+  `-ss` and `-floor2` are still untried, and `-floor2` is the only rung with a
+  real hue gradient below the floor.
+
+*(The block below is the rung this replaced — the same v7 build at the redder
+2% blood. Everything it records still stands; only the colour constants moved.)*
+
+**2026-09-03 ~17:35 — the standing selection and shipped default `skinspec` was
 `earglow7`, content sha `1d28a6adae300c9b`** — `111`'s ear glow v7: the block
 below (`024998da26d84333`) with the glow's transfer replaced by **measured skin
 transmittance**. USER VERDICT, verbatim: *"earglow-7 ended up being incredible.
@@ -20,11 +47,10 @@ Add that to the default effects I run."*
   `skin.set/earglow7` == live `swaps.skin/`, 93/93, layer byte-identical in all
   three places.
 - **LIVE read-out only, again.** No frame was captured, so none of `111` §16's
-  pre-registered rows were read as written; `-ss`, `-hue1` and `-floor2` stay
-  parked, and `earglow7-ctl` remains the byte-exact A/B control (it is the
-  previous default). §7's blunt point is still open on the screen: the shipped
-  R/G 45 at the floor is above the physical 29, so `-hue1` (35) may be the more
-  correct rung — the user preferred 45 on sight.
+  pre-registered rows were read as written; `earglow7-ctl` remains the
+  byte-exact A/B control (it is the pre-v7 default). §7.2's blunt point was
+  read on the screen within the hour and **resolved in the doc's favour**:
+  `-hue1` is now the default, and `earglow7` is the parked handle.
 - **The next win is `111` §13, bounce light**, unchanged by this promotion: the
   term is exactly zero whenever query C fails, so all shade, overcast and
   interior backlighting still render nothing. Not to be built into the same
