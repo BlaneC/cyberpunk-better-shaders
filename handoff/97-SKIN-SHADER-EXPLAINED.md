@@ -745,6 +745,14 @@ presets (`balanced`, `callisto`, `vanilla`) have never been on screen.
 ## 3.10 The shipped stack, decoded
 
 The standing selection is named
+`gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense`, sha
+`3bb0aee03a1bfda8` — **the name below grew three suffixes on 2026-09-03**, all
+of them in the SAME ten paintable `rgs_reference_main` and touching nothing else
+in the 93: `-earglow` (`101` §17, three inline ray queries — shot and kept),
+`-cap6` (`101` §18, a 6 mm floor on the glow's thickness term — shot and kept),
+`-glintdense` (`100` §13, car-paint metallic-flake glints — shot and kept).
+Everything decoded in this section is unchanged. The recipe as decoded here is
+therefore still exact for the first half of the name:
 `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog`. That name is a build recipe.
 The skin half:
 

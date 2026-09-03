@@ -62,7 +62,34 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- REQUIRES ser=class and shadowset=full-shadow -- that is why
                -- `ser` above no longer defaults to off. An unbuilt level
                -- still falls back to off, loudly, on the sync side.
-               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog" }
+               -- DEFAULT CHANGED 2026-09-03 again, to the -earglow rung
+               -- (handoff/101 sec 17): the SAME fog rung plus the ray-query
+               -- ear glow, shot backlit and kept ("THE EFFECT IS PERFECT").
+               -- It is byte-identical to earglow-rq3, which stays parked
+               -- under its own name as the A/B handle. Same contract as
+               -- below -- it is the fog rung plus 30 ray-query instructions
+               -- in the 10 paintable rgs_reference_main, so ser=class and
+               -- shadowset=full-shadow are still REQUIRED. On a device with
+               -- no VK_KHR_ray_query the layer rejects those 10 modules and
+               -- falls through to the next overlay (swap_layer.c rayq_reject).
+               -- DEFAULT CHANGED 2026-09-03 once more, to the -earglow-glintdense
+               -- stack (handoff/100 sec 13): the -earglow rung plus 94 sec 4.4's
+               -- car-paint glints at the dense knob, shot and kept ("carglint-dense
+               -- looks incredible too"). Same contract; both patches live in the
+               -- same 10 rgs_reference_main permutations.
+               -- DEFAULT CHANGED 2026-09-03, third time today, to the
+               -- -earglow-CAP6-glintdense stack: the same rung plus 101
+               -- sec 18's 6 mm THICKNESS FLOOR on the ear glow. The user
+               -- picked cap6 by name after shooting cap3 and cap6
+               -- ("use earglow-cap6 as the default"), because thin ears --
+               -- children's especially -- were blowing out: the transfer is
+               -- monotone in 1/t and query B's 1.5 mm tmin was its only
+               -- ceiling. t_eff = NMax(t, 6 mm) inside the TRANSFER, so the
+               -- ray is unchanged and flesh thicker than 6 mm is bit-identical
+               -- to the rung above. Same contract: ser=class,
+               -- shadowset=full-shadow, and the layer's rayq_reject fallback
+               -- still applies to all 10 painted permutations.
+               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense" }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
@@ -291,12 +318,40 @@ local SKIN_LEVELS = {
     -- ReSTIR-GI modules are byte-identical to -cone2all. Judge it in photo
     -- mode or not at all. Pin the weather CLEAR: the engine composites its
     -- own volumetric fog and foggy weather double-counts (95 F2).
-    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog",    label = "  + HEIGHT FOG on the sun ray, A=0.25 H=120m p=1 (95's ship candidate)  <-- DEFAULT" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog",    label = "  + HEIGHT FOG on the sun ray, A=0.25 H=120m p=1 (95's ship candidate)  <-- the previous default; the base of everything below" },
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-foghi",  label = "  + HEIGHT FOG A=0.50 -- STRENGTH alone (double)" },
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fogx",   label = "  + HEIGHT FOG A=1.00 -- DIAGNOSTIC only: is the term live? x0.006 at 10deg sun" },
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fogn",   label = "  + HEIGHT FOG neutral tint (p=0) -- the TINT axis; identical green, R/B = 1.00" },
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fogcam", label = "  + HEIGHT FOG camera-relative height -- the F3 discriminator, not a look" },
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fogy",   label = "  + HEIGHT FOG up=Y -- ONE-FRAME FALSIFIER for the up axis (95 F1). NEVER SHIP" },
+    -- handoff/100 sec 13. The STACK: 101's ear glow (earglow-rq3, three ray
+    -- queries) AND 94 sec 4.4's car-paint glints at the -dense knobs the user
+    -- kept, both in the same 10 of 12 rgs_reference_main permutations.
+    -- Order is rq3 first, glints spliced on top: k_glint=0 on these bytes
+    -- reproduces earglow-rq3 at 93/93 cmp, verify_earglow_rq3.py still PASSES
+    -- on the output, and the glint census is identical to carglint-dense's on
+    -- the old base -- so the rq3 splice costs zero glint sites.
+    -- CANDIDATE DEFAULT. The default skinspec value is NOT set here.
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-glintdense", label = "  + EAR GLOW + car-paint GLINTS (dense)  <-- the default minus the 6 mm cap (100 sec 13)" },
+    -- handoff/101 sec 18 + 100 sec 13. THE SHIPPED DEFAULT. The stack above
+    -- plus the 6 mm thickness FLOOR the user chose by name after shooting
+    -- cap3 and cap6: t_eff = NMax(t, 6 mm) in the transfer, never in the ray.
+    -- One OpExtInst and one constant apart from the row above -- and above
+    -- 6 mm the two are bit-identical, so this is a change to thin flesh only.
+    -- Built by ./dev/build_carglint_stack_cap6.sh on the earglow-cap6 bytes;
+    -- k_glint=0 on that base reproduces earglow-cap6 at 93/93 cmp, the glint
+    -- census equals carglint-dense's, and BOTH earglow verifiers pass on the
+    -- output (verify_earglow_rq3.py --floor, verify_earglow_cap.py --cap 0.006).
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense", label = "  + EAR GLOW (6 mm floor) + car-paint GLINTS (dense)  <-- DEFAULT" },
+    -- handoff/101 sec 17. THE STANDING SELECTION. The fog rung above plus the
+    -- ray-query ear glow (rq3: instance-matched sunward thickness AND a
+    -- sun-visibility query from the exit point). SHOT backlit and KEPT.
+    -- Byte-identical to earglow-rq3 -- same 93 modules, content sha
+    -- 359060c26c8c7367 -- and re-derived under this name rather than copied,
+    -- so the lineage name and the rung name are provably one shader.
+    -- Everything in the ladder BELOW this line was built on the -fog rung and
+    -- therefore does NOT carry the ear glow.
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow", label = "  + EAR GLOW on the ray query (101 sec 17, k=0.22) -- the default minus the glints" },
     -- handoff/94 sec 9-12. Material PROBE, not a look: hue-paints every
     -- radiance write of the 77 compute modules by class (skin red, hair
     -- yellow, vegetation magenta) and, under class 0, by a metallic x
@@ -320,6 +375,23 @@ local SKIN_LEVELS = {
     -- 94 sec 17.3: authored metalness is 8-bit and a tarp is likely at a round
     -- value, so bisect the [0.50, 0.70) bracket before choosing the constant.
     { id = "hunt-paint-m60", label = "PROBE: hunt-paint m_hi 0.50->0.60 -- bisects the tarp bracket" },
+    -- handoff/100. 94 sec 4.4's car-paint GLINTS, PARKED and OPTIONAL --
+    -- nothing here is a default. Six GGX lobes of rgs_reference_main get one
+    -- scalar multiply: a world-space flake cell (hit + cbv[..][56].xyz, the
+    -- offset 98 sec 15 proved on screen) x an angular bin off the half
+    -- vector, one Bernoulli flake per (cell x bin), E[glint] = 1 EXACTLY, so
+    -- this redistributes the metal's energy, it does not add any. Gated by
+    -- 94 sec 17.2's metallic ramp (0.55 -> 0.70) x roughness < 0.35.
+    -- READ 100 sec 0 AND ITS PRE-REGISTERED TABLE BEFORE LOOKING AT A FRAME.
+    -- SHOOT -cell FIRST: it is the only rung a still can falsify. It paints
+    -- the PRIMARY hit's world cell as eight flat hues; translate the camera
+    -- 2 m and the cells must stay WELDED to the car. If they crawl, the
+    -- offset is wrong at this site and every other rung here is void.
+    { id = "carglint-cell",   label = "PROBE: carglint world CELL hash, flat hues (100; SHOOT THIS FIRST -- crawl under camera motion = void)" },
+    { id = "carglint",        label = "  car-paint GLINTS, 94 sec 4.4 defaults (cell 8 mm, nu0 1.5e5, glint_max 16)" },
+    { id = "carglint-dense",  label = "  car-paint GLINTS DENSER -- nu0 x4 (1.5e5 -> 6e5)  <-- KEPT (shot 2026-09-03: \"looks incredible\")" },
+    { id = "carglint-sparse", label = "  car-paint GLINTS SPARSER -- nu0 /4 (1.5e5 -> 3.75e4), one knob; fewer, brighter flakes" },
+    { id = "carglint-ctl",    label = "  carglint CONTROL (k_glint = 0) -- 93/93 BYTE-identical to the -fog default; must be indistinguishable" },
     -- handoff/99. POSITION probe, not a look. The 77 compute resolvers all
     -- reconstruct a surface position P from the D32 depth at registers[1]+0
     -- and a 4x4 matrix at cbv[registers[0]+12][69..72], and build
@@ -407,6 +479,67 @@ local SKIN_LEVELS = {
     { id = "earglow-lo",  label = "Ear glow lo (traced thickness, k=0.10)" },
     { id = "earglow",     label = "Ear glow (traced thickness, k=0.22)" },
     { id = "earglow-hi",  label = "Ear glow hi (traced thickness, k=0.45)" },
+    -- 101: ear glow REBUILT on the ray query (70 W1+W3). The sunward
+    -- cull-FRONT query measures sun-path flesh thickness directly. These
+    -- three were SHOT and LEAK (handoff/101 sec 12): the first backface
+    -- within 18 mm is not always flesh, so hair cards, the inside of
+    -- clothing and the eyeball behind an eyelid all read as thin skin.
+    -- Kept only as the A side of the rq2 comparison. -hit is UNREADABLE on
+    -- lit skin (its paint is not scaled by the sun radiance) -- use -rq2-hit.
+    { id = "earglow-rq-ctl", label = "Ear glow RQ CONTROL (k=0; byte-identical to the -fog default)" },
+    { id = "earglow-rq-hit", label = "DIAGNOSTIC (superseded by -rq2-hit): ear glow RQ hit map -- too dim to read on lit skin" },
+    { id = "earglow-rq",     label = "Ear glow RQ (sunward cull-front thickness, k=0.22) -- LEAKS onto hair/collar/eyelid" },
+    { id = "earglow-rq-hi",  label = "Ear glow RQ hi (same k=0.22, softer transfer + wider wrap) -- LEAKS" },
+    -- 101 sec 12/13: the SAME thickness query plus an INSTANCE-MATCH gate.
+    -- A second query on the module's own view ray gives the primary surface's
+    -- InstanceId; the sunward backface is accepted only if it belongs to the
+    -- SAME instance. Hair, clothing and eyes are other instances and are
+    -- rejected. One variable vs -rq. The frame must be BACKLIT -- read
+    -- handoff/101 sec 13 BEFORE launching, and shoot -rq2-hit in the SAME frame.
+    { id = "earglow-rq2-hit", label = "DIAGNOSTIC (superseded by -rq2-hitw): ear glow RQ2 hit map WITHOUT the wrap -- paints a superset of what the glow can reach" },
+    { id = "earglow-rq2-hitw", label = "DIAGNOSTIC: ear glow RQ2 hit map with the GLOW'S OWN wrap -- BLUE = same-instance backface within 18 mm, RED = a foreign mesh (rejected)" },
+    { id = "earglow-rq2",     label = "Ear glow RQ2 (instance-matched sunward thickness, k=0.22) -- SUPERSEDED by RQ3: bleeds through the shaded front of the face" },
+    { id = "earglow-rq2-hi",  label = "Ear glow RQ2 hi (same k=0.22, softer transfer + wider wrap) -- SUPERSEDED by RQ3-hi" },
+    -- 101 sec 15: rq2 was shot BACKLIT and the ears/noses PASSED, but the glow
+    -- bleeds through the shaded FRONT of the face (inner eye corners, nose
+    -- bridge, lower lip) and a face standing in shadow still glows. Cause: a
+    -- geometric test standing in for a lighting test -- rq2 finds a
+    -- same-instance wall within 18 mm sunward and never asks whether that wall
+    -- is IN SUNLIGHT. Interior surfaces (eye socket, nasal cavity, inner lip)
+    -- pass both of rq2's tests. rq3 adds query C: sun visibility FROM the exit
+    -- point (P + (t+1mm)*S, flags 517, the module's own sun-shadow tmax and
+    -- cull mask). Accept only if B is same-instance AND C MISSES.
+    -- BACKLIT frame required. Read handoff/101 sec 16 and shoot -rq3-hit first.
+    { id = "earglow-rq3-hit", label = "DIAGNOSTIC: ear glow RQ3 -- BLUE = same-instance wall within 18 mm that CAN see the sun, RED = it cannot (interior wall or occluded)" },
+    { id = "earglow-rq3",     label = "Ear glow RQ3 (instance-matched AND sun-visible exit point, k=0.22) -- KEPT; byte-identical to the DEFAULT ...-fog-earglow above" },
+    { id = "earglow-rq3-hi",  label = "Ear glow RQ3 hi (same k=0.22, softer transfer + wider wrap)" },
+    -- 101 sec 18. THICKNESS FLOOR. The transfer T(t) is monotone DECREASING in
+    -- t, so the glow gets stronger the thinner the flesh, and query B's tmin
+    -- (1.5 mm) is the only ceiling there is -- which is why a child's ear,
+    -- thinner everywhere than an adult's, blows out. These three cap it:
+    --   t_eff = max(t, t_cap), evaluated INSIDE the transfer, NOT in the ray.
+    -- Anything thinner than t_cap glows exactly like t_cap; anything thicker
+    -- is untouched BIT FOR BIT, so adult ears (4-8 mm) are unchanged by
+    -- construction at cap3/cap4 and that is what makes the A/B a real test.
+    -- The CONTROL is the DEFAULT rung itself -- it IS cap 0, proven by
+    -- rebuilding with --cap 0 and getting the default's bytes back.
+    -- At tmin the floor removes R/G/B: cap3 1.25/1.59/1.99x,
+    -- cap4 1.43/2.04/2.95x, cap6 1.82/3.15/6.22x. k is NOT touched.
+    -- Shoot BACKLIT with a child AND an adult in the same frame.
+    { id = "earglow-cap3",    label = "Ear glow RQ3 + thickness floor 3 mm (thin ears stop getting brighter below 3 mm)" },
+    { id = "earglow-cap4",    label = "Ear glow RQ3 + thickness floor 4 mm" },
+    { id = "earglow-cap6",    label = "Ear glow RQ3 + thickness floor 6 mm -- KEPT, the user's choice; it is the floor carried by the DEFAULT stack above" },
+    -- 102: TRACED CONTACT OCCLUSION -- the visibility question 88 sec 10.4
+    -- asked, answered by K short ray queries (tmax 10 cm) instead of the
+    -- analytic cavity cone. These REPLACE the cone at its own site with its
+    -- own k=0.85, so contact-rq vs -cone2allgf is ONE variable: traced
+    -- visibility vs the cone. Read handoff/102 sec 8 BEFORE launching, and
+    -- shoot -hit FIRST. Needs shadowset=full-shadow and DIRECT sun on the
+    -- face -- a multiply is invisible in shade (98 sec 12.4).
+    { id = "contact-rq-ctl", label = "Contact RQ CONTROL (k=0; byte-identical to the -fog default)" },
+    { id = "contact-rq-hit", label = "DIAGNOSTIC: contact occlusion map -- BLACK = fully occluded within 10 cm, WHITE = open sky" },
+    { id = "contact-rq",     label = "Contact occlusion TRACED, K=4 (replaces the cavity cone, same k=0.85)" },
+    { id = "contact-rq-8",   label = "Contact occlusion TRACED, K=8 (same k, twice the rays -- quality axis)" },
     -- 55: G-U5 payload sentinel (diagnostic; read handoff/55 sec 4 BEFORE launching)
     { id = "sentinel",   label = "SENTINEL: injected-trace probe A -- magenta = trace runs" },
     { id = "sentinel-b", label = "SENTINEL-B: probe B (only if A dark) -- cyan = trace runs" },

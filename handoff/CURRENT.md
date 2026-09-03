@@ -1,8 +1,234 @@
-# CallistoSSS — current state (2026-09-01 23:10, after the coat consult)
+# CallistoSSS — current state (2026-09-03 01:35, after the cap6 thickness floor joined the ear-glow + glints stack as the default)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
 *working* — only an on-screen A/B is.
+
+**2026-09-03 01:35 — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
+`gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense`,
+content sha `3bb0aee03a1bfda8`** — the block below, plus `101` §18's **6 mm
+thickness FLOOR** on the ear glow. USER DECISION, verbatim: *"Get a subagent to
+use earglow-cap6 as the default."*
+
+- **Why.** The ear-glow transfer is monotone in 1/t, so thin flesh is
+  monotonically brighter and query B's 1.5 mm `tmin` was its only ceiling —
+  children's ears blew out. `t_eff = NMax(t, 6 mm)` INSIDE the transfer, never
+  in the ray, so query C is unchanged and flesh thicker than 6 mm is
+  **bit-identical** to the previous default. At `tmin` the floor removes
+  R/G/B **1.82 / 3.15 / 6.22×**. `k` untouched (0.22).
+- **Served, from the log.** `01:24:07 skinspec=earglow-cap3
+  skin_sha=b3c690d79eb0a36d` and `01:25:56 skinspec=earglow-cap6
+  skin_sha=2b2a31c414e366b9`, both pre-registered in `101` §18.4.
+  **`earglow-cap4` was never shot** — it stays parked as the untried middle.
+- **LIVE-ONLY, again.** No capture exists after either launch (the 01:08 and
+  01:11 frames are `100`'s), so **none of `101` §18.6's six pre-registered rows
+  can be read**; every one needs a child, an adult and the control in one
+  frame. What the log proves is that both rungs were served and that the user,
+  having seen them, chose the deeper floor — including its known cost, which
+  §18.3 named in advance: **cap6 also dims adult ear rims** (1.28× in red at
+  4 mm). That trade was accepted on screen, not measured.
+- **Built without editing another agent's script.** `100`'s
+  `dev/build_carglint_stack.sh` takes no base or name parameter, so
+  `dev/build_carglint_stack_cap6.sh` (new) generates a parameterised instance of
+  it under eight substitutions, each asserted to match exactly once, and adds
+  the floor's own gates. All of `100`'s gates green on the cap6 base — glint
+  census **identical to `carglint-dense`'s**, `--k-glint 0` reproduces
+  `earglow-cap6` 93/93 — plus `verify_earglow_rq3.py --floor` ALL PASS,
+  `verify_earglow_cap.py --cap 0.006` ALL PASS, 10 of 93 differing from the
+  previous default, and four rejections pinning the floor from both sides.
+  Selftest **52/52** on the 4070. `make install`; `cmp` repo == `release/` ==
+  live CET; parked == built 93/93; layer byte-identical in all three places.
+- **Contract, unchanged and not optional:** `ser=class`,
+  `shadowset=full-shadow`; `ser_sha=310513f3008cbde4`,
+  `ptq_sha=55ed4e5c6884ab71`, 12 `rgs_reference_main` + 4 `rgs_restirgi_*`, all
+  three `gi_refuse` provenance gates dry-run green against the parked stack.
+- **Owed:** `101` §18.5's frame — a child and an adult, backlit, both ears clear
+  of hair, the previous default first as the control. Until then the floor is
+  kept on the user's word.
+
+---
+
+## OPEN ITEMS — what is built or claimed and NOT settled
+
+Everything below is either unshot, unstated or unexplained. None of it blocks
+the shipped default; all of it is what the next session should pick from.
+
+1. **`102`'s contact-rq rungs are UNSHOT.** `contact-rq-hit` / `contact-rq` /
+   `contact-rq-8` / `-ctl` are built, gated, driver-proven (22/22), parked and
+   installed, and nothing has been on screen. They also sit on the PREVIOUS base
+   (`…-cone2all-fog`) and carry neither the ear glow, the 6 mm floor nor the
+   glints, so any launch on them regresses all three — **say so before the shot**.
+   Shoot `-hit` first; `102` §9 pre-registers 13 readings.
+2. **`carglint-cell` is UNSHOT in substance.** It was launched (00:55:03, sha
+   matched) and produced no capture and no remark, so the world-cell crawl test
+   — the only reading that can falsify the whole glint family, and now the
+   shipped default too, since the stack paints from the same `P_w` — is still
+   open. `100` §8, §12.
+3. **`carglint-sparse` was never launched**, so `100` §9.2's density ladder is
+   unmeasured and nobody has said whether dense is *brighter* or merely *denser*.
+   §9.3 (reflections vs the direct panel) and §9.4 (crawl, fireflies, boiling)
+   are entirely unreported.
+4. **`earglow-cap4` was never shot.** The floor was read as a two-point bracket
+   (cap3 vs cap6) and cap4 is superseded without ever having had a reading. It
+   stays parked as the untried middle. `101` §18.
+5. **No frame exists for either keep.** Both the ear glow and the floor are
+   LIVE-ONLY read-outs; `101` §18.6's six pre-registered rows cannot be read from
+   a launch log, and every one needs a child, an adult and the control in ONE
+   backlit frame.
+6. **Frame generation is STILL UNSTATED.** `98` §13.4 has been open on it since
+   2026-09-02 — the obvious reading is that frame generation doubles the presents
+   and there is one build per two — and `100` §7 and `102` §8 both put "state it"
+   in the contract. No launch has answered. **State it before the next shot.**
+7. **The mover hue stepping on `-pxfw` is unexplained.** User, verbatim: *"Movers
+   stay sorta stable, but they might slowly get a different hue"* — `98` §15.2
+   records it verbatim without a mechanism.
+8. **The `-cam` pitch shift is unexplained.** With `-cam` selected, pitching up
+   slides distant building-top squares left→right and pitching down reverses it;
+   `99` §10.5 has a hypothesis (the camera member is a rebase origin that moves
+   with a pitch, so ΔC ≠ 0) and no test. A static shot cannot separate a world
+   origin from a rebasing one.
+9. **The second TLAS is empty and its identity is UNKNOWN.** `98` §13.4: handle
+   `0x7de6689d0730` reads `instances_last:0, instances_max:0` in every row. Logged,
+   not explained.
+
+---
+
+*(The block below is the previous default and is SUPERSEDED as the shipped
+value; everything it records about the glow + glints stack still stands, and
+that stack is parked as the default-minus-the-6-mm-cap A/B handle.)*
+
+**2026-09-03 ~01:20 — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
+`gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-glintdense`** — the fog
+rung PLUS `101`'s ray-query ear glow PLUS `100` §4.4's car-paint glints at the
+dense knobs, all three in the same ten `rgs_reference_main` permutations.
+Content sha **`e0de8b9d5a6716d0`**, 93 modules, `100` §13.
+
+**`gi-50b-…-cone2all-fog-earglow` is the default MINUS the glints. It stays
+parked** and selectable as the A/B handle for exactly that one variable — 83 of
+the stack's 93 files are its bytes unchanged, and `--k-glint 0` on the stack
+reproduces it at 93/93 `cmp`.
+
+**The contract, required for either — stated here so no launch has to infer it:**
+`ser=class` and `shadowset=full-shadow` are **NOT optional** (the rung ships 12
+`rgs_reference_main` + 4 `rgs_restirgi_*`, so `sync_settings.sh`'s `gi_refuse`
+empties the whole overlay if either is wrong), with `ser_sha=310513f3008cbde4`
+and **`ptq_sha=55ed4e5c6884ab71`**. **A default change does NOT rewrite the live
+`brdf_params.txt`** (`101` §17.8): that file is player state and may hold an
+in-flight A/B selection, so the new default applies to a fresh params file or
+when the row is picked in the panel — check `skinspec=` and `skin_sha=` on the
+launch line before reading a pixel.
+
+---
+
+**2026-09-03 01:06 — ON SCREEN AND KEPT: the car-paint GLINTS.** USER VERDICT
+2026-09-03, verbatim: *"carglint-dense looks incredible too. Lets keep that
+around and add it to our big giant shader option"*.
+
+- **Served, proven from the run.** `2026-09-03T01:06:42-05:00 … skinspec=carglint-dense
+  skin_sha=16533661e383511e ser=class:in-skin shadowset=full-shadow ptq=rcbm
+  cache=cleared payload=332d80024a265355`, and `16533661e383511e` is the sha
+  `100` §6 pre-registered before the launch. Five carglint launches, 00:55–01:10,
+  **every `skin_sha` matching** `100` §6.
+- **The keep became the default by STACKING, not by rebuilding.** `100`'s five
+  original rungs are untouched on the pre-glow base, so their pre-registered shas
+  still match; the stack is a **sixth** rung, `earglow-rq3`'s bytes with
+  `patch_carglint --nu0 600000` spliced into the same ten raygens. The glint
+  census on the glow bytes is **identical to `carglint-dense`'s on the old base,
+  number for number**, and `101`'s own verifier still passes on the output — so
+  neither splice cost the other anything. `100` §13.
+- **What the verdict is NOT.** **Live-only, and thin.** `carglint-cell` — the
+  rung `100` §8 named to shoot FIRST, and the only one that can falsify the whole
+  family by showing whether the world cells crawl under a camera translation —
+  was launched (00:55:03, sha matched) and produced **no capture and no remark**,
+  so the world-offset test at this splice site is **still open**.
+  `carglint-sparse` was never launched, so the density ladder is unmeasured and
+  nobody said whether dense was *brighter* or merely *denser*. `100` §9.3
+  (reflections vs the direct panel) and §9.4 (crawl, fireflies, boiling) are
+  entirely unreported, and `carglint-ctl` drew silence — consistent with it being
+  byte-identical to the base, but **an absence, not a stated pass**. The two
+  frames in `a-b-testing/carglint/` are **not** an A/B pair (different camera,
+  car and body colour) and nothing is inferred by differencing them. `100` §12.
+- **Owed:** a `carglint-cell` frame — which now also tests the shipped default,
+  since the stack paints from the same `P_w`.
+
+---
+
+**2026-09-03 00:38 — ON SCREEN AND KEPT: the ear glow.** (Superseded as the
+default at ~01:20 by the stack above, which contains it byte for byte; kept as an
+effect, and still shipping.) USER VERDICT 2026-09-03, verbatim: *"THE EFFECT IS
+PERFECT. earglow-rq3 is the defacto. Please add that to that super scuffed
+amalgamation of effects."*
+
+- **Served, proven from the run.** `2026-09-03T00:38:40-05:00 … skinspec=earglow-rq3
+  skin_sha=359060c26c8c7367 ser=class:in-skin shadowset=full-shadow ptq=rcbm
+  cache=cleared payload=66cb3a045e17bd0a`, and `359060c26c8c7367` is the sha
+  `101` §16.1 pre-registered before the launch. The `-rq3-hit` diagnostic ran
+  first at 00:35:14 (`eed4c2ca8f71f5d3`), same contract.
+- **The kept rung is parked twice, and the two names are provably one shader.**
+  `earglow-rq3` stays as the A/B handle; the lineage name was **re-derived, not
+  copied** — `dev/build_earglow_rq3.sh --lineage NAME` runs it as a fourth full
+  rung through all nine gates, and gate 2b demands 93/93 `cmp`-identical to
+  `swaps.earglow-rq3` at the same content sha.
+- **What the verdict is NOT.** It is a **live-only** read-out. The only capture
+  in the window (00:36:39) falls between the two launches, so it is a `-rq3-hit`
+  frame, not a glow frame; there is no `-rq3` capture and no control beside it,
+  and `101` §16.2's second frame — a face in another object's shadow, half of
+  what §15 asked `rq3` to fix — was never shot. What the `-hit` frame does
+  measure is real: 4 448 painted px confined to the head, red exactly on §15's
+  bleed set (inner canthi, nose bridge, hairline, lower lip) and **zero blue**,
+  because the ear was behind hair — so query C is measured *rejecting* what it
+  was built to reject and is not measured *accepting* a lit thin rim. `101` §17.
+- **Shipped default changed (then changed again).** `skinspec`
+  `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog` →
+  `…-cone2all-fog-earglow` in `init.lua` at 00:5x, then →
+  `…-cone2all-fog-earglow-glintdense` at ~01:20; the `<-- DEFAULT` marker moved
+  with it and now sits on the `-glintdense` row,
+  `make release` + `make install`, `cmp` repo == release == live CET. `ser=class`
+  and `shadowset=full-shadow` are still REQUIRED (12 `rgs_reference_main` + 4
+  `rgs_restirgi_*`); all three `gi_refuse` provenance gates dry-run green
+  (`ser_sha=310513f3008cbde4`, `ptq_sha=55ed4e5c6884ab71`).
+- **The live `brdf_params.txt` was deliberately NOT set**, unlike `0928124`. It
+  read `skinspec=carglint`, written 00:57:31 and launched 00:57:39 with the game
+  running — the car-paint A/B's in-flight selection, and player state. **So the
+  next launch serves whatever that file says, not the new default**; the default
+  applies to a fresh params file or when the row is picked in the panel. This is
+  true of the ~01:20 change too.
+- **Consequence for the other live documents:** `100` has since **rebased by
+  stacking** (§13 above) and its five original rungs are untouched. `102`'s
+  contact rungs are still on the PREVIOUS base and therefore carry neither the
+  ear glow nor the glints; they are deliberately not rebuilt — that would change
+  every pre-registered `skin_sha` in that document.
+- **Owed:** a `-rq3` capture with a control beside it, and the shadowed-face
+  frame. Until then the ear glow is kept on the user's word, which is enough to
+  ship and not enough to measure.
+
+**2026-09-03 01:15 — one more variable, BUILT and UNSHOT: a THICKNESS FLOOR on
+the ear glow.** USER, verbatim: *"Also if the intensity gets more intense as
+geometry gets thinner, we might want to cap that at a certain point. Childrens
+ears GLOW. They emit alot of light which doesnt look correct. Everything else
+looks great"*.
+
+- **The complaint is a correct reading of the shader.** W3's transfer is
+  monotone decreasing in `t`, so thinner flesh is monotonically brighter, and
+  the only ceiling in the build is query B's `tmin` at 1.5 mm. A child's ear is
+  thinner everywhere, so it can only ever be brighter — and *pinker* (R/G 1.43
+  at 1.5 mm against 2.05 at 4 mm).
+- **The fix, one variable:** `t_eff = NMax(t_B, t_cap)` inside the TRANSFER, not
+  in the ray — query C's origin keeps the raw `t`. Continuous everywhere and
+  **bit-identical above the floor**, so adult ears are unchanged by
+  construction. `earglow-cap3` `b3c690d79eb0a36d`, `earglow-cap4`
+  `883eb9f58c2ca9b9`, `earglow-cap6` `2b2a31c414e366b9`; at `tmin` they remove
+  R/G/B 1.25/1.59/1.99×, 1.43/2.04/2.95×, 1.82/3.15/6.22×. **`k` is NOT
+  touched.**
+- **The control is `…-fog-earglow` itself** — it IS cap 0, and the build proves
+  it by re-running the patcher at `--cap 0` and getting that rung's bytes back
+  10 of 10. The cap rungs are built on `-earglow`, **not** on the `-glintdense`
+  stack that is now the default, so a cap A/B is also a glints-off A/B. Nine gates green, twelve decoys rejected, selftest
+  50/50 on the 4070. `101` §18.
+- **UNSHOT.** §18.5 requires a frame this project has never taken: a child and
+  an adult in the SAME backlit shot with both ears clear of hair, default rung
+  first as the control. §18.6's rows are pre-registered, including the one that
+  would rule the whole thickness explanation out.
 
 **Newest first (2026-08-30 23:57 → 2026-08-31 01:46, five launches; then the
 2026-08-31 14:17 oil+fuzz build, its first look, the 14:57 rebuild, its
@@ -122,7 +348,11 @@ some market tarp roofs … Thats probably the worst offender."*
   for those five.
 
 **2026-09-01 22:05 — ON SCREEN AND KEPT. `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog`
-is the standing selection and the user's stated default.** USER VERDICT
+is the standing selection and the user's stated default.**
+*(SUPERSEDED 2026-09-03 — see the top of this file: the standing selection and
+the default are now `…-cone2all-fog-earglow`, the same rung plus `101`'s ear
+glow. Everything below still stands as the record of the fog keep, and the fog
+rung remains the base of every rung built since.)* USER VERDICT
 2026-09-01: *"Fog looks great!"* … *"gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog
 is my new default"*.
 
