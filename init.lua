@@ -148,7 +148,19 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- Same contract as every rung since the fog one: ser=class,
                -- shadowset=full-shadow, and the layer's rayq_reject fallback
                -- on a device with no VK_KHR_ray_query.
-               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1" }
+               -- DEFAULT CHANGED 2026-09-03, sixth time today, to ...-t7hue1-ll:
+               -- ear glow from LOCAL lights at the RAYGEN's light-sample site
+               -- (113). The 10 rgs_reference_main gain three inline ray
+               -- queries per backlit light (A hoisted to the loop preheader)
+               -- and 111 v7's transfer x the engine's own atten x spot x colour,
+               -- added at the radiance writes; the 77 curv compute modules,
+               -- the restirgi raygens and the sun glow are untouched. No BDA
+               -- slot. content sha 076f3108e312ef4f. SERVED and kept on a
+               -- LIVE read-out only, no capture: "earglow-ll looks great!".
+               -- ...-t7hue1 (= earglow-ll-ctl) is the 'before' for the A/B.
+               -- The name is dev/park_alias.sh's byte copy of skin.set/earglow-ll
+               -- (93/93, cmp clean both ways, MANIFEST provenance carried).
+               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll" }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
@@ -421,7 +433,8 @@ local SKIN_LEVELS = {
     -- entry above -- all 77 compute modules and the other 6 raygens are equal.
     -- content sha 728b63de50c2a6a5. SHOT 2026-09-03, LIVE read-out only:
     -- "earglow7-hue1 looks better".
-    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1", label = "  + EAR GLOW v7, measured skin transmittance (111, -hue1 colour point)  <-- DEFAULT" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1", label = "  + EAR GLOW v7, measured skin transmittance (111, -hue1 colour point)  <-- the previous default; = earglow-ll-ctl" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll", label = "  + EAR GLOW from LOCAL lights at the raygen's light-sample site (113)  <-- DEFAULT" },
     -- handoff/101 sec 17. THE STANDING SELECTION. The fog rung above plus the
     -- ray-query ear glow (rq3: instance-matched sunward thickness AND a
     -- sun-visibility query from the exit point). SHOT backlit and KEPT.
@@ -691,8 +704,28 @@ local SKIN_LEVELS = {
     { id = "earglow7-ctl",    label = "CONTROL for ear glow v7 -- byte-identical to the PREVIOUS default (cap6-glintdense-curv); this is the 'before'" },
     { id = "earglow7",        label = "Ear glow v7 (fitted skin transmittance, k=7.15 holds peak red at 0.094542, R/G 45 at the floor, cos wrap) -- the previous default; A/B handle for -hue1" },
     { id = "earglow7-ss",     label = "Ear glow v7, ANGULAR axis: keeps the old saturating SmoothStep wrap instead of max(-N.S,0) -- isolates how much of the dimming is the cosine alone" },
-    { id = "earglow7-hue1",   label = "Ear glow v7, COLOUR axis: dermal blood 1% -> R/G 35 at the floor, hue flat in depth -- the DEFAULT's bytes under the short name (111 sec 7.2 called it the MORE correct rung; the screen agreed)" },
+    { id = "earglow7-hue1",   label = "Ear glow v7, COLOUR axis: dermal blood 1% -> R/G 35 at the floor, hue flat in depth -- the PREVIOUS default's bytes under the short name (111 sec 7.2 called it the MORE correct rung; the screen agreed)" },
     { id = "earglow7-floor2", label = "Ear glow v7, DEPTH axis: floor 2 mm not 6 -- the ONLY rung with a real hue gradient (R/G 14.5 -> 34 over 2..12 mm); peak red still 0.094542. Check a CHILD's ear" },
+    -- handoff/113. Ear glow from LOCAL lights, at the RAYGEN's own light-sample
+    -- site (the exhaustive light loop's backlit guard): 111 v7's transfer x the
+    -- engine's own unshadowed local-light radiance, three inline ray queries
+    -- (primary instance / cull-front thickness toward the light / exit-point
+    -- visibility to 0.8 d). No BDA layer involved. Only the 10 rgs_reference_main
+    -- differ from the default. Frame: a face lit by ONE local light from behind
+    -- or beside (ear or nose bridge between the light and the camera), sun off
+    -- the face or night. Read 113 sec 8 BEFORE launching.
+    { id = "earglow-ll-ctl",  label = "CONTROL for ear glow LL -- byte-identical to the PREVIOUS default ...-t7hue1 (93/93); this is the 'before'" },
+    { id = "earglow-ll",      label = "Ear glow from LOCAL lights at the raygen's light-sample site (k=7.28, 111's -hue1 transfer, A/B/C queries per backlit light) -- the DEFAULT's bytes under the short name" },
+    { id = "earglow-ll-hi",   label = "Ear glow LL, k x 2 -- louder, nothing else" },
+    { id = "earglow-ll-hit",  label = "DIAGNOSTIC: per backlit local light, skin BLUE = accepted (thin same-instance wall, exit sees the light), AMBER = wall but exit occluded; scaled by the light" },
+    -- handoff/112. The SAME term spliced into the 77 COMPUTE resolvers through
+    -- 103's BDA slot. SHOT 2026-09-03: NOTHING VISIBLE -- under PT the resolver
+    -- write carries no local light on skin (112 sec 12). Kept selectable as the
+    -- negative reference only; needs the rebuilt layer (shoot bda-probe first).
+    { id = "earglow-di-ctl",  label = "CONTROL for 112's compute-side local-light glow (byte-identical to the previous default ...-t7hue1)" },
+    { id = "earglow-di",      label = "112: compute-side local-light ear glow through the BDA slot -- SHOT, nothing visible under PT (112 sec 12)" },
+    { id = "earglow-di-hi",   label = "112: same, k x 2" },
+    { id = "earglow-di-hit",  label = "112 DIAGNOSTIC: BLUE/AMBER/RED per light in the compute resolvers -- unpainted under PT local light" },
     -- handoff/103. STAGE 2b/2c: a layer-delivered 64-bit TLAS address read by
     -- a COMPUTE resolver through a fixed-up PhysicalStorageBuffer pointer,
     -- and a compute-side inline ray query on it. Driver self-test 54/54 and

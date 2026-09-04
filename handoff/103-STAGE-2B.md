@@ -1,8 +1,10 @@
 # 103 — Stage 2b UNLOCKED: a 64-bit TLAS address reaches a COMPUTE resolver, and Stage 2c ran on this driver
 
+Written 2026-09-03. **SHOT 2026-09-03 21:38 — `bda-probe` GREEN in direct sun (§12): all four of `98` §10.3's holes are now closed, the fourth on screen.** Original text follows.
+
 Written 2026-09-03. This closes `98` §10.3's four holes — **three of them
 measured on the driver, the fourth pre-registered for a launch that has not
-happened.** Three rungs built, gated, self-tested, parked, selectable.
+happened** (it has now — §12).** Three rungs built, gated, self-tested, parked, selectable.
 **Nothing shot. Nothing committed. `make install` NOT run.**
 
 `98` §10.3 said "stopped at the design, four holes, stated precisely." All four
@@ -575,7 +577,7 @@ the standing default.
 
 | # | reading | what it means | what to do |
 |---|---|---|---|
-| 1 | `bda-probe`: skin is **GREEN** | **Stage 2b is unlocked in the game.** The layer's slot, its fixup, and a compute-side `PhysicalStorageBuffer` load all work in Cyberpunk's real pipeline. Hole 4 is closed | go to rows 4–7 |
+| 1 | `bda-probe`: skin is **GREEN** — **THIS ROW FIRED 2026-09-03 21:38, §12** | **Stage 2b is unlocked in the game.** The layer's slot, its fixup, and a compute-side `PhysicalStorageBuffer` load all work in Cyberpunk's real pipeline. Hole 4 is closed | go to rows 4–7 |
 | 2 | `bda-probe`: skin is **RED** | the module ran and the pointer resolved, but the word it read was not the magic. Either the fixup wrote a wrong address or the buffer is not visible to this queue. **The dereference did not fault**, which is itself information | dump `slot[0]` from the layer at exit; suspect memory type before suspecting the splice |
 | 3 | `bda-probe`: skin is **unchanged** (neither green nor red) | the splice did not execute. Either the class-1 gate never fires in this frame (compare against `hunt-paint`, same family, same gate) or the resolver was not served. **Not a Stage 2b result either way** | check `skin_sha`, then shoot `hunt-paint` on the same frame |
 | 4 | `bda-rq-probe`: skin is **BLUE under the awning and AMBER under open sky** | **Stage 2c is unlocked.** A compute resolver traced the game's own TLAS. This is the result the whole doc is for | write it up; point `88`'s cavity cone at it |
@@ -634,3 +636,62 @@ Parked (not deployed) at `~/.local/lib/callisto/skin.set/`: `bda-ctl`,
 `--install` will never touch a directory this build script did not create.
 
 **Nothing committed. Nothing installed. Nothing on screen.**
+
+## 12. SHOT 2026-09-03 21:38 — GREEN. Row 1 fired.
+
+`a-b-testing/bda/probe-sun-213804.png` (2560×1440, photo mode, same session as
+`112` §12's indoor frames — pid 1122072, `bda-probe` served, `status.txt`
+`want_skinspec=bda-probe`, `ser=class:in-skin`, `shadowset=full-shadow`,
+`failed=0`; log: `bda armed` at `0x4720000`, fixups with **zero**
+`bda_reject`, `bda_tlas prims:54869`, all 77 resolvers in `cpipe`).
+**USER, verbatim: *"green skin in sunlight"*.** Panam's face, neck and chest
+are green; the hair, the clothes, the masked NPC beside her and the ground are
+untouched (class-1 gate, as designed). The shaded neck under the collar is
+green too — the painted write carries sky/indirect as well as sun outdoors;
+`112` §12's indoor frame showed it carries **no local-light radiance** under
+PT. Frame generation / RR state not stated by the user.
+
+**What is now proven on screen, in one frame:** the layer's slot exists in
+the game, its address is fixed up into a compute resolver's two `OpConstant`
+literals at `vkCreateShaderModule`, the resolver runs as a compute pipeline
+(hole 4), loads `slot[0]` through a `PhysicalStorageBuffer` pointer and reads
+the magic. Stage 2b is unlocked in the game, not just on the driver.
+
+**Not proven by this frame:** Stage 2c (`bda-rq-probe`, a trace on the slot's
+TLAS from a resolver) — still §9 rows 4–7, unshot. And the mechanism being
+green does not rescue `112`: the resolver pass it lives in does not light a
+PT face from local lights.
+
+An earlier frame the same evening (`a-b-testing/bda/probe-indoor-212855.png`,
+indoors, local light only) read as row 3 "unchanged" — void under §8's frame
+spec, but informative: see `112` §12.
+
+## 13. SHOT 2026-09-03 21:45 — `bda-rq-probe` BLUE on skin in direct sun
+
+`a-b-testing/bda/rq-probe-sun-214502.png` (pid 1132684, `status.txt`
+`want_skinspec=bda-rq-probe`, log: armed, fixups, **zero** `bda_reject`,
+`bda_tlas prims:0` then `prims:4052` — a smaller TLAS than the 55 k of the
+evening's earlier runs; noted, not explained). **USER, verbatim: *"bda-rq-probe
+-> direct sunlight reads BLUE on skin"*.** Panam's face and chest carry the
+blue multiply (chest B/R 1.19 against 0.67 for the sand and 0.71 for the
+masked NPC's neck; the face reads purple because the blue is on top of
+sunlit skin). `a-b-testing/bda/probe-doorway-214008.png` (21:40, still
+`bda-probe`) is a second GREEN, this time with a doorway lintel above.
+
+**What BLUE proves:** the `OpConvertUToAccelerationStructureKHR` of the slot's
+words 2/3 yields a traversable handle and traversal COMMITS hits — §9 row 5
+(AMBER everywhere, "the AS handle converted but traversal committed nothing")
+is excluded, and row 7 (RED) is excluded. The slot → TLAS → compute-side
+inline query chain works end to end in the game.
+
+**What it does not separate:** row 4 from row 6. The probe's ray goes
+straight up 5 cm–3 m from the skin point, and from a cheek, forehead or chest
+that ray meets the brow, the hair or the chin within centimetres — BLUE on a
+face under open sky is the expected geometry, not evidence that the origin is
+inside the head or that `P − C` is the wrong space. §8's "open forehead/cheek
+with open sky above" was a bad frame spec for a face. The discriminator is
+**bare skin with nothing above it** — a hand or forearm held out under open
+sky — which should read AMBER, and the same hand under an awning BLUE. Not
+shot. Until it is, the TLAS-space correctness of the origin rests on `99`
+§10.6 + `112`'s verifier (the origin is asserted to be `P − C`), not on a
+frame.

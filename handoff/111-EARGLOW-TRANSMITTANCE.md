@@ -478,6 +478,12 @@ by a neon sign — every one of those is a case where real ears glow and this
 effect renders nothing. Sun-only translucency is arguably the largest
 remaining error in the term, larger than anything §1 fixed.
 
+**Amended 2026-09-03 by `112`:** route (a) rests on a false premise — the
+`rgs_reference_main` payload carries no radiance, so there is no local-light
+irradiance in the raygen to multiply. The term was built compute-side at the
+clustered light loop (`112`, rungs `earglow-di*`), i.e. route (b)'s mechanism
+at the direct-light loop rather than at a ReSTIR-GI radiance.
+
 Three routes, in cost order:
 
 | route | what it needs | cost | verdict |

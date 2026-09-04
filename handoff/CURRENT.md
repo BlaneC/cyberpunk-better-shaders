@@ -1,8 +1,79 @@
-# CallistoSSS — current state (2026-09-03 ~18:00, after ear glow v7's `-hue1` colour rung became the shipped default)
+# CallistoSSS — current state (2026-09-03 22:3x, after `earglow-ll` was shot, kept — *"earglow-ll looks great!"* — and made the default as `…-curv-t7hue1-ll`)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
 *working* — only an on-screen A/B is.
+
+**2026-09-03 22:3x — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
+`gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll`**
+(content `076f3108e312ef4f`; `dev/park_alias.sh`'s byte copy of
+`skin.set/earglow-ll`, 93/93, provenance carried). `113` SHOT, live read-out,
+user verbatim *"earglow-ll looks great!"*. The previous default `…-t7hue1`
+(= `earglow-ll-ctl`) is the A/B 'before'. Same contract: `ser=class`,
+`shadowset=full-shadow`. `113` §11.
+
+**2026-09-03 22:13 — `113` BUILT, GATED 9/9, VERIFIED FROM SHIPPED BYTES,
+PARKED, INSTALLED, SELECTABLE — UNSHOT: the local-light ear glow rebuilt at
+the RAYGEN's light-sample site (`earglow-ll`, `-hi`, `-hit`, `-ctl`).** The
+term sits before the exhaustive light loop's backlit guard in the 10
+`rgs_reference_main`, with the engine's own atten × spot × colour as E and
+`111` v7's transfer; three inline queries per backlit light (A hoisted to the
+loop preheader). No BDA slot. The resampled loop is declined by shape (no
+shadow trace in its lit block) — a backlit ear cannot be lit from it without
+changing the engine's sampling. `112`'s compute-side rungs stay parked as the
+negative reference; both row sets are now in the SOURCE `init.lua` (the
+earlier `earglow-di` rows had gone into the release copy only). Settings
+contract and order in `113` §8; frame: night/interior, one local light
+behind the ear, sun off the face. Read `-hit` first.
+
+**2026-09-03 21:45 — `bda-rq-probe` BLUE on sunlit skin (`103` §13):
+traversal on the slot's TLAS commits hits from a compute resolver — rows 5
+and 7 excluded. Row 4 vs 6 (is the origin in the right space) is NOT
+separated by a face: straight up from a cheek hits the brow. Shoot a bare
+hand under open sky (expect AMBER) to close it.**
+
+**2026-09-03 21:38 — `103` SHOT: `bda-probe` GREEN in direct sun
+(`a-b-testing/bda/probe-sun-213804.png`, user verbatim *"green skin in
+sunlight"*). Stage 2b is unlocked IN THE GAME: the layer's slot address is
+fixed up into a compute resolver and read back through a PhysicalStorageBuffer
+pointer; all four of `98` §10.3's holes are closed. Stage 2c (`bda-rq-probe`)
+still unshot. `103` §12.**
+
+**2026-09-03 21:28 — `112` SHOT: `earglow-di` shows NOTHING, and the indoor
+`bda-probe` frame (skin neither green nor red under a room's local light,
+`112` §12) says the 77 compute resolvers do not light a path-traced face from
+local lights — the raygens walk the light records themselves (13 per raygen).
+The splice site is in the wrong pass for PT; the BDA mechanism is unread
+(shoot `bda-probe` in DIRECT sun, `103` §8). Log side was all green.**
+
+**2026-09-03 ~20:30 — `112` BUILT, GATED 10/10, PARKED, INSTALLED:
+ear glow from LOCAL lights, four `skinspec` rungs on the shipped default —
+`earglow-di` (k = 7.2787, content `57750a496fde7d92`), `earglow-di-hi` (k × 2,
+`e91d5108cabca9e0`), `earglow-di-hit` (per-light BLUE/AMBER/RED paint,
+`41cbd55db32278d6`), `earglow-di-ctl` (93/93 identical to the default).** The
+default itself did not move.
+
+- **What it is.** `111`'s `-hue1` transmittance (same `r6lo.json`, same k, 6 mm
+  floor, 18 mm tmax) driven by the **compute resolvers' clustered light loop**:
+  three inline ray queries per shadowed light per skin pixel (instance match,
+  cull-front thickness toward the light, exit-point → light visibility) × the
+  engine's own `atten` × the light colour, added at the diffuse write. 60 of 77
+  modules, 102 sites; 30 unshadowed loops skipped (lights with no shadow map do
+  NOT glow), 15 sun-only + `103`'s 2 declined byte-identical; raygens verbatim.
+- **`111` §13(a) was wrong and is amended:** the raygen carries no local-light
+  radiance; this is route (b)'s mechanism at the direct-light loop.
+- **It needs the BDA layer** (`103`): the TLAS reaches a compute module only
+  through the layer's slot. Layer md5 `ab46f8cb0096db267a2469973676783a`
+  cmp-identical repo == release == installed. **Shoot `bda-probe` FIRST**, grep
+  `bda armed` / `bda_fixup` / `bda_tlas prims` / no `bda_reject`, then `-hit`,
+  then `di` vs `ctl` on one frame. Settings contract and the pre-registered
+  table: `112` §8–9. Frame: night/interior, a shadow-casting local light behind
+  the head.
+- **Deployed:** `make release && make install`; live CET `init.lua` and
+  `sync_settings.sh` cmp == release; four rungs parked in `skin.set/` 93/93 cmp
+  with `MANIFEST.txt` provenance carried (`ser_sha 310513f3008cbde4`,
+  `ptq_sha 55ed4e5c6884ab71`). Verifier: 18 rejections. Cost unmeasured.
+  Nothing committed.
 
 **2026-09-03 ~18:00 — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
 `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1`, content sha `728b63de50c2a6a5` — the same bytes as the rung
