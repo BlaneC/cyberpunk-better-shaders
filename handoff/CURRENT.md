@@ -1,10 +1,34 @@
-# CallistoSSS — current state (2026-09-03 22:3x, after `earglow-ll` was shot, kept — *"earglow-ll looks great!"* — and made the default as `…-curv-t7hue1-ll`)
+# CallistoSSS — current state (2026-09-04, after `115` bump was shot, kept — *"IT LOOKS INCREDIBLE"* — and made the default as `…-curv-t7hue1-ll-bump`)
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
 *working* — only an on-screen A/B is.
 
-**2026-09-03 22:3x — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
+**2026-09-04 — THE STANDING SELECTION AND SHIPPED DEFAULT `skinspec` IS
+`gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump`**
+(content `241bb736f0ed93b6`; 93/93 = `skin.set/bump`, provenance carried).
+`115` SHOT, live read-out, user verbatim *"The bump option was the best
+thing I've tested so far. IT LOOKS INCREDIBLE."* The previous default
+`…-t7hue1-ll` (= `bump-ctl`) is the A/B 'before'. Same contract:
+`ser=class`, `shadowset=full-shadow`. Still unread: `bump-vis`, `bump-hi`,
+the lip-line edge check. `115` §11.
+
+**2026-09-04 — `115` BUILT, GATED (gates 0–10), VERIFIED FROM SHIPPED BYTES,
+PARKED, INSTALLED, SELECTABLE: an albedo-derived
+pore micro-normal on skin (`bump`, `-hi`, `-vis`, `-ctl`, and the stack
+`…-curv-t7hue1-ll-bump`, sha `241bb736f0ed93b6`).** The pore darkening the
+albedo already carries is read as a height field whose tangential luma
+gradient (three albedo taps over `109`'s metric dP) tilts the shading normal
+at its class-switch phi in 75 of 77 resolvers, so the diffuse, the GGX
+lobes, c1 and the terminator bleed all see the pore and the oil highlight
+breaks up. Edge-kill band so lip lines and brows do not become ridges; tilt
+clamp; `109`'s silhouette guard; the curvature estimator keeps the raw
+normal. **Compute side = direct sun only under PT.** Frame: sunlit close-up
+face at 0.3–1 m, `ser=class`, `shadowset=full-shadow`; shoot `bump-vis`
+first, then `bump` vs the default, then a lip line for edge ridges (`115`
+§7–8). The brainstorm behind it is `114`.
+
+**2026-09-03 22:3x — THE PREVIOUS DEFAULT `skinspec` WAS
 `gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll`**
 (content `076f3108e312ef4f`; `dev/park_alias.sh`'s byte copy of
 `skin.set/earglow-ll`, 93/93, provenance carried). `113` SHOT, live read-out,

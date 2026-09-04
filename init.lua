@@ -160,7 +160,18 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- ...-t7hue1 (= earglow-ll-ctl) is the 'before' for the A/B.
                -- The name is dev/park_alias.sh's byte copy of skin.set/earglow-ll
                -- (93/93, cmp clean both ways, MANIFEST provenance carried).
-               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll" }
+               -- DEFAULT CHANGED 2026-09-04 to ...-t7hue1-ll-bump: the
+               -- albedo-derived pore micro-normal on skin (115). The pore
+               -- darkening in the albedo is read as a height field whose
+               -- tangential luma gradient over 109's metric dP tilts the
+               -- shading normal at its class-switch phi in 75 of 77 compute
+               -- resolvers; the 16 raygens are ...-ll's bytes. Edge-kill band,
+               -- 26.6 deg clamp, 109's silhouette guard. content sha
+               -- 241bb736f0ed93b6. SERVED and kept on a LIVE read-out only,
+               -- no capture: "The bump option was the best thing I've tested
+               -- so far. IT LOOKS INCREDIBLE." ...-t7hue1-ll (= bump-ctl) is
+               -- the 'before' for the A/B. Compute side = direct sun only.
+               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump" }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
@@ -434,7 +445,19 @@ local SKIN_LEVELS = {
     -- content sha 728b63de50c2a6a5. SHOT 2026-09-03, LIVE read-out only:
     -- "earglow7-hue1 looks better".
     { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1", label = "  + EAR GLOW v7, measured skin transmittance (111, -hue1 colour point)  <-- the previous default; = earglow-ll-ctl" },
-    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll", label = "  + EAR GLOW from LOCAL lights at the raygen's light-sample site (113)  <-- DEFAULT" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll", label = "  + EAR GLOW from LOCAL lights at the raygen's light-sample site (113)  <-- the previous default; = bump-ctl" },
+    -- handoff/115. The default PLUS an albedo-derived micro-normal on skin:
+    -- the pore darkening the albedo already carries, read as a height field
+    -- (H = 10 mm/luma) whose tangential luma gradient over 109's metric dP
+    -- tilts the shading normal every lighting term reads (diffuse N.L, the
+    -- GGX N.H/N.V, c1, the terminator bleed). Edge-kill band [0.05, 0.12]
+    -- luma/texel so lip lines and brows do not become ridges; tilt clamp
+    -- 26.6 deg; 109's silhouette guard. 75 of 77 compute modules; the 16
+    -- raygens are the default's. Compute side = DIRECT SUN ONLY under PT.
+    -- 93/93 bytes are skin.set/bump. content sha 241bb736f0ed93b6. SHOT
+    -- 2026-09-04, LIVE read-out only, no capture: "The bump option was the
+    -- best thing I've tested so far. IT LOOKS INCREDIBLE."
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump", label = "  + ALBEDO-DERIVED pore micro-normal on skin (115)  <-- DEFAULT" },
     -- handoff/101 sec 17. THE STANDING SELECTION. The fog rung above plus the
     -- ray-query ear glow (rq3: instance-matched sunward thickness AND a
     -- sun-visibility query from the exit point). SHOT backlit and KEPT.
@@ -641,6 +664,15 @@ local SKIN_LEVELS = {
     { id = "curv",      label = "  CURVATURE-DRIVEN skin scattering, g = 1 -- KEPT 2026-09-03; identical bytes to the DEFAULT stack" },
     { id = "curv-hi",   label = "  curvature skin at g = 2 -- twice the contrast; differs from curv ONLY on foreheads/temples (109 sec 3.3)" },
     { id = "curv-ctl",  label = "  curvature CONTROL (g = 0) -- 93/93 BYTE-identical to the cap6-glintdense default; must be indistinguishable" },
+    -- handoff/115. Albedo-derived pore micro-normal on skin, single rungs on
+    -- the ...-curv-t7hue1-ll DEFAULT (compute only; 75 of 77 resolvers).
+    -- Shoot bump-vis FIRST: the ramp must follow the pore map; flat = void.
+    -- Contract: ser=class, shadowset=full-shadow, DIRECT SUN, close-up face
+    -- at 0.3-1 m, then a lip line and an eyebrow (any ridge there = reject).
+    { id = "bump-vis",  label = "PROBE: pore-bump tilt on skin, blue=flat -> green -> red=clamped, white=silhouette guard (115; SHOOT THIS FIRST)" },
+    { id = "bump",      label = "  ALBEDO-DERIVED pore micro-normal, H = 10 mm/luma -- KEPT 2026-09-04; identical bytes to the DEFAULT stack (115)" },
+    { id = "bump-hi",   label = "  pore micro-normal at H = 20 mm/luma -- twice the relief; skin or sandpaper? (115 sec 8)" },
+    { id = "bump-ctl",  label = "  pore micro-normal CONTROL (H = 0) -- 93/93 BYTE-identical to the PREVIOUS default (...-t7hue1-ll); must be indistinguishable" },
     -- handoff/105. Backlit translucency for EVERY thin surface: 101's sunward
     -- front-cull query with a class-0 rough-dielectric gate, STACKED on the
     -- cap6-glintdense default (ear glow bit-identical on skin, asserted).
