@@ -62,6 +62,25 @@ THE RUNGS
   --mode probe  Stage 2b.  Reads word 0 and paints class-1 (skin) pixels GREEN
                 when it equals the magic and RED when it does not.  Every other
                 material class is multiplied by 1.0, i.e. untouched.
+  --mode wprobe Stage 3a (handoff/116).  The WIDENED slot: reads words 8/9/10
+                (the scratch address and its size), 6 (the layer's frame
+                counter) and 0, and then per skin pixel READS the word this
+                pixel owns, compares it against the value the PREVIOUS frame
+                would have left there, and writes this frame's.  Skin paints
+                GREEN when the comparison holds -- i.e. a word this shader
+                wrote survived a frame in a buffer no descriptor names -- BLUE
+                when it does not, AMBER when the layer allocated no scratch,
+                and RED when the magic is wrong.  No ray query.
+  --mode wprobe2 Stage 3a, second cut (handoff/116 sec 8).  TWO words per
+                pixel: an identity word that carries NO frame stamp, and the
+                frame the write happened on.  The identity answers "did this
+                pixel's word persist and is the index right" without depending
+                on a counter the host writes at RECORD time; the frame word
+                measures HOW OLD the survivor is.  Skin: BLUE = the word is not
+                this pixel's, GREEN = it is and is exactly one frame old, CYAN
+                = zero frames old (the resolver ran twice for one present),
+                MAGENTA = two or more frames old (the counter jumped or froze).
+                AMBER and RED as in --mode wprobe.
   --mode rq     Stage 2c.  ALSO reads words 2/3, converts them to an
                 acceleration structure and runs ONE inline ray query per
                 painted write from the resolver's own shading point, straight
@@ -83,7 +102,8 @@ the `hunt-wpos-cam` control.  Nothing is imported from the raygen side.
 Usage:
     python3 dev/patch_bda.py <mod.spvasm> --outdir DIR --mode probe|rq|ctl
         [--tmax 3.0] [--tmin 0.05] [--flags 517] [--mask 255]
-        [--decoy nomarker|badid|scan|world|noflags]
+        [--decoy nomarker|badid|scan|world|noflags|noguard|sameframe|stamped
+                 |paints|rgstore|xoffset]
 """
 import argparse, hashlib, json, os, re, struct, subprocess, sys
 
@@ -107,7 +127,17 @@ MAGIC = 0xCA115701            # 3390134017
 ID_W = 10                     # zero-padded id field width in the marker
 SLOT_MEMBERS = 8              # 8 x uint, Offset 4k, Block, NonWritable
 
-W_MAGIC, W_GEN, W_LO, W_HI = 0, 1, 2, 3
+W_MAGIC, W_GEN, W_LO, W_HI, W_FRAME = 0, 1, 2, 3, 6
+
+# Stage 3a (handoff/116): the slot's words 8..11 point at a much larger buffer
+# the SHADER writes. A module that only needs the TLAS keeps declaring the
+# 8-member mailbox -- every rung built before this one still verifies -- and a
+# module that wants the scratch declares the 12-member form instead.
+SLOT_MEMBERS_V2 = 12
+W_SCR_LO, W_SCR_HI, W_SCR_WORDS, W_SCR_FLAGS = 8, 9, 10, 11
+SCRATCH_HDR = 16              # words the layer reserves for shader counters
+SCRATCH_SIG = 0xC0FFEE01      # "a shader was here", the value the probe leaves
+SCR_F_ARMED, SCR_F_READBACK = 1, 2
 
 # Declines, BY NAME -- the same two `99` sec 5 declines, for the same reasons.
 #   ab0bc2fee876d489 -- its one OpImageWrite stores a v4uint reservoir record,
@@ -127,9 +157,90 @@ COL = {
     'red':   (3.00, 0.15, 0.15),   # 2b: it was NOT -- the fixup did not happen
     'blue':  (0.15, 0.15, 3.00),   # 2c: the query committed a hit
     'amber': (3.00, 1.20, 0.15),   # 2c: the query missed
+    'cyan':  (0.15, 3.00, 3.00),   # 3b: written again in the SAME frame
+    'magenta': (3.00, 0.15, 3.00), # 3b: older than one frame
 }
+# --mode wprobe reuses the same four, one meaning each (see the docstring):
+#   GREEN  this pixel's word survived from the previous frame
+#   BLUE   the scratch is there, the word did not survive
+#   AMBER  the slot is there, the scratch is not (CALLISTO_BDA_SCRATCH_MB=0)
+#   RED    the magic is wrong, i.e. no fixup happened
+
+# The scratch's per-pixel map, and the ONE place these numbers are written.
+# The index is LINEAR in the pixel and the value is HASHED, never the other way
+# round: a hashed index collides (two pixels, one word, a false BLUE), while a
+# hashed value only has to be unlikely to equal a neighbour's.
+# NB the pitch and the scratch SIZE are one decision: `pix & mask` is only
+# injective while pitch * height <= mask + 1. At 4096 and 2 words per pixel a
+# 32 MiB scratch gives 512 unique rows, and rows 512.. alias onto rows 0.. --
+# which is what painted the top and bottom thirds of a 1280x720 frame blue in
+# handoff/116 sec 9. The layer's default is 128 MiB for that reason.
+PIX_PITCH = 4096              # y * PITCH + x; the internal width is never more
+PIX_HASH = 2654435761         # Knuth's 2^32/phi
+WORDS_PER_PIXEL = {'wprobe': 1, 'wprobe2': 2, 'xprobe': 2}
+# --mode xprobe is the first rung that patches BOTH stages, and the two halves
+# do OPPOSITE things:
+#   compute resolver  WRITES its pixel's identity + the frame, paints NOTHING
+#   raygen            READS at ITS OWN write coordinate, paints, stores nothing
+# so the picture is the game, tinted exactly where a raygen found the word a
+# resolver left for that pixel. The whole question is whether those two
+# coordinates are the same pixel; see handoff/116 sec 10.1.
+XPROBE_REG = 5                # the push-constant word every raygen's radiance
+XPROBE_OFFS = (0, 1)          # descriptor index comes from: registers[5] + 0/1.
+                              # Measured across all 16: every raygen writes
+                              # radiance to exactly those two and nothing else
+                              # (1271d38 also has a registers[5]+8 guide buffer,
+                              # which is NOT painted -- tinting a denoiser guide
+                              # would make the read unreadable).
+PARK_WORD_2 = 33              # the second parked word, for the age store
+PARK_WORD = 32                # where an UNARMED pixel writes: slot word 32, in
+                              # the layer's own 64-word buffer, which nothing
+                              # reads (words 12..63 are reserved). It exists so
+                              # the store needs no branch and can never be out
+                              # of bounds.
 
 DEFAULTS = dict(flags=517, mask=255, tmin=0.05, tmax=3.0)
+
+
+def is_raygen(mod):
+    return any(re.match(r'\s*OpEntryPoint RayGenerationKHR\b', ln)
+               for ln in mod.lines)
+
+
+def raygen_radiance_writes(mod, writes):
+    """The subset of `writes` that go to registers[5] + 0/1.
+
+    Re-derived per module rather than assumed: the image is an OpLoad of an
+    OpAccessChain into the descriptor array, indexed by the push constant (plus
+    a literal offset). Anything else -- notably the registers[5]+8 guide
+    buffer -- is left alone."""
+    out = []
+    for w in writes:
+        _, ld = mod.find_def(w['img'])
+        m = re.match(r'OpLoad %\w+ (%\w+)\s*$', ld or '')
+        if not m:
+            continue
+        _, ac = mod.find_def(m.group(1))
+        m = re.match(r'OpAccessChain %\w+ %\w+ (%\w+)\s*$', ac or '')
+        if not m:
+            continue
+        _, v = mod.find_def(m.group(1))
+        off, base = 0, m.group(1)
+        m2 = re.match(r'OpIAdd %uint (%\w+) %uint_(\d+)\s*$', v or '')
+        if m2:
+            base, off = m2.group(1), int(m2.group(2))
+            _, v = mod.find_def(base)
+        m3 = re.match(r'OpLoad %uint (%\w+)\s*$', v or '')
+        if not m3:
+            continue
+        _, pc = mod.find_def(m3.group(1))
+        m4 = re.match(r'OpAccessChain %_ptr_PushConstant_uint %registers '
+                      r'%uint_(\d+)\s*$', pc or '')
+        if not m4 or int(m4.group(1)) != XPROBE_REG or off not in XPROBE_OFFS:
+            continue
+        w = dict(w); w['img_off'] = off
+        out.append(w)
+    return out
 
 
 # ------------------------------------------------------- section insertion
@@ -180,9 +291,10 @@ def entry_hoist_line(mod):
     is why the ray query's variable has to go exactly here and not at the
     splice site.
     """
-    m = re.search(r'OpEntryPoint GLCompute (%\w+) ', '\n'.join(mod.lines))
+    src = '\n'.join(mod.lines)
+    m = re.search(r'OpEntryPoint (?:GLCompute|RayGenerationKHR) (%\w+) ', src)
     if not m:
-        die(f"{mod.name}: no GLCompute OpEntryPoint")
+        die(f"{mod.name}: no GLCompute or RayGenerationKHR OpEntryPoint")
     fn = m.group(1)
     fline = None
     for i, ln in enumerate(mod.lines):
@@ -226,7 +338,7 @@ def need_type(mod, name):
 
 
 # --------------------------------------------------------------- the build
-def build(mod, cfg, writes, mode, knobs, decoy):
+def build(mod, cfg, writes, mode, knobs, decoy, rgen=False):
     consts, decos, caps, exts = [], [], [], []
     uc = {}
 
@@ -257,12 +369,13 @@ def build(mod, cfg, writes, mode, knobs, decoy):
     slot = I()
     ptr_slot = I()
     ptr_uint = I()
-    for k in range(SLOT_MEMBERS):
+    n_slot = SLOT_MEMBERS_V2 if mode in WORDS_PER_PIXEL else SLOT_MEMBERS
+    for k in range(n_slot):
         decos.append(f"               OpMemberDecorate {slot} {k} Offset {4 * k}")
     decos.append(f"               OpDecorate {slot} Block")
-    for k in range(SLOT_MEMBERS):
+    for k in range(n_slot):
         decos.append(f"               OpMemberDecorate {slot} {k} NonWritable")
-    consts.append(f"    {slot} = OpTypeStruct " + ' '.join(['%uint'] * SLOT_MEMBERS))
+    consts.append(f"    {slot} = OpTypeStruct " + ' '.join(['%uint'] * n_slot))
     consts.append(f"    {ptr_slot} = OpTypePointer PhysicalStorageBuffer {slot}")
     consts.append(f"    {ptr_uint} = OpTypePointer PhysicalStorageBuffer %uint")
 
@@ -310,6 +423,59 @@ def build(mod, cfg, writes, mode, knobs, decoy):
         f"        {w0} = OpLoad %uint {ac0} Aligned 4",
         f"        {ok} = OpIEqual %bool {w0} {magic}",
     ]
+    scr = {}
+    if mode in WORDS_PER_PIXEL:
+        # The scratch type: a runtime array of uint, and -- the whole
+        # difference from the slot -- NOT NonWritable anywhere.
+        arr, blk, ptr_scr = I(), I(), I()
+        decos.append(f"               OpDecorate {arr} ArrayStride 4")
+        decos.append(f"               OpDecorate {blk} Block")
+        decos.append(f"               OpMemberDecorate {blk} 0 Offset 0")
+        consts.append(f"    {arr} = OpTypeRuntimeArray %uint")
+        consts.append(f"    {blk} = OpTypeStruct {arr}")
+        consts.append(f"    {ptr_scr} = OpTypePointer PhysicalStorageBuffer {blk}")
+        acw, wW, acl, sl, ach, sh = I(), I(), I(), I(), I(), I()
+        armed, half, maskv = I(), I(), I()
+        bl, bh, bv2, sp = I(), I(), I(), I()
+        acf, fr, prevf = I(), I(), I()
+        hoist += [
+            # words 8/9/10: the scratch address and its size.
+            f"        {acw} = OpInBoundsAccessChain {ptr_uint} {pp} {U(W_SCR_WORDS)}",
+            f"        {wW} = OpLoad %uint {acw} Aligned 4",
+            f"        {acl} = OpInBoundsAccessChain {ptr_uint} {pp} {U(W_SCR_LO)}",
+            f"        {sl} = OpLoad %uint {acl} Aligned 4",
+            f"        {ach} = OpInBoundsAccessChain {ptr_uint} {pp} {U(W_SCR_HI)}",
+            f"        {sh} = OpLoad %uint {ach} Aligned 4",
+            f"        {armed} = OpINotEqual %bool {wW} {U(0)}",
+            # Only the LOWER HALF of the payload is addressed. The layer's size
+            # is a power of two, so `words/2 - 1` is a mask, and
+            # SCRATCH_HDR + (pix & mask) is in bounds for every pixel and every
+            # size the layer can hand us -- with no clamp and no branch.
+            f"        {half} = OpShiftRightLogical %uint {wW} "
+            f"{U(WORDS_PER_PIXEL[mode])}",
+            f"        {maskv} = OpISub %uint {half} {U(1)}",
+            # An UNARMED pixel is pointed at the SLOT instead, where its store
+            # lands in reserved word 32. The sentinel pair is the slot's own
+            # address once the layer has rewritten it, so this costs nothing.
+            # --decoy noguard drops exactly these two selects, which is the
+            # null dereference this shape exists to prevent.
+            (f"        {bl} = OpSelect %uint {armed} {sl} {lo}"
+             if decoy != 'noguard' else
+             f"        {bl} = OpCopyObject %uint {sl}"),
+            (f"        {bh} = OpSelect %uint {armed} {sh} {hi}"
+             if decoy != 'noguard' else
+             f"        {bh} = OpCopyObject %uint {sh}"),
+            f"        {bv2} = OpCompositeConstruct %v2uint {bl} {bh}",
+            f"        {sp} = OpBitcast {ptr_scr} {bv2}",
+            # The layer's frame counter (word 6): what makes "survived a frame"
+            # a claim about time rather than about this dispatch.
+            f"        {acf} = OpInBoundsAccessChain {ptr_uint} {pp} {U(W_FRAME)}",
+            f"        {fr} = OpLoad %uint {acf} Aligned 4",
+            f"        {prevf} = OpISub %uint {fr} {U(1)}",
+        ]
+        scr = dict(ptr=sp, mask=maskv, armed=armed, fr=fr, prevf=prevf,
+                   ptr_scr=ptr_scr, words=wW, wpp=WORDS_PER_PIXEL[mode])
+
     rq_var = accel = None
     if mode == 'rq':
         caps.append("               OpCapability RayQueryKHR")
@@ -332,9 +498,12 @@ def build(mod, cfg, writes, mode, knobs, decoy):
         ]
 
     # ---- the colour, folded once per module ----
-    if mode == 'rq':
+    if mode in ('rq',) or mode in WORDS_PER_PIXEL:
         c_blue = [C(x) for x in COL['blue']]
         c_amber = [C(x) for x in COL['amber']]
+    if mode in ('wprobe2', 'xprobe'):
+        c_cyan = [C(x) for x in COL['cyan']]
+        c_magenta = [C(x) for x in COL['magenta']]
     c_green = [C(x) for x in COL['green']]
     c_red = [C(x) for x in COL['red']]
     ok_col = []
@@ -367,11 +536,16 @@ def build(mod, cfg, writes, mode, knobs, decoy):
         u_comm = U(1)
 
     # ---- class gate ----
-    shift, ins_line, pre_ins, pre_consts, dom_id = acquire_class_shift(mod)
-    consts.extend(pre_consts)
-    edits = []
-    if pre_ins:
-        edits.append((ins_line, pre_ins))
+    # A raygen has no class word and needs none: the READER paints wherever it
+    # finds a word, and "wherever" is precisely the measurement.
+    if rgen:
+        shift, dom_id, edits = None, None, []
+    else:
+        shift, ins_line, pre_ins, pre_consts, dom_id = acquire_class_shift(mod)
+        consts.extend(pre_consts)
+        edits = []
+        if pre_ins:
+            edits.append((ins_line, pre_ins))
     edits.append((entry_hoist_line(mod), hoist))
 
     ctx = cam = leaves = None
@@ -393,7 +567,9 @@ def build(mod, cfg, writes, mode, knobs, decoy):
             continue
         ins = []
         cls = shift
-        if not cfg.dominates_line(dom_id, w['line']):
+        if rgen:
+            pass
+        elif not cfg.dominates_line(dom_id, w['line']):
             if cf is None:
                 cf = find_class_fetch(mod)
             if any(not cfg.dominates_line(x, w['line'])
@@ -442,6 +618,212 @@ def build(mod, cfg, writes, mode, knobs, decoy):
                 g = mod.new_id()
                 ins.append(f"        {g} = OpSelect %float {ok} {h} {c_red[ch]}")
                 col.append(g)
+        if mode in WORDS_PER_PIXEL:
+            # The pixel this write is about, taken from the write's OWN
+            # coordinate -- no builtin lookup, and nothing that has to
+            # dominate: the coord construct is at the site.
+            cm = re.match(r'\s*OpImageWrite %\w+ (%\w+) %\w+\s*$',
+                          mod.lines[w['line']])
+            coord = cm.group(1) if cm else None
+            cc = None
+            for ln in mod.lines:
+                m2 = re.match(r'\s*' + re.escape(coord or '\0')
+                              + r'\s*=\s*OpCompositeConstruct %v2uint '
+                                r'(%\w+) (%\w+)\s*$', ln)
+                if m2:
+                    cc = m2.groups()
+                    break
+            if cc is None:
+                skipped.append({'line': w['line'] + 1,
+                                'why': 'the write coordinate is not a v2uint construct'})
+                continue
+            px, py = cc
+            pix, yp, hv, sx = (mod.new_id() for _ in range(4))
+            if decoy == 'xoffset' and mode == 'xprobe' and rgen:
+                # The reader looks one pixel to the right. Everything still
+                # runs; the screen would just be quietly wrong -- which is the
+                # entire class of bug this rung exists to detect, so the
+                # verifier has to refuse it.
+                shifted = mod.new_id()
+                ins.append(f"        {shifted} = OpIAdd %uint {px} {U(1)}")
+                px = shifted
+            sub, wide, idxp, idx, chain, got = (mod.new_id() for _ in range(6))
+            # `live` decides whether this pixel gets a REAL slot index or the
+            # parked one. Armed always; and for the xprobe WRITER also class-1,
+            # because a store cannot sit under an OpSelect but its ADDRESS can,
+            # and that is how the writer stays confined to skin with no branch.
+            live = scr['armed']
+            if mode == 'xprobe' and not rgen:
+                gate_c = mod.new_id()
+                live = mod.new_id()
+                ins.append(f"        {gate_c} = OpIEqual %bool {cls} {U(1)}")
+                ins.append(f"        {live} = OpLogicalAnd %bool "
+                           f"{scr['armed']} {gate_c}")
+            ins += [
+                f"        {yp} = OpIMul %uint {py} {U(PIX_PITCH)}",
+                f"        {pix} = OpIAdd %uint {yp} {px}",
+                f"        {sub} = OpBitwiseAnd %uint {pix} {scr['mask']}",
+                # Two words per pixel means the slot index advances by two, or
+                # pixel N's second word IS pixel N+1's first.
+                *([f"        {wide} = OpIMul %uint {sub} {U(scr['wpp'])}"]
+                  if scr['wpp'] != 1 else []),
+                f"        {idxp} = OpIAdd %uint "
+                f"{sub if scr['wpp'] == 1 else wide} {U(SCRATCH_HDR)}",
+                f"        {idx} = OpSelect %uint {live} {idxp} {U(PARK_WORD)}",
+                f"        {hv} = OpIMul %uint {pix} {U(PIX_HASH)}",
+                f"        {sx} = OpBitwiseXor %uint {hv} {U(SCRATCH_SIG)}",
+                f"        {chain} = OpInBoundsAccessChain {ptr_uint} "
+                f"{scr['ptr']} {U(0)} {idx}",
+            ]
+            if mode != 'xprobe' or rgen:
+                # READ FIRST, then write: a store before the load would make
+                # the comparison trivially true. The xprobe WRITER never
+                # reads -- it is the other stage's business to read.
+                ins.append(f"        {got} = OpLoad %uint {chain} Aligned 4")
+            seen = mod.new_id()
+            if mode == 'wprobe':
+                wnow, wold = mod.new_id(), mod.new_id()
+                ins += [
+                    f"        {wnow} = OpBitwiseXor %uint {sx} {scr['fr']}",
+                    # --decoy sameframe stamps the EXPECTED word with this
+                    # frame, so a store made moments earlier reads back as a
+                    # survival and the rung paints green having proved nothing.
+                    (f"        {wold} = OpBitwiseXor %uint {sx} {scr['prevf']}"
+                     if decoy != 'sameframe' else
+                     f"        {wold} = OpBitwiseXor %uint {sx} {scr['fr']}"),
+                    f"        {seen} = OpIEqual %bool {got} {wold}",
+                    f"        OpStore {chain} {wnow} Aligned 4",
+                ]
+            elif mode == 'xprobe' and not rgen:
+                # THE WRITER. Two stores, no load, no paint: it leaves this
+                # pixel's identity and the frame it left them, and nothing
+                # else about the frame changes. Everything visible in this
+                # rung is the RAYGEN's doing.
+                idx2, ch2 = mod.new_id(), mod.new_id()
+                ins += [
+                    f"        OpStore {chain} {sx} Aligned 4",
+                    f"        {idx2} = OpIAdd %uint {idx} {U(1)}",
+                    f"        {ch2} = OpInBoundsAccessChain {ptr_uint} "
+                    f"{scr['ptr']} {U(0)} {idx2}",
+                    f"        OpStore {ch2} {scr['fr']} Aligned 4",
+                ]
+                if decoy == 'paints':
+                    # The WRITER tints too, so the screen no longer shows the
+                    # raygen's verdict alone -- a silent way to read a green
+                    # frame that the compute side painted.
+                    nc = []
+                    for ch in range(3):
+                        n = mod.new_id()
+                        ins.append(f"        {n} = OpFMul %float "
+                                   f"{w['comps'][ch]} {c_green[ch]}")
+                        nc.append(n)
+                    nt = mod.new_id()
+                    ins.append(f"        {nt} = OpCompositeConstruct %v4float "
+                               f"{nc[0]} {nc[1]} {nc[2]} {w['comps'][3]}")
+                    mod.lines[w['line']] = re.sub(
+                        r'(OpImageWrite %\w+ %\w+ )%\w+\s*$',
+                        r'\g<1>' + nt, mod.lines[w['line']])
+                edits.append((w['line'] - 1, ins))
+                done.append(w['line'] + 1)
+                continue
+            elif mode == 'xprobe':
+                # THE READER, in a raygen. Reads the two words at ITS OWN write
+                # coordinate and stores nothing at all -- so a wrong answer
+                # here cannot be an artefact of the reader having scribbled.
+                idx2, ch2, got2, age = (mod.new_id() for _ in range(4))
+                is0, is1, present = (mod.new_id() for _ in range(3))
+                ins += [
+                    f"        {seen} = OpIEqual %bool {got} {sx}",
+                    f"        {present} = OpINotEqual %bool {got} {U(0)}",
+                    f"        {idx2} = OpIAdd %uint {idx} {U(1)}",
+                    f"        {ch2} = OpInBoundsAccessChain {ptr_uint} "
+                    f"{scr['ptr']} {U(0)} {idx2}",
+                    f"        {got2} = OpLoad %uint {ch2} Aligned 4",
+                    *([f"        OpStore {ch2} {scr['fr']} Aligned 4"]
+                      if decoy == 'rgstore' else []),
+                    f"        {age} = OpISub %uint {scr['fr']} {got2}",
+                    f"        {is0} = OpIEqual %bool {age} {U(0)}",
+                    f"        {is1} = OpIEqual %bool {age} {U(1)}",
+                ]
+                col = []
+                for ch in range(3):
+                    h0, h1, h2, h3, h4, h5 = (mod.new_id() for _ in range(6))
+                    ins += [
+                        f"        {h0} = OpSelect %float {is1} "
+                        f"{c_green[ch]} {c_magenta[ch]}",
+                        f"        {h1} = OpSelect %float {is0} "
+                        f"{c_cyan[ch]} {h0}",
+                        # A word IS there but it is not mine: the two stages
+                        # disagree about which pixel this is. That is the one
+                        # answer this rung was built to be able to give.
+                        f"        {h2} = OpSelect %float {present} "
+                        f"{c_red[ch]} {one}",
+                        f"        {h3} = OpSelect %float {seen} {h1} {h2}",
+                        f"        {h4} = OpSelect %float {scr['armed']} "
+                        f"{h3} {c_amber[ch]}",
+                        f"        {h5} = OpSelect %float {ok} {h4} "
+                        f"{c_blue[ch]}",
+                    ]
+                    col.append(h5)
+                newc = []
+                for ch in range(3):
+                    n = mod.new_id()
+                    ins.append(f"        {n} = OpFMul %float "
+                               f"{w['comps'][ch]} {col[ch]}")
+                    newc.append(n)
+                nt = mod.new_id()
+                ins.append(f"        {nt} = OpCompositeConstruct %v4float "
+                           f"{newc[0]} {newc[1]} {newc[2]} {w['comps'][3]}")
+                edits.append((w['line'] - 1, ins))
+                mod.lines[w['line']] = re.sub(
+                    r'(OpImageWrite %\w+ %\w+ )%\w+\s*$',
+                    r'\g<1>' + nt, mod.lines[w['line']])
+                done.append(w['line'] + 1)
+                continue
+            else:
+                # wprobe2: the identity word carries NO frame, so `seen` is a
+                # statement about this buffer and this index alone. The age
+                # comes out of the SECOND word, and only decides the hue.
+                idx2, ch2, got2, age, sxs = (mod.new_id() for _ in range(5))
+                is0, is1 = mod.new_id(), mod.new_id()
+                ins += [
+                    # --decoy stamped folds the frame back INTO the identity
+                    # word, which is exactly the coupling this rung exists to
+                    # remove: it would flicker for the same reason wprobe did.
+                    *([f"        {sxs} = OpBitwiseXor %uint {sx} {scr['fr']}"]
+                      if decoy == 'stamped' else []),
+                    f"        {seen} = OpIEqual %bool {got} "
+                    f"{sxs if decoy == 'stamped' else sx}",
+                    f"        OpStore {chain} "
+                    f"{sxs if decoy == 'stamped' else sx} Aligned 4",
+                    f"        {idx2} = OpIAdd %uint {idx} {U(1)}",
+                    f"        {ch2} = OpInBoundsAccessChain {ptr_uint} "
+                    f"{scr['ptr']} {U(0)} {idx2}",
+                    f"        {got2} = OpLoad %uint {ch2} Aligned 4",
+                    f"        OpStore {ch2} {scr['fr']} Aligned 4",
+                    f"        {age} = OpISub %uint {scr['fr']} {got2}",
+                    f"        {is0} = OpIEqual %bool {age} {U(0)}",
+                    f"        {is1} = OpIEqual %bool {age} {U(1)}",
+                ]
+            col = []
+            for ch in range(3):
+                a1, a2, a3 = mod.new_id(), mod.new_id(), mod.new_id()
+                if mode == 'wprobe':
+                    ins.append(f"        {a1} = OpSelect %float {seen} "
+                               f"{c_green[ch]} {c_blue[ch]}")
+                else:
+                    h0, h1 = mod.new_id(), mod.new_id()
+                    ins.append(f"        {h0} = OpSelect %float {is1} "
+                               f"{c_green[ch]} {c_magenta[ch]}")
+                    ins.append(f"        {h1} = OpSelect %float {is0} "
+                               f"{c_cyan[ch]} {h0}")
+                    ins.append(f"        {a1} = OpSelect %float {seen} "
+                               f"{h1} {c_blue[ch]}")
+                ins.append(f"        {a2} = OpSelect %float {scr['armed']} "
+                           f"{a1} {c_amber[ch]}")
+                ins.append(f"        {a3} = OpSelect %float {ok} {a2} "
+                           f"{c_red[ch]}")
+                col.append(a3)
         g1 = mod.new_id()
         ins.append(f"        {g1} = OpIEqual %bool {cls} {U(1)}")
         newc = []
@@ -461,10 +843,17 @@ def build(mod, cfg, writes, mode, knobs, decoy):
     if not done:
         die(f"{mod.name}: no radiance image write reachable for the probe")
     rep = {'mode': mode, 'writes': done, 'skipped': skipped,
+           'paints': bool(mode != 'xprobe' or rgen),
            'refetched': refetched, 'class_anchor': dom_id,
-           'slot_members': SLOT_MEMBERS, 'decoy': decoy,
+           'slot_members': n_slot, 'decoy': decoy,
            'sentinel': '%016x' % ((SENT_HI << 32) | SENT_LO),
            'magic': '%08x' % MAGIC}
+    if mode in WORDS_PER_PIXEL:
+        rep.update(pitch=PIX_PITCH, hash=PIX_HASH, hdr=SCRATCH_HDR,
+                   sig=SCRATCH_SIG, park=PARK_WORD,
+                   words_per_pixel=WORDS_PER_PIXEL[mode],
+                   slot_words_read=[W_MAGIC, W_FRAME, W_SCR_LO, W_SCR_HI,
+                                    W_SCR_WORDS])
     if mode == 'rq':
         rep.update(flags=knobs['flags'] if decoy != 'noflags' else 4,
                    mask=knobs['mask'], tmin=knobs['tmin'], tmax=knobs['tmax'],
@@ -547,7 +936,12 @@ def process(path, outdir, mode, knobs, decoy, do_rt=True):
     if problems:
         rep['module_warnings'] = problems
     h = mod.ident.split('.')[0]
-    if mode == 'ctl' or h in DECLINE_ALL or (mode == 'rq' and h in DECLINE_RQ):
+    rgen = is_raygen(mod)
+    if rgen and mode != 'xprobe':
+        die(f"{mod.name}: a RAYGEN was handed to --mode {mode}; only xprobe "
+            f"patches the raygen side (handoff/116 sec 11)")
+    if mode == 'ctl' or (not rgen and h in DECLINE_ALL) \
+            or (mode == 'rq' and h in DECLINE_RQ):
         rep['bda'] = {'mode': mode, 'control': mode == 'ctl',
                       'declined': mode != 'ctl',
                       'writes': [], 'skipped': [], 'refetched': [],
@@ -555,8 +949,11 @@ def process(path, outdir, mode, knobs, decoy, do_rt=True):
         return CS._emit(mod, outdir, target_env, rep)
     cfg = CFG(mod)
     writes = find_image_writes(mod)
+    if rgen:
+        writes = raygen_radiance_writes(mod, writes)
     consts, edits, caps, exts, marker, decos, r = build(
-        mod, cfg, writes, mode, knobs, decoy)
+        mod, cfg, writes, mode, knobs, decoy, rgen=rgen)
+    r['stage'] = 'raygen' if rgen else 'compute'
     apply_edits(mod, consts, edits)
     insert_sections(mod, caps, exts, marker, decos)
     r['emitted'] = 1
@@ -580,13 +977,18 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('modules', nargs='+')
     ap.add_argument('--outdir', required=True)
-    ap.add_argument('--mode', choices=('ctl', 'probe', 'rq'), default='probe')
+    ap.add_argument('--mode',
+                    choices=('ctl', 'probe', 'rq', 'wprobe', 'wprobe2',
+                             'xprobe'),
+                    default='probe')
     ap.add_argument('--flags', type=int, default=DEFAULTS['flags'])
     ap.add_argument('--mask', type=int, default=DEFAULTS['mask'])
     ap.add_argument('--tmin', type=float, default=DEFAULTS['tmin'])
     ap.add_argument('--tmax', type=float, default=DEFAULTS['tmax'])
     ap.add_argument('--decoy', default='',
-                    choices=('', 'nomarker', 'badid', 'scan', 'world', 'noflags'),
+                    choices=('', 'nomarker', 'badid', 'scan', 'world',
+                             'noflags', 'noguard', 'sameframe', 'stamped',
+                             'paints', 'rgstore', 'xoffset'),
                     help='deliberately wrong builds, for verifier non-vacuity')
     ap.add_argument('--no-roundtrip-check', action='store_true')
     a = ap.parse_args()

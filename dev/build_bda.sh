@@ -8,10 +8,10 @@
 # pre-registered interpretation table) BEFORE looking at a frame.
 #
 #   ./dev/build_bda.sh              # build + 10 gates (nothing installed)
-#   ./dev/build_bda.sh --install    # ALSO park the three rungs
+#   ./dev/build_bda.sh --install    # ALSO park the six rungs
 #   ./dev/build_bda.sh --base NAME  # build on a different parked rung
 #
-# THREE RUNGS on the STANDING selection's own bytes.
+# SIX RUNGS on the STANDING selection's own bytes.
 #
 #   bda-ctl        The patcher emits NOTHING and rewrites nothing, so the
 #                  output is BYTE-IDENTICAL to the base (gate 5, resting on
@@ -20,6 +20,13 @@
 #   bda-probe      STAGE 2b. Every skin (class-1) pixel is painted GREEN if
 #                  word 0 of the layer's slot reads back as the magic and RED
 #                  if it does not. Nothing else in the frame changes.
+#   bda-wprobe     STAGE 3a (handoff/116). The WIDENED slot: words 8/9/10 point
+#                  at a 128 MiB buffer THE SHADER WRITES. Each skin pixel reads
+#                  the word it owns, compares it with what the PREVIOUS frame
+#                  would have left there, and writes this frame's. GREEN = the
+#                  word survived a frame in a buffer no descriptor names, BLUE
+#                  = it did not, AMBER = the layer allocated no scratch, RED =
+#                  the magic is wrong.
 #   bda-rq-probe   STAGE 2c. The same, plus ONE inline ray query per painted
 #                  write from the resolver's own shading point converted to
 #                  TLAS space, straight up, tmin 5 cm, tmax 3 m, flags 517.
@@ -68,9 +75,15 @@ mapfile -t TARGETS < <(cd "$SRC" && ls *.dxil.spv | sed 's/\..*//')
 
 echo "=== 0. base: $BASE ($(head -1 "$SRC/MANIFEST.txt" | cut -c1-90))"
 
-rm -rf "$WORK"; mkdir -p "$WORK/asm" "$WORK/rt"
+mapfile -t RGTARGETS < <(cd "$SRC" && ls *.rgs_*.spv | sed 's/\.spv$//')
+(( ${#RGTARGETS[@]} == 16 )) || { echo "expected 16 raygens" >&2; exit 1; }
+
+rm -rf "$WORK"; mkdir -p "$WORK/asm" "$WORK/rgasm" "$WORK/rt"
 for h in "${TARGETS[@]}"; do
     spirv-dis "$SRC/$h.dxil.spv" -o "$WORK/asm/$h.spvasm"
+done
+for g in "${RGTARGETS[@]}"; do
+    spirv-dis "$SRC/$g.spv" -o "$WORK/rgasm/$g.spvasm"
 done
 
 # --- 1. the pipeline is byte-neutral on the compute resolvers ---------------
@@ -84,6 +97,14 @@ for h in "${TARGETS[@]}"; do
         || { echo "  !! $h does not round-trip -- no control built on it is meaningful" >&2; exit 1; }
 done
 echo "  77 of 77 compute resolvers round-trip byte-identically"
+# The RAYGENS get the same treatment, and for the first time it matters: from
+# `bda-xprobe` on, they are patched rather than copied (handoff/116 sec 11).
+for g in "${RGTARGETS[@]}"; do
+    spirv-as --target-env spv1.4 "$WORK/rgasm/$g.spvasm" -o "$WORK/rt/$g.spv"
+    cmp -s "$SRC/$g.spv" "$WORK/rt/$g.spv" \
+        || { echo "  !! raygen $g does not round-trip" >&2; exit 1; }
+done
+echo "  16 of 16 raygens round-trip byte-identically (spv1.4)"
 rm -rf "$WORK/rt"
 
 jobs="${CALLISTO_JOBS:-$(nproc 2>/dev/null || echo 4)}"
@@ -102,16 +123,39 @@ patch_set () {   # $1 = outdir, $2.. = patcher args
     [[ "$n" == 77 ]] || { echo "  !! $out produced $n modules, want 77" >&2; exit 1; }
 }
 
+patch_rg_set () {   # $1 = outdir, $2.. = patcher args. The RAYGEN half.
+    local out="$1"; shift
+    mkdir -p "$out"
+    printf '%s\n' "$@" > "$WORK/.rgargs"
+    printf '%s\0' "${RGTARGETS[@]}" | CB_O="$out" CB_P="$PY" CB_W="$WORK" \
+        CB_A="$WORK/.rgargs" xargs -0 -P "$jobs" -n1 bash -c '
+            mapfile -t A < "$CB_A"
+            python3 "$CB_P" "$CB_W/rgasm/$0.spvasm" "${A[@]}" --outdir "$CB_O" \
+                > "$CB_O/$0.bda.report.json"'
+    rm -f "$WORK/.rgargs"
+    local n; n=$(ls "$out"/*.rgs_*.spv 2>/dev/null | wc -l)
+    [[ "$n" == 16 ]] || { echo "  !! $out produced $n raygens, want 16" >&2; exit 1; }
+}
+
 assemble () {   # $1 = dest, $2 = patched-compute dir, $3 = 1 if all 77 must be
                 #      byte-identical to the base (the ctl rung)
-    local dest="$1" src="$2" identical="${3:-0}" want_diff="${4:-0}"
+    local dest="$1" src="$2" identical="${3:-0}" want_diff="${4:-0}" rgdiff="${5:-0}"
     rm -rf "$dest"; mkdir -p "$dest"
-    cp -pf "$src"/*.spv "$src"/*.json "$dest/"
+    cp -pf "$src"/*.dxil.spv "$dest/"; cp -pf "$src"/*.json "$dest/"
     cp -pf "$SRC"/*.rgs_reference_main.spv "$SRC"/*.rgs_restirgi_*.spv "$dest/"
-    for f in "$SRC"/*.rgs_reference_main.spv "$SRC"/*.rgs_restirgi_*.spv; do
-        cmp -s "$f" "$dest/$(basename "$f")" \
-            || { echo "  !! verbatim copy differs: $(basename "$f")" >&2; exit 1; }
-    done
+    if (( rgdiff )); then
+        cp -pf "$src"/*.rgs_*.spv "$dest/"
+        local g=0
+        for f in "$SRC"/*.rgs_*.spv; do
+            cmp -s "$f" "$dest/$(basename "$f")" || g=$((g+1))
+        done
+        [[ "$g" == "$rgdiff" ]] || { echo "  !! $dest differs on $g of 16 raygens, want $rgdiff" >&2; exit 1; }
+    else
+        for f in "$SRC"/*.rgs_reference_main.spv "$SRC"/*.rgs_restirgi_*.spv; do
+            cmp -s "$f" "$dest/$(basename "$f")" \
+                || { echo "  !! verbatim copy differs: $(basename "$f")" >&2; exit 1; }
+        done
+    fi
     local d=0
     for h in "${TARGETS[@]}"; do
         cmp -s "$SRC/$h.dxil.spv" "$dest/$h.dxil.spv" || d=$((d+1))
@@ -130,20 +174,32 @@ assemble () {   # $1 = dest, $2 = patched-compute dir, $3 = 1 if all 77 must be
 }
 
 # --- 2. patch + assemble ----------------------------------------------------
-echo "=== 2. patch + assemble the three rungs"
-ORDER=(bda-ctl bda-probe bda-rq-probe)
+echo "=== 2. patch + assemble the six rungs"
+ORDER=(bda-ctl bda-probe bda-wprobe bda-wprobe2 bda-xprobe bda-rq-probe)
 declare -A RUNG_ARGS=(
     [bda-ctl]="--mode ctl"
     [bda-probe]="--mode probe"
+    [bda-wprobe]="--mode wprobe"
+    [bda-wprobe2]="--mode wprobe2"
+    [bda-xprobe]="--mode xprobe"
     [bda-rq-probe]="--mode rq"
 )
 declare -A RUNG_IDENT=([bda-ctl]=1)
-declare -A RUNG_DIFF=([bda-probe]=76 [bda-rq-probe]=75)
+declare -A RUNG_DIFF=([bda-probe]=76 [bda-wprobe]=76 [bda-wprobe2]=76
+                      [bda-xprobe]=76 [bda-rq-probe]=75)
+# The ONLY rung that touches the raygens. Every other one must ship them
+# byte-verbatim, and gates 4 and 5 assert exactly that.
+declare -A RUNG_RG=([bda-xprobe]=16)
 for r in "${ORDER[@]}"; do
     # shellcheck disable=SC2086
     patch_set "$WORK/p.$r" ${RUNG_ARGS[$r]}
-    assemble "$MOD_DIR/swaps.$r" "$WORK/p.$r" "${RUNG_IDENT[$r]:-0}" "${RUNG_DIFF[$r]:-0}"
-    echo "  swaps.$r: 93 modules, $( (( ${RUNG_IDENT[$r]:-0} )) && echo '77 identity' || echo "${RUNG_DIFF[$r]} patched"), spirv-val (vulkan1.4) clean"
+    if (( ${RUNG_RG[$r]:-0} )); then
+        # shellcheck disable=SC2086
+        patch_rg_set "$WORK/p.$r" ${RUNG_ARGS[$r]}
+    fi
+    assemble "$MOD_DIR/swaps.$r" "$WORK/p.$r" "${RUNG_IDENT[$r]:-0}" \
+             "${RUNG_DIFF[$r]:-0}" "${RUNG_RG[$r]:-0}"
+    echo "  swaps.$r: 93 modules, $( (( ${RUNG_IDENT[$r]:-0} )) && echo '77 identity' || echo "${RUNG_DIFF[$r]} compute patched$( (( ${RUNG_RG[$r]:-0} )) && echo " + ${RUNG_RG[$r]} raygens" )"), spirv-val (vulkan1.4) clean"
 done
 d=0
 for h in "${TARGETS[@]}"; do
@@ -165,10 +221,20 @@ mod_dir, rungs = sys.argv[1], sys.argv[2:]
 WANT = {
     'bda-ctl':      dict(ctl=True),
     'bda-probe':    dict(mode='probe', painted=76, writes=151, declined=1,
-                         refetched=0),
+                         refetched=0, slot=8),
+    'bda-wprobe':   dict(mode='wprobe', painted=76, writes=151, declined=1,
+                         refetched=0, slot=12, pitch=4096, hash=2654435761,
+                         hdr=16, sig=3237998081, park=32, wpp=1),
+    'bda-wprobe2':  dict(mode='wprobe2', painted=76, writes=151, declined=1,
+                         refetched=0, slot=12, pitch=4096, hash=2654435761,
+                         hdr=16, sig=3237998081, park=32, wpp=2),
+    'bda-xprobe':   dict(mode='xprobe', painted=76, writes=151, declined=1,
+                         refetched=0, slot=12, pitch=4096, hash=2654435761,
+                         hdr=16, sig=3237998081, park=32, wpp=2,
+                         rg_modules=16, rg_writes=53),
     'bda-rq-probe': dict(mode='rq', painted=75, writes=150, declined=2,
                          refetched=30, flags=517, mask=255, tmin=0.05, tmax=3.0,
-                         space='camera_relative', campos_member=0),
+                         space='camera_relative', campos_member=0, slot=8),
 }
 SENT, MAGIC = 'ca1157000bda0001', 'ca115701'
 bad = []
@@ -176,11 +242,28 @@ for r in rungs:
     d = os.path.join(mod_dir, 'swaps.' + r)
     want = WANT[r]
     mods = painted = writes = dec = refet = skip = 0
+    rg_mods = rg_writes = 0
     ids = set()
     for f in sorted(glob.glob(os.path.join(d, '*.bda.report.json'))):
         rep = json.load(open(f))[0]
         q = rep['bda']
+        if q.get('stage') == 'raygen':
+            # The READER half. It must paint and must NOT be a writer, and the
+            # two halves are counted apart so neither can stand in for the other.
+            rg_mods += 1
+            rg_writes += len(q['writes'])
+            if not q.get('paints'):
+                bad.append((r, rep['module'], 'a raygen that paints nothing'))
+            if q['slot_members'] != want['slot']:
+                bad.append((r, rep['module'], 'raygen slot is not %d words'
+                            % want['slot']))
+            if rep.get('spirv_val') != 'clean':
+                bad.append((r, rep['module'], 'raygen spirv-val not clean'))
+            continue
         mods += 1
+        if want.get('mode') == 'xprobe' and q.get('paints'):
+            bad.append((r, rep['module'],
+                        'the xprobe WRITER paints; it must change no pixel'))
         if rep.get('spirv_val') != 'clean':
             bad.append((r, rep['module'], 'spirv-val not clean'))
         if q.get('decoy'):
@@ -200,8 +283,20 @@ for r in rungs:
             bad.append((r, rep['module'], 'mode %s' % q['mode']))
         if q['sentinel'] != SENT or q['magic'] != MAGIC:
             bad.append((r, rep['module'], 'sentinel/magic is not this build'))
-        if q['slot_members'] != 8:
-            bad.append((r, rep['module'], 'slot is not 8 words'))
+        if q['slot_members'] != want['slot']:
+            bad.append((r, rep['module'],
+                        'slot is not %d words' % want['slot']))
+        if want['mode'].startswith('wprobe'):
+            if q.get('words_per_pixel') != want['wpp']:
+                bad.append((r, rep['module'], 'words_per_pixel %s != %s'
+                            % (q.get('words_per_pixel'), want['wpp'])))
+            for k in ('pitch', 'hash', 'hdr', 'sig', 'park'):
+                if q[k] != want[k]:
+                    bad.append((r, rep['module'],
+                                '%s %s != %s' % (k, q[k], want[k])))
+            if q['slot_words_read'] != [0, 6, 8, 9, 10]:
+                bad.append((r, rep['module'],
+                            'reads slot words %s' % (q['slot_words_read'],)))
         if q['lo_id'] is None or q['hi_id'] is None or q['lo_id'] == q['hi_id']:
             bad.append((r, rep['module'], 'the marker ids are not a distinct pair'))
         if q['sentinel_pairs'] != 1:
@@ -228,9 +323,18 @@ for r in rungs:
             bad.append((r, '-', '%s %d != %d' % (k, got, want[k])))
     if skip:
         bad.append((r, '-', '%d writes skipped; the census expects none' % skip))
+    if 'rg_modules' in want:
+        if (rg_mods, rg_writes) != (want['rg_modules'], want['rg_writes']):
+            bad.append((r, '-', 'raygens %d/%d writes, want %d/%d'
+                        % (rg_mods, rg_writes, want['rg_modules'],
+                           want['rg_writes'])))
+    elif rg_mods:
+        bad.append((r, '-', '%d raygen reports in a compute-only rung' % rg_mods))
     print('  %-14s %d painted modules, %d declined by name, %d painted writes '
-          '(%d site-local refetches), %d distinct marker id pairs'
-          % (r, painted, dec, writes, refet, len(ids)))
+          '(%d site-local refetches), %d distinct marker id pairs%s'
+          % (r, painted, dec, writes, refet, len(ids),
+             '' if not rg_mods else
+             ', PLUS %d raygens reading %d sites' % (rg_mods, rg_writes)))
 if bad:
     for b in bad[:12]:
         sys.stderr.write('    %s :: %s :: %s\n' % b)
@@ -245,6 +349,8 @@ mod_dir, src, rungs = sys.argv[1], sys.argv[2], sys.argv[3:]
 sys.path.insert(0, os.path.join(mod_dir, 'dev'))
 from verify_bda import binary_marker
 WANT_RQ = {'bda-rq-probe': True}
+WRITERS = ('bda-wprobe', 'bda-wprobe2', 'bda-xprobe')
+RG_RUNGS = ('bda-xprobe',)
 bad = []
 def dis(p):
     return subprocess.run(['spirv-dis', '--no-color', p],
@@ -277,9 +383,37 @@ for r in rungs:
         if (m['n_lo'], m['n_hi']) != (1, 1):
             bad.append('%s/%s: %d/%d sentinel constants, want 1/1'
                        % (r, h, m['n_lo'], m['n_hi']))
-        if n_b != 1:
-            bad.append('%s/%s: %d ADDED PhysicalStorageBuffer bitcasts, want 1'
-                       % (r, h, n_b))
+        want_b = 2 if r in WRITERS else 1
+        if n_b != want_b:
+            bad.append('%s/%s: %d ADDED PhysicalStorageBuffer bitcasts, want %d'
+                       % (r, h, n_b, want_b))
+        n_ra = len(re.findall(r'OpTypeRuntimeArray %uint\b', a)) \
+             - len(re.findall(r'OpTypeRuntimeArray %uint\b', b))
+        n_sw = len(re.findall(r'OpStore %\w+ %\w+ Aligned 4', a)) \
+             - len(re.findall(r'OpStore %\w+ %\w+ Aligned 4', b))
+        if r == 'bda-xprobe':
+            # The exact form of "the writer changes no pixel". Texts cannot be
+            # compared line for line -- spirv-as renumbers every id -- so the
+            # claim is made on COUNTS of the only instructions a paint can be
+            # made of. This half emits no float arithmetic and no float select
+            # whatsoever: its whole output is two stores and the integers that
+            # address them.
+            for op in ('OpImageWrite', 'OpFMul %float', 'OpSelect %float',
+                       'OpCompositeConstruct %v4float'):
+                if a.count(op) != b.count(op):
+                    bad.append('%s/%s: the xprobe WRITER changed the count of '
+                               '`%s` (%d -> %d) -- it must change no pixel'
+                               % (r, h, op, b.count(op), a.count(op)))
+        if r in WRITERS:
+            if n_ra != 1:
+                bad.append('%s/%s: %d ADDED uint runtime arrays, want 1'
+                           % (r, h, n_ra))
+            if n_sw <= 0:
+                bad.append('%s/%s: the WRITE rung adds no aligned store'
+                           % (r, h))
+        elif n_ra or n_sw:
+            bad.append('%s/%s: a READ-ONLY rung added %d runtime arrays and '
+                       '%d aligned stores' % (r, h, n_ra, n_sw))
         if rq:
             if n_c != 1:
                 bad.append('%s/%s: %d AS conversions, want 1' % (r, h, n_c))
@@ -299,13 +433,44 @@ for r in rungs:
           '%d Initialize, %d Proceed, %d committed-type getters, %d AS conversions'
           % (r, tot['marker'], tot['sent'], tot['bitcast'], tot['init'],
              tot['proceed'], tot['tget'], tot['conv']))
-# The raygen half of every rung must be untouched: Stage 2b is a COMPUTE
-# feature and the raygens already have the RTAS heap.
+# The raygen half of every rung but ONE must be untouched: Stage 2b and 3a are
+# COMPUTE features and the raygens already have the RTAS heap. `bda-xprobe` is
+# the exception and gets the opposite assertion -- all 16, each reading and
+# NONE of them storing.
 for r in rungs:
+    n_rg = 0
     for f in sorted(glob.glob(os.path.join(mod_dir, 'swaps.' + r, '*.rgs_*.spv'))):
-        if binary_marker(f)['markers']:
-            bad.append('%s: a RAYGEN carries the marker: %s'
-                       % (r, os.path.basename(f)))
+        m = binary_marker(f)
+        if r not in RG_RUNGS:
+            if m['markers']:
+                bad.append('%s: a RAYGEN carries the marker: %s'
+                           % (r, os.path.basename(f)))
+            continue
+        g = os.path.basename(f).split('.')[0]
+        a = dis(f); b = dis(os.path.join(src, os.path.basename(f)))
+        if len(m['markers']) != 1 or (m['n_lo'], m['n_hi']) != (1, 1):
+            bad.append('%s/%s: raygen has %d markers and %d/%d sentinels'
+                       % (r, g, len(m['markers']), m['n_lo'], m['n_hi']))
+        n_b = len(re.findall(r'OpBitcast %_ptr_PhysicalStorageBuffer_', a)) \
+            - len(re.findall(r'OpBitcast %_ptr_PhysicalStorageBuffer_', b))
+        if n_b != 2:
+            bad.append('%s/%s: %d ADDED PSB bitcasts in a raygen, want 2'
+                       % (r, g, n_b))
+        n_ra = len(re.findall(r'OpTypeRuntimeArray %uint\b', a)) \
+             - len(re.findall(r'OpTypeRuntimeArray %uint\b', b))
+        if n_ra != 1:
+            bad.append('%s/%s: %d ADDED uint runtime arrays in a raygen, want 1'
+                       % (r, g, n_ra))
+        n_sw = len(re.findall(r'OpStore %\w+ %\w+ Aligned 4', a)) \
+             - len(re.findall(r'OpStore %\w+ %\w+ Aligned 4', b))
+        if n_sw != 0:
+            bad.append('%s/%s: the READER added %d aligned stores -- it must '
+                       'only read' % (r, g, n_sw))
+        if a.count('OpTraceRayKHR') != b.count('OpTraceRayKHR'):
+            bad.append('%s/%s: raygen OpTraceRayKHR count changed' % (r, g))
+        n_rg += 1
+    if r in RG_RUNGS and n_rg != 16:
+        bad.append('%s: %d raygens carry the reader, want 16' % (r, n_rg))
 if bad:
     for b in bad[:12]:
         sys.stderr.write('    ' + b + '\n')
@@ -320,18 +485,26 @@ for f in "$SRC"/*.spv; do
 done
 [[ "$d" == 0 ]] || { echo "  !! bda-ctl differs from the base on $d files" >&2; exit 1; }
 echo "  bda-ctl: 93 of 93 byte-identical to $BASE"
-for pair in "bda-probe 76" "bda-rq-probe 75"; do
-    set -- $pair; d=0
-    for f in "$SRC"/*.spv; do
-        cmp -s "$f" "$MOD_DIR/swaps.$1/$(basename "$f")" || d=$((d+1))
+for pair in "bda-probe 76 0" "bda-wprobe 76 0" "bda-wprobe2 76 0" \
+            "bda-xprobe 76 16" "bda-rq-probe 75 0"; do
+    set -- $pair; dc=0; dg=0
+    for f in "$SRC"/*.dxil.spv; do
+        cmp -s "$f" "$MOD_DIR/swaps.$1/$(basename "$f")" || dc=$((dc+1))
     done
-    [[ "$d" == "$2" ]] || { echo "  !! $1 differs from the base on $d of 93 files, want $2" >&2; exit 1; }
-    echo "  $1: $2 of 93 differ (all compute; the 16 raygens are verbatim)"
+    for f in "$SRC"/*.rgs_*.spv; do
+        cmp -s "$f" "$MOD_DIR/swaps.$1/$(basename "$f")" || dg=$((dg+1))
+    done
+    [[ "$dc" == "$2" && "$dg" == "$3" ]] \
+        || { echo "  !! $1 differs on $dc compute + $dg raygens, want $2 + $3" >&2; exit 1; }
+    echo "  $1: $2 of 77 compute and $3 of 16 raygens differ"
 done
 
 # --- 6. the verifier, on the shipped bytes ---------------------------------
 echo "=== 6. verify_bda.py on the shipped .spv"
 python3 "$VERIFY" "$MOD_DIR/swaps.bda-probe"    --mode probe
+python3 "$VERIFY" "$MOD_DIR/swaps.bda-wprobe"   --mode wprobe
+python3 "$VERIFY" "$MOD_DIR/swaps.bda-wprobe2"  --mode wprobe2
+python3 "$VERIFY" "$MOD_DIR/swaps.bda-xprobe"   --mode xprobe
 python3 "$VERIFY" "$MOD_DIR/swaps.bda-rq-probe" --mode rq
 python3 "$VERIFY" --negative "$SRC"
 python3 "$VERIFY" --negative "$MOD_DIR/swaps.bda-ctl"
@@ -350,6 +523,18 @@ for dec in nomarker badid scan world noflags; do
     patch_set "$WORK/decoy/$dec" --mode rq --decoy "$dec"
     cp -pf "$SRC"/*.rgs_*.spv "$WORK/decoy/$dec/"
 done
+for dec in noguard sameframe; do
+    patch_set "$WORK/decoy/$dec" --mode wprobe --decoy "$dec"
+    cp -pf "$SRC"/*.rgs_*.spv "$WORK/decoy/$dec/"
+done
+for dec in noguard stamped; do
+    patch_set "$WORK/decoy/w2-$dec" --mode wprobe2 --decoy "$dec"
+    cp -pf "$SRC"/*.rgs_*.spv "$WORK/decoy/w2-$dec/"
+done
+for dec in paints rgstore xoffset noguard; do
+    patch_set    "$WORK/decoy/x-$dec" --mode xprobe --decoy "$dec"
+    patch_rg_set "$WORK/decoy/x-$dec" --mode xprobe --decoy "$dec"
+done
 reject "--decoy nomarker (the pointer, with NO marker to authorise the fixup)" \
        "$WORK/decoy/nomarker" --mode rq
 reject "--decoy badid (a well-formed marker naming ids that do not exist)" \
@@ -361,6 +546,49 @@ reject "--decoy world (raw world P as the ray origin -- 99 sec 10.6's two-spaces
        "$WORK/decoy/world" --mode rq
 reject "--decoy noflags (flags 4: no Opaque, no SkipAABBs)" \
        "$WORK/decoy/noflags" --mode rq
+reject "--decoy noguard (the scratch dereferenced with no armed select -- a \
+NULL pointer on every pixel the moment the layer allocates no scratch)" \
+       "$WORK/decoy/noguard" --mode wprobe
+reject "--decoy sameframe (the expected word stamped with THIS frame, so a \
+store made microseconds earlier reads back as a survival and the rung paints \
+green having proved nothing)" \
+       "$WORK/decoy/sameframe" --mode wprobe
+reject "--decoy noguard, wprobe2 (the same null dereference in the two-word rung)" \
+       "$WORK/decoy/w2-noguard" --mode wprobe2
+reject "--decoy stamped (the IDENTITY word stamped with the frame, which is \
+exactly the coupling this rung exists to remove)" \
+       "$WORK/decoy/w2-stamped" --mode wprobe2
+reject "bda-wprobe2 read as the one-word scratch rung" \
+       "$MOD_DIR/swaps.bda-wprobe2" --mode wprobe
+reject "bda-wprobe read as the two-word scratch rung" \
+       "$MOD_DIR/swaps.bda-wprobe" --mode wprobe2
+reject "bda-wprobe2 --negative (a marker-carrying rung read as marker-free)" \
+       "$MOD_DIR/swaps.bda-wprobe2" --negative
+reject "--decoy paints (the compute WRITER tints the frame too, so a green \
+screen could be the resolver's doing and not the raygen's)" \
+       "$WORK/decoy/x-paints" --mode xprobe
+reject "--decoy rgstore (the raygen READER writes the age word, so what it \
+reads back next frame is its own handwriting)" \
+       "$WORK/decoy/x-rgstore" --mode xprobe
+reject "--decoy xoffset (the reader indexes the pixel NEXT DOOR -- exactly \
+the silent mis-registration this rung exists to detect)" \
+       "$WORK/decoy/x-xoffset" --mode xprobe
+reject "--decoy noguard, xprobe (the null dereference, both stages)" \
+       "$WORK/decoy/x-noguard" --mode xprobe
+reject "bda-xprobe read as the two-word compute rung" \
+       "$MOD_DIR/swaps.bda-xprobe" --mode wprobe2
+reject "bda-wprobe2 read as the cross-stage rung" \
+       "$MOD_DIR/swaps.bda-wprobe2" --mode xprobe
+reject "bda-xprobe --negative (a marker-carrying rung read as marker-free)" \
+       "$MOD_DIR/swaps.bda-xprobe" --negative
+reject "bda-wprobe read as the magic-only probe" \
+       "$MOD_DIR/swaps.bda-wprobe" --mode probe
+reject "bda-probe read as the scratch rung" \
+       "$MOD_DIR/swaps.bda-probe" --mode wprobe
+reject "bda-rq-probe read as the scratch rung" \
+       "$MOD_DIR/swaps.bda-rq-probe" --mode wprobe
+reject "bda-wprobe --negative (a marker-carrying rung read as marker-free)" \
+       "$MOD_DIR/swaps.bda-wprobe" --negative
 reject "the unpatched BASE read as a rung" "$SRC" --mode probe
 reject "the bda-ctl CONTROL read as a rung" "$MOD_DIR/swaps.bda-ctl" --mode probe
 reject "bda-probe read as the ray-query rung" \
@@ -496,6 +724,25 @@ for r in "${ORDER[@]}"; do
       echo "# it cannot fix up, and falls through to the NEXT overlay (98 sec 7.2)."
       case "$r" in
         *-ctl)      echo "# THIS RUNG IS THE BASE, BYTE FOR BYTE. Control for the selector." ;;
+        *-xprobe)   echo "# STAGE 3b (handoff/116 sec 11): the FIRST rung that patches the" \
+                         "RAYGENS. Compute resolvers WRITE each skin pixel's identity and" \
+                         "the frame into the scratch and paint nothing; all 16 raygens READ" \
+                         "at their own write coordinate and store nothing. Tint: GREEN = the" \
+                         "word this pixel's resolver left one frame ago, CYAN = same frame," \
+                         "MAGENTA = older, RED = a word from a DIFFERENT pixel (the grids" \
+                         "disagree), untouched = no word there, AMBER = no scratch," \
+                         "BLUE = no fixup." ;;
+        *-wprobe2)  echo "# STAGE 3b (handoff/116 sec 8): as -wprobe, but TWO words per" \
+                         "pixel -- an identity word with NO frame in it, and the frame it" \
+                         "was last written. BLUE = the word is not this pixel's (no" \
+                         "persistence, or the index is wrong), GREEN = one frame old," \
+                         "CYAN = written again this same frame, MAGENTA = two or more" \
+                         "frames old. AMBER = no scratch, RED = no fixup." ;;
+        *-wprobe)   echo "# STAGE 3a (handoff/116): slot words 8/9/10 point at a 128 MiB" \
+                         "buffer THE SHADER WRITES. Each skin pixel reads its own word," \
+                         "compares it with the PREVIOUS frame's stamp and writes this" \
+                         "frame's. GREEN = it survived a frame, BLUE = it did not," \
+                         "AMBER = no scratch (CALLISTO_BDA_SCRATCH_MB=0), RED = no fixup." ;;
         *-rq-probe) echo "# STAGE 2c: + one inline ray query per painted write, from P - C" \
                          "(99 sec 10.6), straight up, flags 517, tmin 5cm, tmax 3m." \
                          "Skin: BLUE = committed hit, AMBER = miss, RED = magic wrong." ;;
@@ -505,7 +752,7 @@ for r in "${ORDER[@]}"; do
       echo "# A/B against $BASE."
     } >> "$dest/MANIFEST.txt"
 done
-echo "  3 MANIFESTs written, provenance (src_ser/ser_sha/ptq_sha) carried verbatim"
+echo "  ${#ORDER[@]} MANIFESTs written, provenance (src_ser/ser_sha/ptq_sha) carried verbatim"
 
 echo
 echo "=== shas (content = cat of all 93 .spv in name order)"

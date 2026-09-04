@@ -42,7 +42,7 @@
 set -uo pipefail
 
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUNGS=(bda-ctl bda-probe bda-rq-probe)
+RUNGS=(bda-ctl bda-probe bda-wprobe bda-wprobe2 bda-xprobe bda-rq-probe)
 
 ok=0; bad=0; skip=0
 chk() { if (($2)); then printf '  PASS  %s\n' "$1"; ok=$((ok+1))
@@ -104,15 +104,23 @@ import os, struct, subprocess, sys
 w = sys.argv[1]
 sys.path.insert(0, sys.argv[2])
 from patch_bda import (MARKER, SENT_LO, SENT_HI, MAGIC, SLOT_MEMBERS, ID_W,
-                       resolve_marker_ids, DEFAULTS)
+                       resolve_marker_ids, DEFAULTS, SLOT_MEMBERS_V2,
+                       SCRATCH_HDR, SCRATCH_SIG)
 
 SYN = os.path.join(w, 'lay', 'swaps.bdasyn')
 FB = os.path.join(w, 'lay', 'swaps.bdafb')
 STAND = os.path.join(w, 'stand')
-OUT_WORDS = 16
+# out[] word map, shared with bt.c below:
+#   0..11  the twelve slot words, in order
+#   12,13  the two ray-query committed types (case B)
+#   16..21 the scratch read-back (case G)
+OUT_WORDS = 24
+OUT_RQ = 12
+OUT_SCR = 16
 KINDS = [
     ('bda0000000000001', 'magic'),
     ('bda0000000000002', 'rq'),
+    ('bda0000000000003', 'scratch'),
     ('bda0000000000010', 'nomarker'),
     ('bda0000000000011', 'badid'),
     ('bda0000000000012', 'wrongsent'),
@@ -129,6 +137,8 @@ def mk(lo, hi, sent, magic, name='mk'):
 
 def build(ident, kind):
     rq = kind == 'rq'
+    scr = kind == 'scratch'
+    n_slot = SLOT_MEMBERS_V2 if scr else SLOT_MEMBERS
     L = []
     A = L.append
     A('               OpCapability Shader')
@@ -157,11 +167,17 @@ def build(ident, kind):
         A(mk(0, 0, sent, mg, name='mk2'))
     # ---- annotations
     A('               OpDecorate %rtarr ArrayStride 4')
+    if scr:
+        # The mirror image of %Slot: a runtime array the SHADER writes. No
+        # NonWritable anywhere, which is the entire difference.
+        A('               OpDecorate %scrarr ArrayStride 4')
+        A('               OpDecorate %Scr Block')
+        A('               OpMemberDecorate %Scr 0 Offset 0')
     A('               OpDecorate %Out Block')
     A('               OpMemberDecorate %Out 0 Offset 0')
     A('               OpDecorate %out DescriptorSet 0')
     A('               OpDecorate %out Binding 0')
-    for k in range(SLOT_MEMBERS):
+    for k in range(n_slot):
         A(f'               OpMemberDecorate %Slot {k} Offset {4 * k}')
         A(f'               OpMemberDecorate %Slot {k} NonWritable')
     A('               OpDecorate %Slot Block')
@@ -178,10 +194,16 @@ def build(ident, kind):
     A('%_ptr_StorageBuffer_Out = OpTypePointer StorageBuffer %Out')
     A('%_ptr_StorageBuffer_uint = OpTypePointer StorageBuffer %uint')
     A('        %out = OpVariable %_ptr_StorageBuffer_Out StorageBuffer')
-    A('       %Slot = OpTypeStruct ' + ' '.join(['%uint'] * SLOT_MEMBERS))
+    A('       %Slot = OpTypeStruct ' + ' '.join(['%uint'] * n_slot))
     A('%_ptr_PSB_Slot = OpTypePointer PhysicalStorageBuffer %Slot')
     A('%_ptr_PSB_uint = OpTypePointer PhysicalStorageBuffer %uint')
-    for k in range(max(SLOT_MEMBERS, OUT_WORDS)):
+    if scr:
+        A('     %scrarr = OpTypeRuntimeArray %uint')
+        A('        %Scr = OpTypeStruct %scrarr')
+        A('%_ptr_PSB_Scr = OpTypePointer PhysicalStorageBuffer %Scr')
+        A(f'      %u_sig = OpConstant %uint {SCRATCH_SIG}')
+        A(f'      %u_hdr = OpConstant %uint {SCRATCH_HDR}')
+    for k in range(max(n_slot, OUT_WORDS)):
         A(f'    %uint_{k} = OpConstant %uint {k}')
     A(f'      %sentlo = OpConstant %uint {SENT_LO}')
     A(f'      %senthi = OpConstant %uint {SENT_HI}')
@@ -207,7 +229,7 @@ def build(ident, kind):
         A('        %rq1 = OpVariable %_ptr_Function_rq Function')
     A('         %av2 = OpCompositeConstruct %v2uint %sentlo %senthi')
     A('          %pp = OpBitcast %_ptr_PSB_Slot %av2')
-    for k in range(SLOT_MEMBERS):
+    for k in range(n_slot):
         A(f'        %ac{k} = OpInBoundsAccessChain %_ptr_PSB_uint %pp %uint_{k}')
         A(f'        %wd{k} = OpLoad %uint %ac{k} Aligned 4')
         A(f'        %oc{k} = OpAccessChain %_ptr_StorageBuffer_uint %out '
@@ -223,8 +245,42 @@ def build(ident, kind):
             A(f'        %ty{i} = OpRayQueryGetIntersectionTypeKHR %uint {var} '
               f'%uint_1')
             A(f'        %og{i} = OpAccessChain %_ptr_StorageBuffer_uint %out '
-              f'%uint_0 %uint_{8 + i}')
+              f'%uint_0 %uint_{OUT_RQ + i}')
             A(f'               OpStore %og{i} %ty{i}')
+    if scr:
+        # Word 10 is the guard: 0 means the layer allocated no scratch, and
+        # the pointer in 8/9 is then NULL. Dereferencing it would fault, so
+        # the whole body is inside the branch -- the same shape the in-game
+        # rung uses, tested here where a fault is cheap.
+        for k in range(6):
+            A(f'      %z{k} = OpAccessChain %_ptr_StorageBuffer_uint %out '
+              f'%uint_0 %uint_{OUT_SCR + k}')
+            A(f'               OpStore %z{k} %uint_0')
+        A(f'      %armed = OpINotEqual %bool %wd{10} %uint_0')
+        A('               OpSelectionMerge %merge None')
+        A('               OpBranchConditional %armed %doscr %merge')
+        A('      %doscr = OpLabel')
+        A('        %sv2 = OpCompositeConstruct %v2uint %wd8 %wd9')
+        A('         %sp = OpBitcast %_ptr_PSB_Scr %sv2')
+        # (a) the payload word this dispatch owns: read what the LAST dispatch
+        #     left, then leave the same value for the next one.
+        A('        %pay = OpInBoundsAccessChain %_ptr_PSB_uint %sp %uint_0 %u_hdr')
+        A('       %prev = OpLoad %uint %pay Aligned 4')
+        A('               OpStore %pay %u_sig Aligned 4')
+        # (b) the shader-owned counter in the reserved header, atomically, so
+        #     the layer can read a number no host ever wrote.
+        A('        %cnt = OpInBoundsAccessChain %_ptr_PSB_uint %sp %uint_0 %uint_0')
+        A('        %was = OpAtomicIAdd %uint %cnt %uint_1 %uint_0 %uint_1')
+        A('        %sgp = OpInBoundsAccessChain %_ptr_PSB_uint %sp %uint_0 %uint_1')
+        A('               OpStore %sgp %u_sig Aligned 4')
+        A('        %rdb = OpLoad %uint %sgp Aligned 4')
+        for k, v in ((0, '%prev'), (1, '%was'), (2, '%rdb'), (3, '%wd10'),
+                     (4, '%wd11'), (5, '%u_sig')):
+            A(f'      %o{k} = OpAccessChain %_ptr_StorageBuffer_uint %out '
+              f'%uint_0 %uint_{OUT_SCR + k}')
+            A(f'               OpStore %o{k} {v}')
+        A('               OpBranch %merge')
+        A('      %merge = OpLabel')
     A('               OpReturn')
     A('               OpFunctionEnd')
     return '\n'.join(L) + '\n'
@@ -338,7 +394,7 @@ TW = ('               OpCapability Shader\n'
 for h, kind in KINDS:
     p = os.path.join(SYN, h + '.dxil.spv')
     emit(p, build(h, kind))
-    if kind in ('magic', 'rq', 'wrongsent', 'wrongmagic'):
+    if kind in ('magic', 'rq', 'scratch', 'wrongsent', 'wrongmagic'):
         # give the marker the ids the ASSEMBLER chose -- the same two-pass fix
         # the rungs use, and the reason a marker can name binary ids at all.
         ids = resolve_marker_ids(p, '')
@@ -375,14 +431,20 @@ mapfile -t IDS < <(cd "$MOD_DIR/swaps.bda-probe" &&
         cmp -s "$f" "$MOD_DIR/swaps.bda-ctl/$f" || echo "${f%%.*}"
     done | sort)
 (( ${#IDS[@]} == 76 )) || { echo "selftest: expected 76 painted ids, got ${#IDS[@]}" >&2; exit 1; }
-python3 - "$w" "${IDS[@]}" <<'PYGEN2'
+# The RAYGEN stand-ins. `bda-xprobe` is the first rung whose raygens carry the
+# marker, so the layer's fixup has to be shown to work on a module that is not
+# a compute shader -- on the real driver, not just in build_bda.sh gate 9.
+mapfile -t RGIDS < <(cd "$MOD_DIR/swaps.bda-xprobe" &&
+    for f in *.rgs_*.spv; do echo "${f%.spv}"; done | sort)
+(( ${#RGIDS[@]} == 16 )) || { echo "selftest: expected 16 raygen ids" >&2; exit 1; }
+python3 - "$w" "${IDS[@]}" "${RGIDS[@]}" <<'PYGEN2'
 import os, subprocess, sys
 w, ids = sys.argv[1], sys.argv[2:]
 TMPL = ('               OpCapability Shader\n'
         '               OpMemoryModel Logical GLSL450\n'
         '               OpEntryPoint GLCompute %main "main"\n'
         '               OpExecutionMode %main LocalSize 1 1 1\n'
-        '        %sid = OpString "HASH.dxil"\n'
+        '        %sid = OpString "IDENT"\n'
         '       %void = OpTypeVoid\n'
         '          %3 = OpTypeFunction %void\n'
         '       %uint = OpTypeInt 32 0\n'
@@ -392,10 +454,19 @@ TMPL = ('               OpCapability Shader\n'
         '               OpReturn\n'
         '               OpFunctionEnd\n')
 for h in ids:
-    for mark, out in ((7, os.path.join(w, 'stand', h + '.spv')),
-                      (13, os.path.join(w, 'lay', 'swaps.bdafb', h + '.dxil.spv'))):
+    # The OpString the layer scans is dxil-spirv's, not the file name:
+    # "<hash>.?<entry>@@<mangle>.dxil" for a raygen, "<hash>.dxil" for a
+    # resolver. scan_dxil_id() turns both into "<hash>.<entry>", which is what
+    # the swap file is called.
+    if '.' in h:
+        hh, entry = h.split('.', 1)
+        ident, name = '%s.?%s@@YAXXZ.dxil' % (hh, entry), h
+    else:
+        ident, name = h + '.dxil', h + '.dxil'
+    for mark, out in ((7, os.path.join(w, 'stand', name + '.spv')),
+                      (13, os.path.join(w, 'lay', 'swaps.bdafb', name + '.spv'))):
         a = out + '.spvasm'
-        open(a, 'w').write(TMPL.replace('HASH', h).replace('MARK', str(mark)))
+        open(a, 'w').write(TMPL.replace('IDENT', ident).replace('MARK', str(mark)))
         subprocess.run(['spirv-as', '--target-env', 'spv1.3', a, '-o', out],
                        check=True)
         os.remove(a)
@@ -620,10 +691,11 @@ int main(int argc, char **argv) {
         printf("vkCreateShaderModule(%s, %zu B) -> %d\n",spv,n,r);
         if(r!=VK_SUCCESS){printf("RESULT: module rejected\n");return 5;}
         VkBuffer ob; VkDeviceMemory om; void *op;
-        mkbuf(64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        /* 24 words: 12 slot, 2 ray-query, 6 scratch, and slack. */
+        mkbuf(128, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
               &ob,&om,&op);
-        memset(op,0xEE,64);
+        memset(op,0xEE,128);
         VkDescriptorSetLayoutBinding b={0};
         b.binding=0;b.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         b.descriptorCount=1;b.stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;
@@ -652,16 +724,28 @@ int main(int argc, char **argv) {
         wr.dstSet=ds;wr.dstBinding=0;wr.descriptorCount=1;
         wr.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;wr.pBufferInfo=&dbi;
         vkUpdateDescriptorSets(dev,1,&wr,0,NULL);
-        VkCommandBuffer cb=begin();
-        vkCmdBindPipeline(cb,VK_PIPELINE_BIND_POINT_COMPUTE,pipe);
-        vkCmdBindDescriptorSets(cb,VK_PIPELINE_BIND_POINT_COMPUTE,plo,0,1,&ds,0,NULL);
-        vkCmdDispatch(cb,1,1,1);
-        endsub(cb);
+        /* "scratch" dispatches TWICE, in two separate submits: the claim
+         * under test is that the second one reads what the first one left in
+         * a buffer neither of them owns. One dispatch could not tell that
+         * apart from an invocation reading its own store. */
+        int passes = !strcmp(mode,"scratch") ? 2 : 1;
         uint32_t *o=(uint32_t*)op;
-        printf("slot:");
-        for(int k=0;k<8;k++) printf(" [%d]=0x%08x",k,o[k]);
-        printf("\n");
-        printf("rq_up=%u rq_dn=%u\n",o[8],o[9]);
+        for(int pass=1; pass<=passes; pass++){
+            VkCommandBuffer cb=begin();
+            vkCmdBindPipeline(cb,VK_PIPELINE_BIND_POINT_COMPUTE,pipe);
+            vkCmdBindDescriptorSets(cb,VK_PIPELINE_BIND_POINT_COMPUTE,plo,0,1,&ds,0,NULL);
+            vkCmdDispatch(cb,1,1,1);
+            endsub(cb);
+            printf("slot:");
+            for(int k=0;k<8;k++) printf(" [%d]=0x%08x",k,o[k]);
+            printf("\n");
+            printf("slotx: [8]=0x%08x [9]=0x%08x [10]=%u [11]=0x%08x\n",
+                   o[8],o[9],o[10],o[11]);
+            printf("rq_up=%u rq_dn=%u\n",o[12],o[13]);
+            printf("scr pass%d: prev=0x%08x count_before=%u readback=0x%08x "
+                   "words=%u flags=0x%08x sig=0x%08x\n",
+                   pass,o[16],o[17],o[18],o[19],o[20],o[21]);
+        }
     }
     for(int ai=3; ai<argc; ai++){
         size_t n2; uint32_t *c2=slurp(argv[ai],&n2);
@@ -680,9 +764,11 @@ gcc -O1 -o "$w/bt" "$w/bt.c" -lvulkan 2>"$w/cc.err" || {
     echo "selftest: could not build the probe (need libvulkan-dev):" >&2
     sed -n '1,5p' "$w/cc.err" >&2; exit 1; }
 
-STAND=(); for h in "${IDS[@]}"; do STAND+=("$w/stand/$h.spv"); done
-SYN_IDS=(bda0000000000001 bda0000000000002 bda0000000000010 bda0000000000011
-         bda0000000000012 bda0000000000013 bda0000000000014 bda0000000000015)
+STAND=(); for h in "${IDS[@]}"; do STAND+=("$w/stand/$h.dxil.spv"); done
+RGSTAND=(); for g in "${RGIDS[@]}"; do RGSTAND+=("$w/stand/$g.spv"); done
+SYN_IDS=(bda0000000000001 bda0000000000002 bda0000000000003 bda0000000000010
+         bda0000000000011 bda0000000000012 bda0000000000013 bda0000000000014
+         bda0000000000015)
 SYNSTAND=(); for h in "${SYN_IDS[@]}"; do SYNSTAND+=("$w/stand/$h.spv"); done
 for f in "${SYNSTAND[@]}"; do
     [[ -f "$f" ]] || { echo "selftest: missing stand-in $f" >&2; exit 1; }
@@ -700,7 +786,7 @@ EXTRA=()
 
 echo
 echo "bda layer self-test  (layer: $MOD_DIR/libVkLayer_callisto_spvswap.so)"
-echo "76 painted compute ids from swaps.bda-probe; 8 synthetic modules"
+echo "76 painted compute ids from swaps.bda-probe; 9 synthetic modules"
 echo
 
 # ---- case 0: the ABI in this file is the ABI in the layer ------------------
@@ -710,6 +796,14 @@ for k in CALLISTO_BDA_SLOT_V1 0x0BDA0001 0xCA115700 0xCA115701; do
 done
 chk "the layer's slot is 64 words (256 B)" \
     "$(b grep -q '#define CALLISTO_BDA_WORDS  *64' "$MOD_DIR/swap_layer.c")"
+for k in BDA_W_SCR_LO BDA_W_SCR_HI BDA_W_SCR_WORDS BDA_W_SCR_FLAGS; do
+    chk "swap_layer.c defines $k" \
+        "$(b grep -q "#define $k " "$MOD_DIR/swap_layer.c")"
+done
+chk "the scratch header reservation is 16 words in the layer and in this file" \
+    "$(b grep -q '#define CALLISTO_SCRATCH_HDR 16u' "$MOD_DIR/swap_layer.c")"
+chk "the slot's words 8..11 are the scratch, in the layer's own table" \
+    "$(b grep -q 'scratch_words  its size in uint32 words' "$MOD_DIR/swap_layer.c")"
 echo
 
 # ---- case A: arm the slot and READ THE MAGIC BACK FROM A DISPATCH ----------
@@ -761,6 +855,63 @@ chk "the layer enabled VK_KHR_ray_query for a device that never asked" \
     "$(b has "$w/b.log" '"ev":"rayq","action":"enabled"')"
 echo
 
+# ---- case G: Stage 3a -- the WIDENED slot and the shader-writable scratch ---
+run "$w/g.log" bdasyn,bdafb scratch "$w/stand/bda0000000000003.spv"; rg=$?
+echo "case G -- Stage 3a: the scratch buffer is allocated, published, WRITTEN by a"
+echo "          dispatch, and read back by the NEXT dispatch and by the layer"
+grep -E '^(slotx:|scr pass)' "$w/g.log.out" | sed 's/^/    /'
+grep -o '"ev":"bda_scratch","action":"[a-z]*","reason":"[a-z_]*","addr":"0x[0-9a-f]*","mb":[0-9]*,"words":[0-9]*' \
+     "$w/g.log" | sed 's/^/    /'
+grep -o '"ev":"bda_scratch_hdr".*' "$w/g.log" | tail -1 | sed 's/^/    /'
+chk "probe exits 0"                          "$([[ $rg -eq 0 ]] && echo 1 || echo 0)"
+chk "the layer ARMED a scratch buffer"       "$(b has "$w/g.log" '"ev":"bda_scratch","action":"armed"')"
+chk "...and can read it back (mapped)"       "$(b has "$w/g.log" '"flags":3}')"
+chk "...at a non-zero device address"        "$(bn has "$w/g.log" '"ev":"bda_scratch","action":"armed","reason":"armed","addr":"0x0"')"
+chk "the module carrying a WRITABLE PSB array was fixed up, not refused" \
+    "$(b grep -q '"ev":"bda_fixup","id":"bda0000000000003.dxil"' "$w/g.log")"
+chk "the compute pipeline LINKED"            "$(b grep -q 'vkCreateComputePipelines -> 0' "$w/g.log.out")"
+sw=$(sed -n 's/.*slotx:.*\[10\]=\([0-9]*\).*/\1/p' "$w/g.log.out" | head -1)
+chk "THE DISPATCH READ THE SCRATCH SIZE OUT OF SLOT WORD 10 ($sw words)" \
+    "$([[ -n "$sw" && "$sw" -gt 0 ]] && echo 1 || echo 0)"
+chk "...and slot word 11 says armed+readback (0x00000003)" \
+    "$(b grep -q 'slotx:.*\[11\]=0x00000003' "$w/g.log.out")"
+chk "pass 1 found the payload word EMPTY (prev=0x00000000: the host zero-fill)" \
+    "$(b grep -q 'scr pass1: prev=0x00000000 ' "$w/g.log.out")"
+chk "PASS 2 READ WHAT PASS 1 WROTE (prev=0xc0ffee01) -- a value that crossed" \
+    "$(b grep -q 'scr pass2: prev=0xc0ffee01 ' "$w/g.log.out")"
+chk "...two dispatches, two submits, and no descriptor" \
+    "$(b grep -q 'scr pass2: prev=0xc0ffee01 ' "$w/g.log.out")"
+chk "the shader's ATOMIC counter counted both dispatches (0 then 1)" \
+    "$([[ $(grep -c 'scr pass1: prev=0x00000000 count_before=0 ' "$w/g.log.out") -eq 1 && \
+          $(grep -c 'scr pass2: prev=0xc0ffee01 count_before=1 ' "$w/g.log.out") -eq 1 ]] \
+       && echo 1 || echo 0)"
+chk "the shader read its own store back through the pointer (0xc0ffee01)" \
+    "$(b grep -q 'readback=0xc0ffee01' "$w/g.log.out")"
+chk "THE LAYER SAW THE SHADER'S WRITES from the host side (w0=2, w1=0xc0ffee01)" \
+    "$(b grep -q '"ev":"bda_scratch_hdr".*"w0":2,"w1":"0xc0ffee01"' "$w/g.log")"
+chk "...and its CPU-side payload census found the written word (nonzero >= 1)" \
+    "$(bn grep -q '"ev":"bda_scratch_hdr".*"nonzero":0,' "$w/g.log")"
+chk "the scratch is big enough for a 1440p per-pixel word (>= 4.0 M words)" \
+    "$([[ -n "$sw" && "$sw" -ge 4194304 ]] && echo 1 || echo 0)"
+echo
+
+# ---- case H: no scratch => the slot still arms and the shader stands down ---
+EXTRA=(CALLISTO_BDA_SCRATCH_MB=0)
+run "$w/h.log" bdasyn,bdafb scratch "$w/stand/bda0000000000003.spv"; rh=$?
+EXTRA=()
+echo "case H -- CALLISTO_BDA_SCRATCH_MB=0: the slot arms, the scratch does not,"
+echo "          and the shader takes its guarded path instead of faulting"
+chk "probe exits 0 (degrades, does not fault)" "$([[ $rh -eq 0 ]] && echo 1 || echo 0)"
+chk "the slot still armed"                    "$(b has "$w/h.log" '"ev":"bda","action":"armed"')"
+chk "the scratch was skipped, reason disabled" \
+    "$(b has "$w/h.log" '"ev":"bda_scratch","action":"skipped","reason":"disabled"')"
+chk "slot word 10 reads 0 words"              "$(b grep -q 'slotx:.*\[10\]=0 ' "$w/h.log.out")"
+chk "and the dispatch wrote NOTHING to its scratch outputs" \
+    "$(b grep -q 'scr pass1: prev=0x00000000 count_before=0 readback=0x00000000' "$w/h.log.out")"
+chk "no bda_scratch_hdr line, because there is nothing to read back" \
+    "$(bn has "$w/h.log" '"ev":"bda_scratch_hdr"')"
+echo
+
 # ---- case C: the four conjuncts, one forgery each -------------------------
 run "$w/c.log" bdasyn,bdafb none - "${SYNSTAND[@]}"; rc=$?
 echo "case C -- forgeries: every conjunct of the fixup, refused one at a time"
@@ -787,26 +938,31 @@ done
 chk "the marker-free module was NEITHER fixed up NOR rejected (served verbatim)" \
     "$(bn grep -qE '"ev":"bda_(fixup|reject)","id":"bda0000000000010\.dxil"' "$w/c.log")"
 nfix=$(grep -c '"ev":"bda_fixup"' "$w/c.log")
-chk "exactly the 2 honest synthetic modules were fixed up (got $nfix)" \
-    "$([[ $nfix -eq 2 ]] && echo 1 || echo 0)"
+chk "exactly the 3 honest synthetic modules were fixed up (got $nfix)" \
+    "$([[ $nfix -eq 3 ]] && echo 1 || echo 0)"
 echo
 
 # ---- case D: the real resolvers, served through the layer ------------------
 echo "case D -- every live rung's real resolvers, served by the overlay, on the driver"
-for rung in bda-probe bda-rq-probe bda-ctl; do
+for rung in bda-probe bda-wprobe bda-wprobe2 bda-xprobe bda-rq-probe bda-ctl; do
     ln -sfn "$MOD_DIR/swaps.$rung" "$w/lay/swaps.bdarung"
-    run "$w/d_$rung.log" bdarung,bdafb none - "${STAND[@]}"; rd=$?
+    NAMES=(); for h in "${IDS[@]}"; do NAMES+=("$h.dxil"); done
+    SERVE=("${STAND[@]}")
+    if [[ "$rung" == bda-xprobe ]]; then
+        NAMES+=("${RGIDS[@]}"); SERVE+=("${RGSTAND[@]}")
+    fi
+    run "$w/d_$rung.log" bdarung,bdafb none - "${SERVE[@]}"; rd=$?
     chk "$rung: probe exits 0, no served module refused" \
         "$([[ $rd -eq 0 ]] && echo 1 || echo 0)"
     nhit=0
-    for h in "${IDS[@]}"; do
-        sz=$(stat -c%s "$MOD_DIR/swaps.$rung/$h.dxil.spv")
-        grep -q "\"ev\":\"swap_load\".*swaps.bdarung/$h.dxil.spv\",\"size\":$sz}" "$w/d_$rung.log" \
-          && grep -q "\"id\":\"$h.dxil\".*\"swap\":\"HIT\",\"result\":0" "$w/d_$rung.log" \
+    for h in "${NAMES[@]}"; do
+        sz=$(stat -c%s "$MOD_DIR/swaps.$rung/$h.spv")
+        grep -q "\"ev\":\"swap_load\".*swaps.bdarung/$h.spv\",\"size\":$sz}" "$w/d_$rung.log" \
+          && grep -q "\"id\":\"$h\".*\"swap\":\"HIT\",\"result\":0" "$w/d_$rung.log" \
           && nhit=$((nhit+1))
     done
-    chk "$rung: 76 of 76 real resolvers served at their shipped size and accepted (got $nhit)" \
-        "$([[ $nhit -eq 76 ]] && echo 1 || echo 0)"
+    chk "$rung: ${#NAMES[@]} of ${#NAMES[@]} real modules served at their shipped size and accepted (got $nhit)" \
+        "$([[ $nhit -eq ${#NAMES[@]} ]] && echo 1 || echo 0)"
     nf=$(grep -c '"ev":"bda_fixup"' "$w/d_$rung.log")
     if [[ "$rung" == bda-ctl ]]; then
         chk "$rung: the CONTROL was never fixed up (got $nf, want 0)" \
@@ -819,11 +975,28 @@ for rung in bda-probe bda-rq-probe bda-ctl; do
         # bda-probe marks 76 modules; bda-rq-probe marks 75 (99bb7c2698997b2a
         # has no position chain, so --mode rq declines it and it ships as the
         # base bytes). The stand-in set is the same 76 either way.
-        wantfix=76; [[ "$rung" == bda-rq-probe ]] && wantfix=75
+        # bda-xprobe marks 76 compute AND all 16 raygens, but only 80 are
+        # fixed up HERE: the 12 rgs_reference_main declare
+        # ShaderInvocationReorderNV, this probe device does not enable SER, and
+        # the layer's SER gate correctly sends them to the next overlay before
+        # the marker is ever looked at. In the game SER is on (`ser=class` is
+        # part of every settings contract) and all 16 are fixed up. That the
+        # two gates compose in that order -- SER first, marker second -- is
+        # itself worth asserting, and case D2 below does.
+        wantfix=76
+        [[ "$rung" == bda-rq-probe ]] && wantfix=75
+        [[ "$rung" == bda-xprobe ]] && wantfix=80
         chk "$rung: the summary counts $wantfix fixups (got ${tot:-none})" \
             "$([[ "${tot:-0}" -eq $wantfix ]] && echo 1 || echo 0)"
     fi
 done
+nser=$(grep -c '"ev":"ser_reject"' "$w/d_bda-xprobe.log")
+chk "bda-xprobe: the 12 SER raygens are gated on SER BEFORE the marker, and \
+fall through (got $nser, want 12)" \
+    "$([[ $nser -eq 12 ]] && echo 1 || echo 0)"
+nrg=$(grep -c '"ev":"bda_reject"' "$w/d_bda-xprobe.log")
+chk "bda-xprobe: and not one marker-carrying module was REFUSED (got $nrg)" \
+    "$([[ $nrg -eq 0 ]] && echo 1 || echo 0)"
 echo
 
 # ---- case E: no slot => refuse, and fall through to the next overlay -------

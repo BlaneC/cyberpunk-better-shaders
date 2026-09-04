@@ -27,6 +27,16 @@
  *   CALLISTO_RAYQ_DISABLE=1 never ask for VK_KHR_ray_query (see "RAY QUERY")
  *   CALLISTO_ASJOURNAL_DISABLE=1  do not journal acceleration structures
  *   CALLISTO_BDA_DISABLE=1  never allocate the BDA slot (see "BDA SLOT")
+ *   CALLISTO_BDA_SCRATCH_MB=N  size of the shader-writable scratch buffer that
+ *                           the slot points at (default 128, 0 = none).
+ *                           A rung indexes it as `y * 4096 + x` masked to a
+ *                           power of two, so the size is what decides how many
+ *                           SCREEN ROWS get a word of their own: 128 MiB is
+ *                           2^23 two-word slots = rows 0..2047 collision-free.
+ *                           Undersize it and rows alias in screen space --
+ *                           handoff/116 sec 9, where 32 MiB gave exactly 512
+ *                           unique rows and painted the other two thirds of a
+ *                           720p frame blue.
  *
  * SER -- Shader Execution Reordering (handoff/41-SER-BUILD.md, idea A1 of
  * handoff/38-WILD-IDEAS.md). Cyberpunk uses the DXR HitObject/SER path on
@@ -152,6 +162,7 @@ static int g_ser_disabled;       /* CALLISTO_SER_DISABLE */
 static int g_rayq_disabled;      /* CALLISTO_RAYQ_DISABLE */
 static int g_asj_disabled;       /* CALLISTO_ASJOURNAL_DISABLE */
 static int g_bda_disabled;       /* CALLISTO_BDA_DISABLE */
+static uint32_t g_bda_scratch_mb = 128;  /* CALLISTO_BDA_SCRATCH_MB */
 static const char *g_dump_dir;   /* CALLISTO_DUMP_DIR */
 
 /* The constructor can run before the sandbox has finished setting up the
@@ -175,6 +186,16 @@ static void log_open(void) {
                      && !strcmp(getenv("CALLISTO_ASJOURNAL_DISABLE"), "1");
     g_bda_disabled = getenv("CALLISTO_BDA_DISABLE")
                      && !strcmp(getenv("CALLISTO_BDA_DISABLE"), "1");
+    {   /* Stage 3a. Clamped rather than rejected: a silly value must not be
+         * the difference between a slot that arms and one that does not. */
+        const char *mb = getenv("CALLISTO_BDA_SCRATCH_MB");
+        if (mb) {
+            long v = strtol(mb, NULL, 10);
+            if (v < 0) v = 0;
+            if (v > 256) v = 256;
+            g_bda_scratch_mb = (uint32_t)v;
+        }
+    }
 }
 
 /* call with g_mu held */
@@ -693,6 +714,15 @@ typedef struct {
     VkBuffer bda_buf;
     VkDeviceMemory bda_mem;
     volatile uint32_t *bda_map;
+    /* Stage 3a: the shader-WRITABLE scratch the slot points at. 0/NULL when
+     * it could not be allocated, in which case slot word 10 stays 0 and a
+     * shader that reads it takes its own "no scratch" path -- the slot itself
+     * still arms, so nothing that only needs the TLAS is affected. */
+    uint64_t bda_scratch_addr;
+    uint32_t bda_scratch_words;
+    VkBuffer bda_scratch_buf;
+    VkDeviceMemory bda_scratch_mem;
+    volatile uint32_t *bda_scratch_map;
     PFN_vkDestroyBuffer DestroyBuffer;
     PFN_vkFreeMemory FreeMemory;
     PFN_vkUnmapMemory UnmapMemory;
@@ -1329,6 +1359,7 @@ static void asj_note_addr(uint64_t h, uint64_t addr) {
 
 /* Stage 2b's refresh hook; defined below, next to the slot it writes. */
 static void bda_note_tlas(uint64_t addr, uint32_t prims, uint64_t frame);
+static void bda_scratch_report(const char *why);
 
 static void asj_note_build(uint32_t n,
         const VkAccelerationStructureBuildGeometryInfoKHR *infos,
@@ -1420,7 +1451,8 @@ static void asj_note_frame(const char *src) {
     f = ++g_frame;
     summary = (f % ASJ_SUMMARY_FRAMES) == 0;
     pthread_mutex_unlock(&g_as_mu);
-    if (summary) asj_report("periodic_frame");
+    if (summary) { asj_report("periodic_frame");
+                   bda_scratch_report("periodic_frame"); }
 }
 
 static void asj_final_summary(void) { asj_report("device_destroy"); }
@@ -1440,6 +1472,30 @@ static void asj_final_summary(void) { asj_report("device_destroy"); }
  *   [5] tlas_builds    how many top-level builds have been recorded
  *   [6] frame          the AS journal's frame counter at the last refresh
  *   [7] flags          bit 0: a POPULATED TLAS has been seen (prims > 0)
+ *   [8] scratch_lo     SCRATCH buffer device address, low 32   (Stage 3a)
+ *   [9] scratch_hi     ... high 32
+ *  [10] scratch_words  its size in uint32 words, 0 when there is none
+ *  [11] scratch_flags  bit 0: armed, bit 1: the layer can READ it back
+ *
+ * STAGE 3a -- THE SCRATCH BUFFER (handoff/116). Words 0-7 are a MAILBOX: the
+ * layer writes, the shader reads, and the shader's struct decorates every
+ * member NonWritable. Words 8-11 point at a SECOND, much larger allocation
+ * that is the other way round -- the shader writes it, and it persists across
+ * dispatches, passes and frames because nobody clears it after the initial
+ * host zero-fill. That is the whole unlock: a compute resolver and a raygen
+ * that share no descriptor can share a per-pixel word.
+ *
+ * The first 16 words of the scratch are reserved for shader-side counters
+ * (CALLISTO_SCRATCH_HDR); the payload starts there. The layer only ever reads
+ * that header, and only to log it -- it never writes the scratch after
+ * allocation, so a value in it came from a shader or from nobody.
+ *
+ * Host read-back is a convenience, not a guarantee: a shader write reaching
+ * HOST_COHERENT memory is formally visible to the host only after a barrier
+ * with dst HOST_READ, and this layer records no command buffer of its own in
+ * which to put one. In practice on this driver the write lands, and the
+ * SHADER-side read-back (a later invocation reading an earlier one's word) is
+ * the claim that needs no host visibility at all and is what the rungs test.
  *
  * Why host-visible and not staged: the address is written at COMMAND RECORD
  * time, i.e. before the vkQueueSubmit that consumes it, and Vulkan's implicit
@@ -1464,6 +1520,13 @@ static void asj_final_summary(void) { asj_report("device_destroy"); }
 #define BDA_W_BUILDS 5u
 #define BDA_W_FRAME 6u
 #define BDA_W_FLAGS 7u
+#define BDA_W_SCR_LO    8u
+#define BDA_W_SCR_HI    9u
+#define BDA_W_SCR_WORDS 10u
+#define BDA_W_SCR_FLAGS 11u
+#define BDA_SCR_F_ARMED    1u   /* the address in [8]/[9] is real            */
+#define BDA_SCR_F_READBACK 2u   /* ... and the layer mapped it, so it logs   */
+#define CALLISTO_SCRATCH_HDR 16u /* words reserved for shader-side counters  */
 
 /* The device whose slot the AS-journal build hook refreshes. The hook is a
  * command-buffer entry point and cannot name a VkDevice, and the game creates
@@ -1648,6 +1711,62 @@ static void bda_note_tlas(uint64_t addr, uint32_t prims, uint64_t frame) {
              (unsigned long long)g_bda_tlas_changes);
 }
 
+/* Read the scratch's shader-owned header back and log it. The layer never
+ * writes those words after the allocation memset, so a non-zero value here is
+ * a value a SHADER wrote -- which is the whole point of Stage 3a, and the
+ * cheapest possible read-out (no screenshot, no A/B).
+ *
+ * Formally this needs a HOST_READ barrier the layer has nowhere to record
+ * (see the section comment); a zero here is therefore "nothing seen", never
+ * "the shader did not write". The shader-side read-back in the rungs is the
+ * claim that does not depend on it. */
+#define BDA_SCRATCH_SAMPLES 4096u
+static void bda_scratch_report(const char *why) {
+    DevData *d;
+    uint32_t h[8] = {0}, words = 0, nz = 0, sampled = 0, slot_frame = 0;
+    uint64_t refreshes = 0;
+    int have = 0;
+    pthread_mutex_lock(&g_bda_mu);
+    d = g_bda_dev;
+    if (d && d->bda_scratch_map && d->bda_scratch_words) {
+        volatile const uint32_t *m = d->bda_scratch_map;
+        uint32_t pay, stride, k;
+        for (k = 0; k < 8; k++) h[k] = m[k];
+        words = d->bda_scratch_words;
+        /* A POPULATION COUNT over the payload, on the CPU, costing the shader
+         * nothing. The rungs write one word per skin pixel and never touch
+         * the header, so "how many of 4096 evenly spaced payload words are
+         * non-zero" is the whole read-out: 0 means no shader has written,
+         * and a number that grows with the skin on screen means one has. */
+        pay = words > CALLISTO_SCRATCH_HDR ? words - CALLISTO_SCRATCH_HDR : 0;
+        stride = pay / BDA_SCRATCH_SAMPLES;
+        if (stride < 1) stride = 1;
+        for (k = 0; k < pay && sampled < BDA_SCRATCH_SAMPLES; k += stride) {
+            sampled++;
+            if (m[CALLISTO_SCRATCH_HDR + k]) nz++;
+        }
+        slot_frame = d->bda_map ? d->bda_map[BDA_W_FRAME] : 0;
+        refreshes = g_bda_tlas_refreshes;
+        have = 1;
+    }
+    pthread_mutex_unlock(&g_bda_mu);
+    if (!have) return;
+    /* `slot_frame` vs `frame` is the whole diagnosis of 116 sec 8: the shader
+     * reads slot word 6 at EXECUTE time, the layer writes it at RECORD time,
+     * and a rung that compares against "frame - 1" is only right while those
+     * two advance in lockstep. A slot_frame that stops moving, or moves in
+     * steps other than 1 per present, says so here. */
+    LOGF("\"ev\":\"bda_scratch_hdr\",\"why\":\"%s\",\"words\":%u,"
+         "\"sampled\":%u,\"nonzero\":%u,\"slot_frame\":%u,\"frame\":%llu,"
+         "\"tlas_refreshes\":%llu,"
+         "\"w0\":%u,\"w1\":\"0x%08x\",\"w2\":\"0x%08x\",\"w3\":\"0x%08x\","
+         "\"w4\":\"0x%08x\",\"w5\":\"0x%08x\",\"w6\":\"0x%08x\","
+         "\"w7\":\"0x%08x\"}",
+         why, words, sampled, nz, slot_frame, (unsigned long long)g_frame,
+         (unsigned long long)refreshes,
+         h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+}
+
 /* Allocate, bind, map and address the slot. Every failure is soft: the layer
  * logs a reason, leaves d->bda_addr at 0, and a marker-carrying module is then
  * refused rather than served a garbage pointer. */
@@ -1734,6 +1853,109 @@ static void bda_setup(DevData *d, VkDevice dev, VkPhysicalDevice phys,
     d->bda_addr = (uint64_t)GetAddr(dev, &bi);
     if (!d->bda_addr) { reason = "zero_device_address"; goto out; }
     reason = "armed";
+
+    /* ---- Stage 3a: the scratch buffer, and its address into words 8-11.
+     * Failures here are NOT failures of the slot: every earlier feature reads
+     * words 0-7 only, so the scratch is allowed to be absent and says so in
+     * word 10. Sizes step down because a BAR heap is small and a 128 MiB
+     * host-visible-plus-device-local allocation is exactly the one a driver
+     * refuses first; the host-visible fallback (pass 1 of the memory-type
+     * loop) is system memory and will take it. */
+    {
+        const char *sreason = "disabled";
+        uint32_t smt = UINT32_MAX, sflags_mem = 0, mb = g_bda_scratch_mb;
+        uint32_t words = 0, sflags = 0;
+        if (mb) {
+            sreason = "not_attempted";
+            for (; mb >= 1 && !d->bda_scratch_addr; mb /= 2) {
+                VkBufferCreateInfo sbi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+                VkMemoryRequirements smr;
+                VkPhysicalDeviceMemoryProperties smp;
+                VkMemoryAllocateFlagsInfo smf =
+                    { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+                VkMemoryAllocateInfo smai =
+                    { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                VkBufferDeviceAddressInfo sai =
+                    { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+                void *sptr = NULL;
+                sbi.size = (VkDeviceSize)mb << 20;
+                sbi.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                          | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                          | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                sbi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                if (CreateBuffer(dev, &sbi, NULL, &d->bda_scratch_buf)
+                    != VK_SUCCESS) {
+                    d->bda_scratch_buf = VK_NULL_HANDLE;
+                    sreason = "create_buffer_failed"; continue;
+                }
+                GetReq(dev, d->bda_scratch_buf, &smr);
+                MemProps(phys, &smp);
+                smt = UINT32_MAX;
+                for (int pass = 0; pass < 2 && smt == UINT32_MAX; pass++) {
+                    VkMemoryPropertyFlags want = need
+                        | (pass == 0 ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : 0);
+                    for (uint32_t k = 0; k < smp.memoryTypeCount; k++)
+                        if ((smr.memoryTypeBits & (1u << k))
+                            && (smp.memoryTypes[k].propertyFlags & want) == want) {
+                            smt = k;
+                            sflags_mem = smp.memoryTypes[k].propertyFlags;
+                            break;
+                        }
+                }
+                if (smt == UINT32_MAX) { sreason = "no_host_visible_memory_type"; }
+                else {
+                    smf.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+                    smai.pNext = &smf;
+                    smai.allocationSize = smr.size;
+                    smai.memoryTypeIndex = smt;
+                    if (Alloc(dev, &smai, NULL, &d->bda_scratch_mem) != VK_SUCCESS) {
+                        d->bda_scratch_mem = VK_NULL_HANDLE;
+                        sreason = "allocate_failed";
+                    } else if (Bind(dev, d->bda_scratch_buf,
+                                    d->bda_scratch_mem, 0) != VK_SUCCESS) {
+                        sreason = "bind_failed";
+                    } else if (Map(dev, d->bda_scratch_mem, 0, VK_WHOLE_SIZE, 0,
+                                   &sptr) != VK_SUCCESS || !sptr) {
+                        sreason = "map_failed";
+                    } else {
+                        sai.buffer = d->bda_scratch_buf;
+                        d->bda_scratch_map = (volatile uint32_t *)sptr;
+                        /* The one and only write the layer makes to the
+                         * scratch: everything read out of it afterwards came
+                         * from a shader. */
+                        memset(sptr, 0, (size_t)sbi.size);
+                        d->bda_scratch_addr = (uint64_t)GetAddr(dev, &sai);
+                        if (!d->bda_scratch_addr) sreason = "zero_device_address";
+                        else {
+                            words = (uint32_t)(sbi.size / 4);
+                            sflags = BDA_SCR_F_ARMED | BDA_SCR_F_READBACK;
+                            sreason = "armed";
+                        }
+                    }
+                }
+                if (!d->bda_scratch_addr) {   /* step down and retry smaller */
+                    if (d->bda_scratch_map) { d->UnmapMemory(dev, d->bda_scratch_mem);
+                                              d->bda_scratch_map = NULL; }
+                    if (d->bda_scratch_mem) { d->FreeMemory(dev, d->bda_scratch_mem, NULL);
+                                              d->bda_scratch_mem = VK_NULL_HANDLE; }
+                    if (d->bda_scratch_buf) { d->DestroyBuffer(dev, d->bda_scratch_buf, NULL);
+                                              d->bda_scratch_buf = VK_NULL_HANDLE; }
+                }
+            }
+        }
+        d->bda_scratch_words = words;
+        d->bda_map[BDA_W_SCR_LO] = (uint32_t)(d->bda_scratch_addr & 0xffffffffu);
+        d->bda_map[BDA_W_SCR_HI] = (uint32_t)(d->bda_scratch_addr >> 32);
+        d->bda_map[BDA_W_SCR_WORDS] = words;
+        d->bda_map[BDA_W_SCR_FLAGS] = sflags;
+        LOGF("\"ev\":\"bda_scratch\",\"action\":\"%s\",\"reason\":\"%s\","
+             "\"addr\":\"0x%llx\",\"mb\":%u,\"words\":%u,\"hdr\":%u,"
+             "\"mem_type\":%d,\"mem_flags\":%u,\"flags\":%u}",
+             d->bda_scratch_addr ? "armed" : "skipped", sreason,
+             (unsigned long long)d->bda_scratch_addr, words / (1u << 18),
+             words, CALLISTO_SCRATCH_HDR,
+             smt == UINT32_MAX ? -1 : (int)smt, (unsigned)sflags_mem, sflags);
+    }
     pthread_mutex_lock(&g_bda_mu);
     if (g_bda_dev) g_bda_multi_dev++;
     else g_bda_dev = d;
@@ -1751,6 +1973,7 @@ out:
 
 static void bda_teardown(DevData *d, VkDevice dev) {
     if (!d) return;
+    bda_scratch_report("device_destroy");
     pthread_mutex_lock(&g_bda_mu);
     if (g_bda_dev == d) g_bda_dev = NULL;
     d->bda_addr = 0;
@@ -1760,6 +1983,14 @@ static void bda_teardown(DevData *d, VkDevice dev) {
     if (d->bda_buf && d->DestroyBuffer) d->DestroyBuffer(dev, d->bda_buf, NULL);
     if (d->bda_mem && d->FreeMemory) d->FreeMemory(dev, d->bda_mem, NULL);
     d->bda_buf = VK_NULL_HANDLE; d->bda_mem = VK_NULL_HANDLE;
+    if (d->bda_scratch_mem && d->UnmapMemory)
+        d->UnmapMemory(dev, d->bda_scratch_mem);
+    if (d->bda_scratch_buf && d->DestroyBuffer)
+        d->DestroyBuffer(dev, d->bda_scratch_buf, NULL);
+    if (d->bda_scratch_mem && d->FreeMemory)
+        d->FreeMemory(dev, d->bda_scratch_mem, NULL);
+    d->bda_scratch_buf = VK_NULL_HANDLE; d->bda_scratch_mem = VK_NULL_HANDLE;
+    d->bda_scratch_map = NULL; d->bda_scratch_addr = 0; d->bda_scratch_words = 0;
     LOGF("\"ev\":\"bda_summary\",\"why\":\"device_destroy\",\"fixups\":%llu,"
          "\"tlas_refreshes\":%llu,\"tlas_changes\":%llu,\"last_tlas\":\"0x%llx\"}",
          (unsigned long long)g_bda_fixups,
