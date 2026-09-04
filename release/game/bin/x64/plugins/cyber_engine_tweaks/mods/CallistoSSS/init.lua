@@ -183,7 +183,24 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- a581bc58f3c1eddc. SERVED and kept on a LIVE read-out only,
                -- no capture: "micro looks great!". ...-ll-bump (= micro-ctl,
                -- 93/93 IDENTICAL BYTES) is the 'before' for the A/B.
-               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump-micro" }
+               -- DEFAULT CHANGED 2026-09-04 to ...-micro-oilhi: 72's oil coat
+               -- one step up the ladder it already had (118). 117's `cons`
+               -- now takes (1-F) OUT of the diffuse instead of piling the
+               -- coat on top of it, so the strength 74 chose against a
+               -- pure-add BRDF was too low for the BRDF that now ships. The
+               -- edit is TWO OPERANDS and no new instruction: the Schlick
+               -- exponent 4.5 -> 4.0 (n_s 0.55 -> 0.60) at 357 coat groups
+               -- in 77 of 77 compute resolvers. The gain stays 1.0 -- and
+               -- 72's third constant, sat(2-r), was found to be pinned at 1
+               -- by its own clamp for every rung on the ladder, so it has
+               -- never moved anything (118 sec 2). The 16 raygens are still
+               -- ...-ll's bytes. content sha e80282bcf564d270. SERVED and
+               -- kept on a LIVE read-out only, no capture: "oilhi looks
+               -- great!". ...-ll-bump-micro (= oil-ctl, 93/93 IDENTICAL
+               -- BYTES) is the 'before' for the A/B. Facing skin cannot have
+               -- moved: (1-VoH)^p = 0 at VoH = 1, so the verdict is a
+               -- grazing-band one.
+               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump-micro-oilhi" }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
@@ -487,7 +504,8 @@ local SKIN_LEVELS = {
     -- phi-valued NoL (117 sec 3). The 16 raygens are the default's.
     -- 93/93 bytes are skin.set/micro. content sha a581bc58f3c1eddc. SHOT
     -- 2026-09-04, LIVE read-out only, no capture: "micro looks great!".
-    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump-micro", label = "  + PORE OCCLUSION + ROUGHNESS + TERMINATOR + SPECULAR OCCLUSION + COAT ENERGY (117)  <-- DEFAULT" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump-micro", label = "  + PORE OCCLUSION + ROUGHNESS + TERMINATOR + SPECULAR OCCLUSION + COAT ENERGY (117)  <-- the previous default; = oil-ctl" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump-micro-oilhi", label = "  + OIL COAT one step up: Schlick exponent 4.5 -> 4.0, now that `cons` pays for it (118)  <-- DEFAULT" },
     -- handoff/101 sec 17. THE STANDING SELECTION. The fog rung above plus the
     -- ray-query ear glow (rq3: instance-matched sunward thickness AND a
     -- sun-visibility query from the exit point). SHOT backlit and KEPT.
@@ -719,6 +737,22 @@ local SKIN_LEVELS = {
     { id = "micro-gts", label = "  half 4/5 -- SPECULAR OCCLUSION only: Jimenez GTSO from AO, NoV and alpha; 38 A5 without the bent normal (117)" },
     { id = "micro-cns", label = "  half 5/5 -- COAT ENERGY only: diffuse *= 1 - F, the (1-F) that 72's oil layer never took out; the anti-wet-plastic term (117)" },
     { id = "micro-ctl", label = "  micro CONTROL (all five off) -- 93/93 BYTE-identical to the PREVIOUS default (...-ll-bump); must be indistinguishable" },
+    -- handoff/118.  72's skin coat RETUNED, now that 117's `cons` takes the
+    -- energy out of the diffuse instead of piling the coat on top of it.
+    -- The coat is a Schlick reshape whose strength is TWO baked constants:
+    -- the exponent p (shipped 4.5) and the gain g (shipped 1.0).  A third,
+    -- `sat(2-r)`, has been pinned at 1 by its own clamp for the whole life of
+    -- the feature and has never moved anything -- `oil-inert` shoots exactly
+    -- that claim.  No instruction is added: these rungs rewrite operands.
+    -- One lever per rung so a verdict can be attributed.  Contract: the SAME
+    -- sunlit close-up face as 117, ser=class, shadowset=full-shadow.  Facing
+    -- skin CANNOT move on any of them ((1-VoH)^p = 0 at VoH = 1) -- this is a
+    -- grazing-band read: cheekbone, nose flank, brow, jaw, ear rim.
+    { id = "oilhi",     label = "OIL COAT one step up: Schlick exponent 4.5 -> 4.0 (the ladder's own next step, n_s 0.55 -> 0.60); +21% F at 60 deg -- KEPT 2026-09-04; identical bytes to the DEFAULT stack (118)" },
+    { id = "oilhi-g",   label = "  the OTHER lever: gain 1.0 -> 1.25 at the shipped exponent; lifts F proportionally at every angle off normal (118)" },
+    { id = "oilhi2",    label = "  BOTH levers (p = 4.0, g = 1.25) -- the louder candidate, ~1.4x the shipped coat at 60 deg; not a diagnostic (118)" },
+    { id = "oil-inert", label = "  oil DECOY: moves sat(2-r) 1.1 -> 1.9, which its own clamp pins at 1. Bytes differ in 77/77; the SCREEN must not. If visible, the model is wrong (118)" },
+    { id = "oil-ctl",   label = "  oil CONTROL -- 93/93 BYTE-identical to the PREVIOUS default (...-ll-bump-micro); must be indistinguishable (118)" },
     -- handoff/105. Backlit translucency for EVERY thin surface: 101's sunward
     -- front-cull query with a class-0 rough-dielectric gate, STACKED on the
     -- cap6-glintdense default (ear glow bit-identical on skin, asserted).

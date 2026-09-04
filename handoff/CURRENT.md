@@ -1,4 +1,38 @@
-# CallistoSSS — current state (2026-09-04, after `117` micro was shot, kept — *"micro looks great!"* — and made the default as `…-curv-t7hue1-ll-bump-micro`)
+# CallistoSSS — current state (2026-09-04, after `118` oilhi was shot, kept — *"oilhi looks great."* — and made the default as `…-ll-bump-micro-oilhi`)
+
+**2026-09-04 — `118` SHOT, KEPT, AND MADE THE DEFAULT.** User verbatim:
+*"oilhi looks great."* The default is now
+`gi-50b-…-curv-t7hue1-ll-bump-micro-oilhi` (content sha `e80282bcf564d270`).
+`72`'s oil coat one step up the ladder it already had, because `117`'s `cons`
+changed its economics: the coat was tuned by `74` against a BRDF where its
+energy was a pure ADD, and `cons` now takes `(1-F)` out of the diffuse, so the
+strength `74` chose was too low for the BRDF that ships. The edit is **two
+operands and no new instruction** — Schlick exponent 4.5 -> 4.0 at 357 coat
+groups in 77/77 compute resolvers — proven by an opcode-multiset comparison
+against the base. The previous default `…-ll-bump-micro` is `oil-ctl` by bytes.
+**Finding: `72`'s third constant has never been real** — `amp = sat(2-r) *
+spec_gain` and `sat(2-r) = 1` for every `n_s >= 0.5`, so `n_s` has only ever
+been an exponent knob. **Open:** `oilhi-g` and `oilhi2` (the other lever, never
+walked), the `oil-inert` decoy that would actually shoot the `sat(2-r)` claim,
+and a forehead-on shot to confirm facing skin stayed put — `118` §9/§10.
+
+**2026-09-04 — `119` random-walk SSS: DESIGNED, FEASIBILITY-GATED, CALIBRATED.
+NO PATCHER YET.** Premise correction first: **there is no ray-traced SSS in
+this build to replace.** The game's own skin SSS is a SCREEN-SPACE `SSS_Blur`
+diffusion pass (its LUT is already hijacked by `CallistoSSS.dll`); `bleed`/
+`deep` are pure ALU; the only ray-traced subsurface transport anywhere in the
+stack is `earglow-ll`, and it is not a scattering solve but a closed-form
+two-exponential transmittance through ONE thickness probe (`111` §2.3). That
+is what a walk would replace. Two blocking unknowns are now closed: the
+raygens carry a per-pixel AND per-frame LCG that a walk can clone for zero new
+resources (`37` §1), and `dev/walk_model.py` shows **K = 4 unrolled steps is
+enough** — 3.6% of walks truncate at a 3 mm ear — which fits the 6-live-query
+ceiling `105` proved, with A and C already spent. The model also found that
+**the project's two skin parameterisations disagree by up to 800x**: Chiang's
+inversion from Jensen `skin1` diffuse reflectance transmits 0.73/0.50/0.26
+through 3 mm where `111`'s screen-validated fit gives 0.11/0.0023/0.0006. The
+walk is therefore calibrated TO `111`, so it is a drop-in for the shipped
+transport plus the geometry a slab model cannot have. `119` §2.
 
 **2026-09-04 — `117` SHOT, KEPT, AND MADE THE DEFAULT.** User verbatim:
 *"micro looks great!"* The default is now
