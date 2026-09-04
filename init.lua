@@ -171,7 +171,19 @@ local brdf = { tier = "1", kernel = "detail", skin = "on", shadowcull = "on",
                -- no capture: "The bump option was the best thing I've tested
                -- so far. IT LOOKS INCREDIBLE." ...-t7hue1-ll (= bump-ctl) is
                -- the 'before' for the A/B. Compute side = direct sun only.
-               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump" }
+               -- DEFAULT CHANGED 2026-09-04 to ...-ll-bump-micro: the other
+               -- four-fifths of 115's pore plus the (1-F) 72's oil coat never
+               -- took out (117). Five halves on the SAME height field, all in
+               -- 75 of 77 compute resolvers, all sun-frame: pore occlusion
+               -- (diffuse x 1-0.35*cav), pore roughness (alpha x 1+0.5*cav on
+               -- the class-1 select), Chiang 2019's shadow-terminator fix for
+               -- the artifact 115 itself introduces, Jimenez GTSO specular
+               -- occlusion (38 A5, unblocked), and coat energy conservation.
+               -- The 16 raygens are still ...-ll's bytes. content sha
+               -- a581bc58f3c1eddc. SERVED and kept on a LIVE read-out only,
+               -- no capture: "micro looks great!". ...-ll-bump (= micro-ctl,
+               -- 93/93 IDENTICAL BYTES) is the 'before' for the A/B.
+               skinspec = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump-micro" }
 
 -- The on/off keys, as opposed to the numeric ones. Kept as a set so adding a
 -- switch means adding one word, not editing a chain of `or` comparisons.
@@ -457,7 +469,25 @@ local SKIN_LEVELS = {
     -- 93/93 bytes are skin.set/bump. content sha 241bb736f0ed93b6. SHOT
     -- 2026-09-04, LIVE read-out only, no capture: "The bump option was the
     -- best thing I've tested so far. IT LOOKS INCREDIBLE."
-    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump", label = "  + ALBEDO-DERIVED pore micro-normal on skin (115)  <-- DEFAULT" },
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump", label = "  + ALBEDO-DERIVED pore micro-normal on skin (115)  <-- the previous default; = micro-ctl" },
+    -- handoff/117. The default PLUS the other four-fifths of the pore and
+    -- the layer 72 forgot. FIVE halves, all riding 115's albedo height field,
+    -- all compute-side (DIRECT SUN ONLY under PT), all in the same 75 of 77
+    -- resolvers: `occ` diffuse x 1-0.35*cav (a pit is shadowed by its own
+    -- rim); `rough` alpha x 1+0.5*cav on the shipped class-1 select (pores
+    -- scatter the oil highlight -- 115 sec 6); `term` Chiang 2019's 1+w-w^2
+    -- (the fix for the shading-normal terminator 115 itself introduces --
+    -- brightens, never darkens); `gtso` Jimenez specular occlusion from AO,
+    -- NoV and alpha^2 (38 A5, without the bent normal it was parked waiting
+    -- for); `cons` diffuse x 1-F per channel (72's oil coat is a pure ADD --
+    -- this is the anti-wet-plastic term). The cavity is the LAPLACIAN of the
+    -- same height field, edge-killed on [0.05, 0.12] luma so lip lines and
+    -- brows do not become grooves, gated by class 1 and 109's silhouette
+    -- guard. `term` reaches 106 of 142 diffuse sites; the other 36 have a
+    -- phi-valued NoL (117 sec 3). The 16 raygens are the default's.
+    -- 93/93 bytes are skin.set/micro. content sha a581bc58f3c1eddc. SHOT
+    -- 2026-09-04, LIVE read-out only, no capture: "micro looks great!".
+    { id = "gi-50b-bleed-oil-sheen-deep-clothhi-cone2all-fog-earglow-cap6-glintdense-curv-t7hue1-ll-bump-micro", label = "  + PORE OCCLUSION + ROUGHNESS + TERMINATOR + SPECULAR OCCLUSION + COAT ENERGY (117)  <-- DEFAULT" },
     -- handoff/101 sec 17. THE STANDING SELECTION. The fog rung above plus the
     -- ray-query ear glow (rq3: instance-matched sunward thickness AND a
     -- sun-visibility query from the exit point). SHOT backlit and KEPT.
@@ -673,6 +703,22 @@ local SKIN_LEVELS = {
     { id = "bump",      label = "  ALBEDO-DERIVED pore micro-normal, H = 10 mm/luma -- KEPT 2026-09-04; identical bytes to the DEFAULT stack (115)" },
     { id = "bump-hi",   label = "  pore micro-normal at H = 20 mm/luma -- twice the relief; skin or sandpaper? (115 sec 8)" },
     { id = "bump-ctl",  label = "  pore micro-normal CONTROL (H = 0) -- 93/93 BYTE-identical to the PREVIOUS default (...-t7hue1-ll); must be indistinguishable" },
+    -- handoff/117. The other four-fifths of the pore, plus the layer 72
+    -- forgot.  All five ride 115's albedo height field, all compute-side, all
+    -- SUN-frame, all on the SHIPPED DEFAULT (micro-ctl is byte-identical to
+    -- skin.set/bump in 93/93 modules -- that is the control).
+    -- KEPT 2026-09-04 and made the default: "micro looks great!".  Contract:
+    -- ser=class, shadowset=full-shadow, DIRECT SUN, close-up face at 0.3-1 m.
+    -- The five single-half rungs are still here to attribute a future verdict
+    -- (which half carries it was never separated).  Nothing here changes a NIGHT/local-light frame
+    -- (112 sec 12): under PT the raygens shade local lights themselves.
+    { id = "micro",     label = "ALL FIVE micro-surface halves on skin: pore occlusion + roughness + terminator + specular occlusion + coat energy -- KEPT 2026-09-04; identical bytes to the DEFAULT stack (117)" },
+    { id = "micro-occ", label = "  half 1/5 -- PORE OCCLUSION only: diffuse *= 1 - 0.35*cav, a pit shadowed by its own rim (117)" },
+    { id = "micro-rgh", label = "  half 2/5 -- PORE ROUGHNESS only: alpha *= 1 + 0.5*cav on the class-1 select; breaks one oil highlight into skin (115 sec 6.1)" },
+    { id = "micro-trm", label = "  half 3/5 -- SHADOW TERMINATOR only: Chiang 2019 softening of 115's own shading-normal terminator; brightens, never darkens (117)" },
+    { id = "micro-gts", label = "  half 4/5 -- SPECULAR OCCLUSION only: Jimenez GTSO from AO, NoV and alpha; 38 A5 without the bent normal (117)" },
+    { id = "micro-cns", label = "  half 5/5 -- COAT ENERGY only: diffuse *= 1 - F, the (1-F) that 72's oil layer never took out; the anti-wet-plastic term (117)" },
+    { id = "micro-ctl", label = "  micro CONTROL (all five off) -- 93/93 BYTE-identical to the PREVIOUS default (...-ll-bump); must be indistinguishable" },
     -- handoff/105. Backlit translucency for EVERY thin surface: 101's sunward
     -- front-cull query with a class-0 rough-dielectric gate, STACKED on the
     -- cap6-glintdense default (ear glow bit-identical on skin, asserted).
@@ -767,6 +813,9 @@ local SKIN_LEVELS = {
     { id = "bda-ctl",      label = "BDA CONTROL (byte-identical to the cap6-glintdense default; control for the selector and the layer)" },
     { id = "bda-probe",    label = "DIAGNOSTIC (Stage 2b): skin GREEN = the layer's TLAS slot was read through a fixed-up 64-bit pointer, RED = it was not" },
     { id = "bda-rq-probe", label = "DIAGNOSTIC (Stage 2c): compute-side ray query straight up, 5cm-3m -- skin BLUE = hit, AMBER = miss, RED = the slot magic was wrong" },
+    { id = "bda-wprobe",   label = "DIAGNOSTIC (Stage 3a): the WIDENED slot -- skin GREEN = this pixel's word survived a frame in the layer's 128MB scratch, BLUE = it did not, AMBER = no scratch, RED = no fixup" },
+    { id = "bda-wprobe2",  label = "DIAGNOSTIC (Stage 3b): the widened slot, TWO words -- skin GREEN = this pixel's word is one frame old, CYAN = written again this frame, MAGENTA = two or more frames old, BLUE = not this pixel's word at all, AMBER = no scratch, RED = no fixup" },
+    { id = "bda-xprobe",   label = "DIAGNOSTIC (Stage 3b): CROSS-STAGE -- resolvers write, RAYGENS read. Tint GREEN = the raygen found the word this pixel's resolver left one frame ago, CYAN = same frame, MAGENTA = older, RED = a DIFFERENT pixel's word (the two grids disagree), untouched = nothing written there, AMBER = no scratch, BLUE = no fixup. Needs SER ON" },
     -- 55: G-U5 payload sentinel (diagnostic; read handoff/55 sec 4 BEFORE launching)
     { id = "sentinel",   label = "SENTINEL: injected-trace probe A -- magenta = trace runs" },
     { id = "sentinel-b", label = "SENTINEL-B: probe B (only if A dark) -- cyan = trace runs" },

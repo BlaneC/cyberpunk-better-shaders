@@ -320,7 +320,7 @@ def _pos_at(em, ctx, rows, co, coord_x, coord_y, depth_ld, lod, comp):
 
 
 def emit_bump(mod, cfg, D, ctx, alb, ncur, site_line, consts, uc, knobs,
-              ins_out, want_mag=False):
+              ins_out, want_mag=False, want_lum=False):
     """Emit the micro-normal at `site_line`.
 
     Returns dict(nb=[3 ids], valid, mag, refetched, n_ins).  Contract, all
@@ -449,8 +449,15 @@ def emit_bump(mod, cfg, D, ctx, alb, ncur, site_line, consts, uc, knobs,
         bx = em.E('OpFOrdLessThan', '%bool', q[0], j2)
         by = em.E('OpFOrdLessThan', '%bool', q[1], j2)
         valid = em.E('OpLogicalAnd', '%bool', bx, by)
+    lum = None
+    if want_lum:
+        # 117 rides the SAME height field: hand back the luma tap machinery so
+        # a caller can add the two taps a Laplacian needs without a second
+        # albedo chain.  Emitting nothing here keeps this byte-neutral.
+        lum = dict(L=[L0, L1, L2], fn=luma, em=em, cx=cx, cy=cy, step=step,
+                   band=(band if knobs['band'] else None))
     return dict(nb=nb, valid=valid, mag=mag, refetched=refetched, one=one,
-                n_ins=len(em.ins) - n0)
+                lum=lum, n_ins=len(em.ins) - n0)
 
 
 # ------------------------------------------------------------ tier: feature

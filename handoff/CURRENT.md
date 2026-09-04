@@ -1,4 +1,17 @@
-# CallistoSSS — current state (2026-09-04, after `115` bump was shot, kept — *"IT LOOKS INCREDIBLE"* — and made the default as `…-curv-t7hue1-ll-bump`)
+# CallistoSSS — current state (2026-09-04, after `117` micro was shot, kept — *"micro looks great!"* — and made the default as `…-curv-t7hue1-ll-bump-micro`)
+
+**2026-09-04 — `117` SHOT, KEPT, AND MADE THE DEFAULT.** User verbatim:
+*"micro looks great!"* The default is now
+`gi-50b-…-curv-t7hue1-ll-bump-micro` (content sha `a581bc58f3c1eddc`).
+Five compute-side halves on `115`'s albedo height field: pore occlusion
+(`occ`), pore roughness (`rough` — `115` §6), Chiang's shadow-terminator fix
+for the artifact `115` itself introduces (`term`), Jimenez specular occlusion
+(`gtso` — `38` A5 unblocked) and the `(1−F)` `72`'s oil coat never took out
+(`cons`). The previous default `…-ll-bump` is `micro-ctl` by bytes.
+**Open:** which half carries it (the five single-half rungs are parked and
+unshot), the lip-line/eyebrow edge check, and the cost — `117` §9/§10.
+The obvious next win is a `-oilhi` rung: `72`'s coat was tuned against a BRDF
+that did not remove `(1−F)`, so its strength is now conservative (`117` §10.2).
 
 One page. Everything here points at the document with the evidence. The rule
 this project keeps relearning: *built*, *loaded* and *swapped* are not
@@ -12,6 +25,85 @@ thing I've tested so far. IT LOOKS INCREDIBLE."* The previous default
 `…-t7hue1-ll` (= `bump-ctl`) is the A/B 'before'. Same contract:
 `ser=class`, `shadowset=full-shadow`. Still unread: `bump-vis`, `bump-hi`,
 the lip-line edge check. `115` §11.
+
+**2026-09-04 — `116` §12: THE GRIDS AGREE. STAGE 3b IS UNBLOCKED.** `bda-xprobe`
+SHOT: cyan on the skin silhouette and nothing else (452 022 px), **zero RED**
+(the 32 red pixels in the frame are the second character's actual respirator).
+A raygen's image-write coordinate and a compute resolver's image-write
+coordinate are the same pixel — the one fact Stage 3b needed and nothing had
+proved. The pink covering everything else is the TRAIL: nothing clears the
+scratch, so every pixel that was ever skin keeps its word and its age grows —
+77 852 more pixels each matching its OWN identity, i.e. more of the same
+evidence. Latency: same word-6 epoch, which does not convert to a frame count
+(word 6 advances at TLAS-refresh rate). **Next: the pore feature itself**, which
+must carry a validity key + a shader-owned epoch beside the normal — the pink
+trail is exactly the smear a keyless read would produce. `116` §12.
+
+**2026-09-04 — `116` §11 BUILT, GATED 10/10, SELF-TESTED 93/93, VERIFIED FROM
+SHIPPED BYTES, PARKED, INSTALLED, SELECTABLE — UNSHOT: `bda-xprobe`, the
+CROSS-STAGE rung** (content `c1fbf29b151ca333`). The first rung that patches
+the RAYGENS: 76 compute resolvers write each skin pixel's identity and the
+frame and paint NOTHING; all 16 raygens read at their own write coordinate,
+store nothing, and tint. GREEN/CYAN on the skin silhouette = a raygen's
+`LaunchId`-derived write coordinate and a resolver's are the same pixel, which
+is the one thing Stage 3b needs and nothing yet proved; RED or a displaced blob
+measures the disagreement. Four new decoys (`paints`, `rgstore`, `xoffset`,
+`noguard`) keep it honest. **`ser=class` is now load-bearing** — the 12 PT
+raygens declare SER and the layer's SER gate runs before the marker. Contract
+and pre-registered table: `116` §11.7. Nothing committed.
+
+**2026-09-04 — `116` SHOT THREE TIMES. STAGE 3a IS PROVEN AND CLEAN.** The
+128 MiB fix landed: *"consistently cyan now… no flickering blue at all in
+shadow"*, uniform over both characters, top of screen to bottom. Shader bytes
+never changed. The trunk is open — a layer-owned buffer reached from shader code
+by raw device address, per-pixel, persistent across frames and dispatches,
+host-readable while the game runs. `116` §10. **Next and unbuilt: Stage 3b**,
+whose first step is a probe, not a feature — nothing yet proves a raygen's
+`LaunchId` and a resolver's image-write coordinate are the same pixel grid, and
+that rung would be the first to patch the raygens at all. `116` §10.1.
+
+**2026-09-04 — the second `116` shot:** `bda-wprobe2`
+painted **cyan** across the middle of every character, brief **green**, and
+**magenta** the moment the world stopped executing on an alt-tab. All three hues
+require a shader to have read back a word another dispatch wrote through a raw
+device address with no descriptor: **per-pixel, persistent, correctly-addressed
+shader-visible storage works in Cyberpunk.** The blue bands were an index bug,
+not a channel failure — `(y*4096 + x)` masked to a 32 MiB scratch is injective
+only for `y < 512`, which predicts blue outside rows 208..511 at 1280x720, i.e.
+exactly the reported top/bottom thirds. Fixed layer-side (scratch default now
+128 MiB); **the shader bytes did not change**. Gates 10/10, self-test 88/88,
+re-parked, installed (`79de001e…`). `116` §9. Next: Stage 3b — a raygen reading
+what a resolver wrote, i.e. pores under local lights at night (`115` §10.3).
+
+**2026-09-04 — `116` first shot: the clock, not the channel.** `bda-wprobe` ran (12:10, sunlit exterior, PT). The layer's own host-side
+read of the scratch climbed 0 → 336 → … → **1281 of 4096 sampled words**, which
+only rises if GPU shaders wrote words the CPU can read: **a shader-written,
+layer-readable buffer reached with no descriptor is settled**. The screen
+flickered green/blue and went steady blue in photo mode because `wprobe`
+compares against slot word 6, which the layer writes at command-RECORD time and
+the shader reads at EXECUTE time — 1–3 frames apart, and frozen while photo mode
+pauses the world. `116` §8 has the full reading. **UNSHOT: `bda-wprobe2`** (sha
+`15bbc98bf6ce10c9`, gated 10/10, self-test 88/88, parked, installed,
+selectable), which splits the two claims: a frame-free identity word decides
+GREEN-vs-BLUE (persistence and addressing), a second word decides the hue
+(GREEN = 1 frame old, CYAN = 0, MAGENTA = ≥2). Any non-blue hue in photo mode
+retires the ambiguity. Contract and pre-registered table: `116` §8.1.
+
+**2026-09-04 — `116` BUILT, GATED 10/10, SELF-TESTED ON THE DRIVER (85/85),
+VERIFIED FROM SHIPPED BYTES, PARKED, INSTALLED, SELECTABLE — UNSHOT: the BDA
+slot WIDENED into a shader-writable 32 MiB scratch (`bda-wprobe`, sha
+`6cc4482d174dae59`).** Slot words 8/9/10 now carry the address and size of a
+layer-owned buffer that the SHADER writes and nothing clears. `selftest_bda.sh`
+case G, on the real driver with no game: a dispatch read the address out of the
+slot, wrote a word, and **the NEXT dispatch read it back** — two submits, no
+descriptor — while the layer read the same write from the host side (`w0`=2, a
+number no CPU wrote). Case H proves the guarded path when there is no scratch.
+The in-game rung paints skin GREEN when this pixel's word survived a frame,
+BLUE when it did not, AMBER with no scratch, RED with no fixup; frame is a
+SUNLIT face (compute side = direct sun only under PT). Contract and the
+pre-registered table: `116` §5. This is the trunk for `115` §10.3 (pores at
+night) and for anything that needs a raygen and a resolver to share a per-pixel
+word. Nothing committed.
 
 **2026-09-04 — `115` BUILT, GATED (gates 0–10), VERIFIED FROM SHIPPED BYTES,
 PARKED, INSTALLED, SELECTABLE: an albedo-derived

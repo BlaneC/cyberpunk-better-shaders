@@ -107,6 +107,20 @@ Pores are not in the BVH (`33`, `38` §0d), so no ray budget creates them.
    transmission into one class-gated network. No training-over-assets
    problem. DP4a probe first.
 
+## 5. Amendment, 2026-09-04 — the trunk this board was missing
+
+Everything above is a leaf. The thing that moves the *constraints* is the BDA
+slot, and it was sitting unspent: `103` used 8 of its 64 words as a read-only
+mailbox. `116` widens it — words 8/9/10 now point at a 32 MiB buffer the
+**shader writes**, proven end to end on the driver (`selftest_bda.sh` 85/85,
+case G: one dispatch wrote, the next read it back, and the layer saw the write
+from the host side). That deletes four blockers on this board at once: the
+"compute features only show in direct sun" rule (a resolver can now *produce*
+for a raygen to consume), `115` §10.3's missing raygen-side neighbour detector,
+the dead U2/U3 G-buffer channel (you no longer need one — you own 64 bits per
+pixel), and the absence of any temporal history. `bda-wprobe` is built and
+unshot; Stage 3b, a raygen reading what a resolver wrote, is the next build.
+
 ## 5. The order I would take
 
 1. `115` is shot and kept. Next launch: `bump-vis`, `bump-hi`, the DLSS
